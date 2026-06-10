@@ -1,0 +1,5 @@
+{
+  "project_id": "noosphere",
+  "genome_object_id": "demo-genome-default",
+  "relayer_url": "http://localhost:3001"
+}

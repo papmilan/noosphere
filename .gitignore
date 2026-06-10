@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Runtime state
+demo_blobs/
+project_registry.json
+*.tmp
+
+# Move build artifacts
+build/
+
+# Test temp dirs
+tests/.tmp-*
+
+# Environment secrets
+.env
+.env.local
+.env.*.local
+
+# macOS
+.DS_Store
+._*
+
+# Claude Flow runtime
+.claude-flow/

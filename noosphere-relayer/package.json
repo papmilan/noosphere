@@ -1,0 +1,25 @@
+{
+  "name": "noosphere-relayer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Walrus and Sui testnet relayer for Noosphere",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "demo": "DEMO_MODE=true node index.js",
+    "dev": "node --watch index.js",
+    "test": "node --experimental-vm-modules --test tests/relayer.test.js",
+    "check": "node --check index.js && node --check scorer.js && node --check walrus.js && node --check sui.js && node --check registry.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.1",
+    "@mysten/sui": "2.17.0",
+    "@mysten/walrus": "1.1.7",
+    "dotenv": "17.4.2",
+    "express": "5.2.1"
+  }
+}

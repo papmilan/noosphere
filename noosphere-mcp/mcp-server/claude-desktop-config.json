@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "noosphere": {
+      "command": "node",
+      "args": [
+        "/Volumes/T7/agent reputation genome/noosphere-mcp/mcp-server/index.js",
+        "--stdio"
+      ],
+      "description": "Noosphere — shared mind for AI agents"
+    }
+  }
+}

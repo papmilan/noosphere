@@ -1,0 +1,45 @@
+{
+  "version": "1.0.0",
+  "model": "claude-haiku-4-5-20251001",
+  "dimensions": [
+    {
+      "name": "accuracy",
+      "weight": 0.25,
+      "range": [
+        -2,
+        2
+      ]
+    },
+    {
+      "name": "completeness",
+      "weight": 0.25,
+      "range": [
+        -2,
+        2
+      ]
+    },
+    {
+      "name": "code_quality",
+      "weight": 0.25,
+      "range": [
+        -2,
+        2
+      ]
+    },
+    {
+      "name": "reasoning",
+      "weight": 0.25,
+      "range": [
+        -2,
+        2
+      ]
+    }
+  ],
+  "prompt_hash": "b4274f3a894114661b494666c34a9a32c48668da4e2364415fc0986f06072cdd",
+  "scale": {
+    "min": -10,
+    "max": 10,
+    "neutral": 0
+  },
+  "changelog": "Initial scoring policy"
+}
