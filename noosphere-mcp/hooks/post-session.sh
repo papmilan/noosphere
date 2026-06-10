@@ -9,16 +9,13 @@ CONFIG_FILE="$PROJECT_DIR/.noosphere.json"
 
 if [ -f "$CONFIG_FILE" ]; then
   PROJECT_ID=$(jq -r '.project_id // empty' "$CONFIG_FILE" 2>/dev/null)
-  GENOME_OBJECT_ID=$(jq -r '.genome_object_id // empty' "$CONFIG_FILE" 2>/dev/null)
   RELAYER_URL=$(jq -r '.relayer_url // empty' "$CONFIG_FILE" 2>/dev/null)
 else
   PROJECT_ID=""
-  GENOME_OBJECT_ID=""
   RELAYER_URL=""
 fi
 
 PROJECT_ID=${PROJECT_ID:-$(basename "$PROJECT_DIR")}
-GENOME_OBJECT_ID=${GENOME_OBJECT_ID:-demo-genome-default}
 RELAYER_URL=${RELAYER_URL:-${NOOSPHERE_RELAYER_URL:-http://localhost:3001}}
 
 SESSION_ID=$(printf '%s' "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)
@@ -71,13 +68,11 @@ fi
 
 PAYLOAD=$(jq -n \
   --arg project_id "$PROJECT_ID" \
-  --arg genome_object_id "$GENOME_OBJECT_ID" \
   --arg content "$SUMMARY" \
   --arg session_id "$SESSION_ID" \
   '{
     project_id: $project_id,
     agent_id: "claude-code",
-    genome_object_id: $genome_object_id,
     action_type: "session",
     content: $content,
     session_id: $session_id,

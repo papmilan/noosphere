@@ -8,8 +8,7 @@
         "--staging",
         "--namespace",
         "noosphere-noosphere"
-      ],
-      "description": "Official Walrus Memory MCP configured for the Noosphere namespace"
+      ]
     }
   }
 }

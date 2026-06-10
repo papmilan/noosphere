@@ -23,3 +23,8 @@ tests/.tmp-*
 
 # Claude Flow runtime
 .claude-flow/
+.noosphere/context.md
+.noosphere/state.json
+.noosphere/*.tmp
+noosphere-relayer/.noosphere-local-memory.json
+.noosphere/journal.md

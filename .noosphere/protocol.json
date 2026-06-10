@@ -1,0 +1,17 @@
+{
+  "protocol": "noosphere-continuity",
+  "version": "1.0",
+  "project_id": "noosphere",
+  "namespace": "noosphere-noosphere",
+  "files": {
+    "context": ".noosphere/context.md",
+    "journal": ".noosphere/journal.md",
+    "instructions": "NOOSPHERE.md"
+  },
+  "interfaces": [
+    "filesystem",
+    "cli",
+    "http",
+    "mcp"
+  ]
+}

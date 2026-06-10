@@ -6,26 +6,20 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  addProjectAction,
-  getActionReceipt,
-  getProjectActionReceipts,
-  getProjectBlobIds,
-  getProjectDemoAgents,
-  getProjectGenomeIds,
-} from './registry.js';
-import { addDecision, getGenomeScores } from './sui.js';
-import { downloadBlob, STORAGE_EPOCHS, uploadBlob } from './walrus.js';
+  memoryStore,
+  parseMemory,
+  serializeMemory,
+} from './memory.js';
 import {
   getScoringPolicy,
   neutralScore,
   scoreAction,
-  signScoreResult,
 } from './scorer.js';
 
 export const app = express();
 const port = Number(process.env.PORT || 3001);
-const demoMode = process.env.DEMO_MODE === 'true';
 const directory = path.dirname(fileURLToPath(import.meta.url));
+const receipts = new Map();
 
 app.use((req, res, next) => {
   res.set({
@@ -42,16 +36,17 @@ app.use((req, res, next) => {
 
   next();
 });
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(directory, 'public')));
 
-app.get('/health', (_req, res) => {
+app.get('/health', async (_req, res) => {
+  const memory = await memoryStore.health();
   res.json({
-    success: true,
-    network: demoMode ? 'local demo' : 'Sui testnet',
-    demo_mode: demoMode,
+    success: memory.ready,
+    service: 'Noosphere',
+    memory,
     scorer_configured: Boolean(process.env.ANTHROPIC_API_KEY),
-    scorer_key_configured: Boolean(process.env.SCORER_PRIVATE_KEY),
+    scoring_mode: process.env.SCORING_MODE || 'private',
   });
 });
 
@@ -59,43 +54,38 @@ app.get('/.well-known/noosphere.json', (req, res) => {
   const baseUrl = getBaseUrl(req);
   res.json({
     name: 'Noosphere',
-    version: '1.0.0',
+    version: '2.0.0',
     description:
-      'The shared mind for AI agents. Persistent memory and reputation layer for any AI agent, stored on Walrus and verified on Sui.',
-    protocol: 'https',
-    authentication: demoMode
-      ? { type: 'none', mode: 'local-demo' }
-      : { type: 'relayer-managed-sui-signer' },
+      'A thin, vendor-neutral agent memory and evaluation layer built on Walrus Memory.',
+    architecture: {
+      memory: 'Official Walrus Memory managed relayer',
+      encryption: 'Seal encryption managed by Walrus Memory',
+      search: 'Walrus Memory semantic recall',
+      access_control: 'Walrus Memory account and delegate permissions',
+      custom_smart_contract: false,
+    },
     endpoints: {
-      submit_action: `${baseUrl}/v1/actions`,
-      project_context: `${baseUrl}/v1/projects/{project_id}/context`,
-      project_agents: `${baseUrl}/v1/projects/{project_id}/agents`,
+      remember: `${baseUrl}/v1/actions`,
+      recall: `${baseUrl}/v1/projects/{project_id}/recall`,
+      context: `${baseUrl}/v1/projects/{project_id}/context`,
+      bootstrap: `${baseUrl}/v1/projects/{project_id}/bootstrap`,
       scoring_policy: `${baseUrl}/scoring-policy`,
       openapi: `${baseUrl}/openapi.json`,
     },
-    capabilities: [
-      'shared-project-memory',
-      'agent-reputation',
-      'immutable-ai-ratings',
-      'cross-agent-comparison',
-      'walrus-blob-storage',
-      'sui-testnet',
-      'plain-text-context',
-    ],
-    agent_compatibility: {
-      agent_id: 'Any non-empty string',
-      provider: 'Optional provider name',
-      model: 'Optional model name',
-      client: 'Optional IDE, CLI, framework, or runtime name',
-      metadata: 'Optional JSON object',
+    universal_interfaces: {
+      filesystem: ['.noosphere/context.md', '.noosphere/journal.md'],
+      cli: ['context', 'recall', 'remember', 'journal', 'protocol'],
+      http: true,
+      mcp: true,
     },
-    scoring: {
-      source: 'Noosphere scorer only; caller-provided scores are ignored',
-      model: 'claude-haiku-4-5-20251001',
-      range: '-10 to +10',
-      policy_version: '1.0.0',
-      scorer_version: 'noosphere-scorer-v1.0',
-      on_chain_event: 'noosphere::noosphere::DecisionScored',
+    mcp: {
+      package: '@mysten-incubation/memwal-mcp',
+      tools: [
+        'memwal_remember',
+        'memwal_recall',
+        'memwal_analyze',
+        'memwal_restore',
+      ],
     },
   });
 });
@@ -113,189 +103,192 @@ app.post(['/action', '/v1/actions'], async (req, res, next) => {
     const action = validateAction(req.body);
     const actionId =
       requireOptionalString(req.get('Idempotency-Key')) || randomUUID();
-    const previousReceipt = await getActionReceipt(
-      action.project_id,
-      actionId,
-    );
-    if (previousReceipt) {
-      res.status(200).json({
-        success: true,
-        action_id: actionId,
-        blob_id: previousReceipt.blob_id,
-        tx_digest: previousReceipt.tx_digest,
-        score_delta: previousReceipt.score_delta,
-        score_breakdown: previousReceipt.score_breakdown,
-        score_reasoning: previousReceipt.score_reasoning,
-        score_automatic: previousReceipt.score_automatic,
-        score_status: previousReceipt.score_status,
-        scorer_model: previousReceipt.scorer_model,
-        scorer_version: previousReceipt.scorer_version,
-        scored_by: previousReceipt.scored_by,
-        score_signature: previousReceipt.score_signature,
-        scoring_policy_version: previousReceipt.scoring_policy_version,
-        deduplicated: true,
-      });
+    const receiptKey = `${action.project_id}:${actionId}`;
+
+    if (receipts.has(receiptKey)) {
+      res.json({ ...receipts.get(receiptKey), deduplicated: true });
       return;
     }
 
-    const timestamp = Date.now();
+    const timestamp = new Date().toISOString();
     const scoring = await resolveActionScore({ ...action, timestamp });
-    const finalScoreDelta = scoring.score_delta;
-
-    const agentAction = {
-      schema_version: '1.0',
+    const record = {
+      schema: 'noosphere.agent-memory.v2',
       action_id: actionId,
       project_id: action.project_id,
       agent_id: action.agent_id,
-      genome_object_id: action.genome_object_id,
+      action_type: action.action_type,
+      content: action.content,
+      session_id: action.session_id,
       provider: action.provider,
       model: action.model,
       client: action.client,
-      session_id: action.session_id,
-      action_type: action.action_type,
-      content: action.content,
-      timestamp,
-      stored_at: new Date(timestamp).toISOString(),
-      storage_epochs: STORAGE_EPOCHS,
-      score_delta: finalScoreDelta,
-      score_reasoning: scoring.reasoning,
-      score_breakdown: scoring.dimensions,
-      score_automatic: scoring.automatic,
-      score_status: scoring.score_status,
-      scorer_model: scoring.scorer_model,
-      scorer_version: scoring.scorer_version,
-      scored_by: scoring.scored_by,
-      score_signature: scoring.score_signature,
-      scoring_policy_version: scoring.scoring_policy_version,
       metadata: action.metadata,
+      timestamp,
+      evaluation: {
+        score: scoring.score_delta,
+        reasoning: scoring.reasoning,
+        dimensions: scoring.dimensions,
+        status: scoring.score_status,
+        model: scoring.scorer_model,
+        policy_version: scoring.scoring_policy_version,
+      },
     };
 
     console.log(
-      `[action] Uploading ${agentAction.agent_id}/${agentAction.action_type} for ${agentAction.project_id}`,
+      `[memory] Remembering ${record.agent_id}/${record.action_type} in ${record.project_id}`,
     );
-
-    const bytes = new TextEncoder().encode(JSON.stringify(agentAction));
-    const blobId = await uploadBlob(bytes);
-    const isPositive = finalScoreDelta >= 0;
-    const scoreDelta = Math.abs(finalScoreDelta);
-
-    console.log(`[action] Blob ${blobId} uploaded; updating genome`);
-    let txDigest;
-    try {
-      txDigest = await addDecision({
-        genomeObjectId: action.genome_object_id,
-        blobId,
-        scoreDelta,
-        isPositive,
-      });
-    } catch (suiError) {
-      console.error(
-        `[action] Sui tx failed after blob upload — blob ${blobId} is orphaned on Walrus`,
-        suiError,
-      );
-      throw suiError;
-    }
-
-    await addProjectAction(action.project_id, {
-      blobId,
-      genomeObjectId: action.genome_object_id,
-      agentId: action.agent_id,
-      provider: action.provider,
-      model: action.model,
-      client: action.client,
-      scoreDelta: finalScoreDelta,
-      actionId,
-      txDigest,
-      scoreBreakdown: scoring.dimensions,
-      scoreReasoning: scoring.reasoning,
-      scoreAutomatic: scoring.automatic,
-      scoreStatus: scoring.score_status,
-      scorerModel: scoring.scorer_model,
-      scorerVersion: scoring.scorer_version,
-      scoredBy: scoring.scored_by,
-      scoreSignature: scoring.score_signature,
-      scoringPolicyVersion: scoring.scoring_policy_version,
-    });
-
-    console.log(`[action] Completed in transaction ${txDigest}`);
-    res.status(201).json({
+    const stored = await memoryStore.remember(
+      record.project_id,
+      serializeMemory(record),
+    );
+    const response = {
       success: true,
-      action_id: agentAction.action_id,
-      blob_id: blobId,
-      tx_digest: txDigest,
-      score_delta: finalScoreDelta,
+      action_id: actionId,
+      blob_id: stored.blob_id,
+      memory_id: stored.id,
+      namespace: stored.namespace,
+      score_delta: scoring.score_delta,
       score_breakdown: scoring.dimensions,
       score_reasoning: scoring.reasoning,
-      score_automatic: scoring.automatic,
       score_status: scoring.score_status,
       scorer_model: scoring.scorer_model,
-      scorer_version: scoring.scorer_version,
-      scored_by: scoring.scored_by,
-      score_signature: scoring.score_signature,
       scoring_policy_version: scoring.scoring_policy_version,
-    });
+      privacy: {
+        scoring_mode: process.env.SCORING_MODE || 'private',
+        remote_evaluation:
+          process.env.SCORING_MODE === 'remote' &&
+          scoring.score_status === 'scored',
+      },
+      storage: 'walrus-memory',
+    };
+
+    receipts.set(receiptKey, response);
+    res.status(201).json(response);
   } catch (error) {
     next(error);
   }
 });
 
-app.get(
-  ['/context/:project_id', '/v1/projects/:project_id/context'],
+app.all(
+  ['/recall/:project_id', '/v1/projects/:project_id/recall'],
   async (req, res, next) => {
-  try {
-    const projectId = requireNonEmptyString(
-      req.params.project_id,
-      'project_id',
-    );
-    const { actions, failedBlobIds, context } =
-      await loadProjectData(projectId);
+    try {
+      const projectId = requireNonEmptyString(
+        req.params.project_id,
+        'project_id',
+      );
+      const query = requireNonEmptyString(
+        req.method === 'GET' ? req.query.q : req.body?.query,
+        'query',
+      );
+      const limit = parseLimit(
+        req.method === 'GET' ? req.query.limit : req.body?.limit,
+      );
+      const recalled = await recallProject(projectId, query, limit);
 
-    if (
-      req.query.format === 'text' ||
-      req.accepts(['json', 'text']) === 'text'
-    ) {
-      res.type('text/plain').send(context);
-      return;
+      res.json({
+        success: true,
+        project_id: projectId,
+        query,
+        retrieval: 'semantic',
+        total: recalled.length,
+        memories: recalled,
+      });
+    } catch (error) {
+      next(error);
     }
-
-    res.json({
-      success: true,
-      project_id: projectId,
-      context,
-      actions,
-      failed_blob_ids: failedBlobIds,
-    });
-  } catch (error) {
-    next(error);
-  }
   },
 );
 
 app.get(
+  '/v1/projects/:project_id/bootstrap',
+  async (req, res, next) => {
+    try {
+      const projectId = requireNonEmptyString(
+        req.params.project_id,
+        'project_id',
+      );
+      const query =
+        requireOptionalString(req.query.q) ||
+        'latest project state failures decisions tests blockers and next steps';
+      const actions = await recallProject(
+        projectId,
+        query,
+        parseLimit(req.query.limit, 30),
+      );
+      const context = formatProjectContext(projectId, query, actions);
+      res.type('text/plain').send(formatBootstrap(projectId, context));
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.get(
+  ['/context/:project_id', '/v1/projects/:project_id/context'],
+  async (req, res, next) => {
+    try {
+      const projectId = requireNonEmptyString(
+        req.params.project_id,
+        'project_id',
+      );
+      const query =
+        requireOptionalString(req.query.q) ||
+        'current project status decisions changes bugs findings and next steps';
+      const actions = await recallProject(
+        projectId,
+        query,
+        parseLimit(req.query.limit, 20),
+      );
+      const context = formatProjectContext(projectId, query, actions);
+
+      if (
+        req.query.format === 'text' ||
+        req.accepts(['json', 'text']) === 'text'
+      ) {
+        res.type('text/plain').send(context);
+        return;
+      }
+
+      res.json({
+        success: true,
+        project_id: projectId,
+        query,
+        retrieval: 'semantic',
+        context,
+        actions,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+// Compatibility endpoint. Results describe the recalled sample, not a global
+// or on-chain leaderboard.
+app.get(
   ['/agents/:project_id', '/v1/projects/:project_id/agents'],
   async (req, res, next) => {
-  try {
-    const projectId = requireNonEmptyString(
-      req.params.project_id,
-      'project_id',
-    );
-    const [genomeObjectIds, receipts] = await Promise.all([
-      getProjectGenomeIds(projectId),
-      getProjectActionReceipts(projectId),
-    ]);
-    const agents = demoMode
-      ? await getProjectDemoAgents(projectId)
-      : await getGenomeScores(genomeObjectIds);
-    const receiptActions = Object.values(receipts);
-
-    res.json({
-      success: true,
-      project_id: projectId,
-      agents: enrichAgentsWithRatings(agents, receiptActions),
-    });
-  } catch (error) {
-    next(error);
-  }
+    try {
+      const projectId = requireNonEmptyString(
+        req.params.project_id,
+        'project_id',
+      );
+      const actions = await recallProject(
+        projectId,
+        'agents contributors work decisions and sessions',
+        100,
+      );
+      res.json({
+        success: true,
+        project_id: projectId,
+        scope: 'semantic recall sample',
+        agents: summarizeAgents(actions),
+      });
+    } catch (error) {
+      next(error);
+    }
   },
 );
 
@@ -313,9 +306,64 @@ export let server = null;
 
 if (process.env.NODE_ENV !== 'test') {
   server = app.listen(port, () => {
-    console.log(`🧠 Noosphere is live on port ${port}`);
-    console.log(`Mode: ${demoMode ? 'local demo' : 'Sui testnet'}`);
+    console.log(`Noosphere is live on port ${port}`);
+    console.log(`Memory backend: ${memoryStore.mode}`);
   });
+}
+
+export async function resolveActionScore(
+  action,
+  {
+    contextLoader = loadRelevantContext,
+    scorer = scoreAction,
+  } = {},
+) {
+  try {
+    const { score_delta: _ignoredScore, ...scorableAction } = action;
+    const projectContext = await contextLoader(scorableAction);
+    return await scorer(scorableAction, projectContext);
+  } catch (error) {
+    console.warn('Scorer unavailable, using neutral score');
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('[scorer]', error.message);
+    }
+    return neutralScore();
+  }
+}
+
+async function loadRelevantContext(action) {
+  const memories = await recallProject(
+    action.project_id,
+    action.content,
+    8,
+  );
+  return formatProjectContext(action.project_id, action.content, memories);
+}
+
+async function recallProject(projectId, query, limit) {
+  const result = await memoryStore.recall(projectId, query, limit);
+  return result.results
+    .map((memory) => {
+      const record = parseMemory(memory.text) || {
+        schema: 'walrus-memory.external',
+        action_id: memory.blob_id,
+        project_id: projectId,
+        agent_id: 'mcp-agent',
+        action_type: 'memory',
+        content: memory.text,
+        timestamp: null,
+        evaluation: null,
+      };
+      return {
+        ...record,
+        blob_id: memory.blob_id,
+        distance: memory.distance,
+      };
+    })
+    .sort(
+      (a, b) =>
+        (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0),
+    );
 }
 
 function validateAction(body) {
@@ -326,13 +374,9 @@ function validateAction(body) {
   return {
     project_id: requireNonEmptyString(body.project_id, 'project_id'),
     agent_id: requireNonEmptyString(body.agent_id, 'agent_id'),
-    genome_object_id: requireNonEmptyString(
-      body.genome_object_id,
-      'genome_object_id',
-    ),
     action_type: requireNonEmptyString(body.action_type, 'action_type'),
     content: requireNonEmptyString(body.content, 'content'),
-    session_id: requireNonEmptyString(body.session_id, 'session_id'),
+    session_id: requireOptionalString(body.session_id) || randomUUID(),
     provider: requireOptionalString(body.provider),
     model: requireOptionalString(body.model),
     client: requireOptionalString(body.client),
@@ -340,46 +384,104 @@ function validateAction(body) {
   };
 }
 
-function formatProjectContext(projectId, actions) {
+function formatProjectContext(projectId, query, actions) {
   const lines = actions.map((action) => {
-    const timestamp = new Date(Number(action.timestamp)).toISOString();
-    return `[${timestamp}] ${action.agent_id} (${action.action_type}): ${action.content}`;
+    const score = action.evaluation?.score;
+    const scoreLabel = Number.isFinite(score) ? `, evaluation ${score}` : '';
+    return `[${action.timestamp || 'time not recorded'}] ${action.agent_id} (${action.action_type}${scoreLabel}): ${action.content}`;
   });
 
   return [
-    `--- PROJECT CONTEXT: ${projectId} ---`,
+    `--- NOOSPHERE CONTEXT: ${projectId} ---`,
+    `Semantic query: ${query}`,
     ...lines,
-    '--- END CONTEXT ---',
+    '--- END NOOSPHERE CONTEXT ---',
   ].join('\n');
+}
+
+function formatBootstrap(projectId, context) {
+  return [
+    '# NOOSPHERE UNIVERSAL AGENT BOOTSTRAP',
+    '',
+    `Project: ${projectId}`,
+    '',
+    'Protocol:',
+    '1. Read this context before changing the project.',
+    '2. Inspect the current working tree; another tool may have edited it.',
+    '3. Record concise findings, decisions, evidence, and next steps.',
+    '4. Do not expose hidden chain-of-thought. Provide a brief, verifiable rationale.',
+    '5. Before stopping, store a handoff through POST /v1/actions.',
+    '',
+    context,
+    '',
+  ].join('\n');
+}
+
+function summarizeAgents(actions) {
+  const agents = new Map();
+  for (const action of actions) {
+    const current = agents.get(action.agent_id) || {
+      agent_id: action.agent_id,
+      provider: action.provider,
+      model: action.model,
+      client: action.client,
+      recalled_actions: 0,
+      evaluated_actions: 0,
+      score_total: 0,
+      latest_activity: action.timestamp,
+    };
+    current.recalled_actions += 1;
+    if (action.evaluation?.status === 'scored') {
+      current.evaluated_actions += 1;
+      current.score_total += action.evaluation.score;
+    }
+    if (
+      (Date.parse(action.timestamp) || 0) >
+      (Date.parse(current.latest_activity) || 0)
+    ) {
+      current.latest_activity = action.timestamp;
+    }
+    agents.set(action.agent_id, current);
+  }
+
+  return [...agents.values()].map(({ score_total, ...agent }) => ({
+    ...agent,
+    average_evaluation:
+      agent.evaluated_actions > 0
+        ? score_total / agent.evaluated_actions
+        : null,
+  }));
+}
+
+function parseLimit(value, fallback = 10) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const limit = Number(value);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw badRequest('limit must be an integer from 1 to 100');
+  }
+  return limit;
 }
 
 function requireNonEmptyString(value, fieldName) {
   if (typeof value !== 'string' || value.trim() === '') {
     throw badRequest(`${fieldName} must be a non-empty string`);
   }
-
   return value.trim();
 }
 
 function requireOptionalString(value) {
-  if (value === undefined || value === null || value === '') {
-    return null;
-  }
+  if (value === undefined || value === null || value === '') return null;
   if (typeof value !== 'string') {
     throw badRequest('Optional identity fields must be strings');
   }
-
   return value.trim() || null;
 }
 
 function requireOptionalObject(value, fieldName) {
-  if (value === undefined || value === null) {
-    return {};
-  }
+  if (value === undefined || value === null) return {};
   if (typeof value !== 'object' || Array.isArray(value)) {
     throw badRequest(`${fieldName} must be a JSON object`);
   }
-
   return value;
 }
 
@@ -390,121 +492,78 @@ function badRequest(message) {
 }
 
 function getBaseUrl(req) {
-  const forwardedProto = req.get('x-forwarded-proto');
-  const protocol = forwardedProto || req.protocol;
-  return `${protocol}://${req.get('host')}`;
+  return `${req.get('x-forwarded-proto') || req.protocol}://${req.get('host')}`;
 }
 
 function buildOpenApiDocument(baseUrl) {
-  const actionSchema = {
-    type: 'object',
-    required: [
-      'project_id',
-      'agent_id',
-      'genome_object_id',
-      'action_type',
-      'content',
-      'session_id',
-    ],
-    properties: {
-      project_id: { type: 'string' },
-      agent_id: {
-        type: 'string',
-        description: 'Any stable agent identity; no vendor allowlist.',
-      },
-      genome_object_id: { type: 'string' },
-      action_type: { type: 'string' },
-      content: { type: 'string' },
-      session_id: { type: 'string' },
-      provider: { type: 'string' },
-      model: { type: 'string' },
-      client: { type: 'string' },
-      metadata: {
-        type: 'object',
-        additionalProperties: true,
-      },
-    },
-  };
-
   return {
     openapi: '3.1.0',
     info: {
       title: 'Noosphere API',
-      version: '1.0.0',
+      version: '2.0.0',
       description:
-        'Vendor-neutral API for persistent AI agent memory and reputation.',
+        'Thin agent-memory API backed by the official Walrus Memory service.',
     },
     servers: [{ url: baseUrl }],
     paths: {
       '/v1/actions': {
         post: {
-          operationId: 'submitAgentAction',
-          summary: 'Store an agent action and update its genome',
-          parameters: [
-            {
-              name: 'Idempotency-Key',
-              in: 'header',
-              required: false,
-              schema: { type: 'string' },
-            },
-          ],
+          operationId: 'rememberAgentAction',
+          summary: 'Evaluate and remember an agent action',
           requestBody: {
             required: true,
             content: {
-              'application/json': { schema: actionSchema },
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: [
+                    'project_id',
+                    'agent_id',
+                    'action_type',
+                    'content',
+                  ],
+                  properties: {
+                    project_id: { type: 'string' },
+                    agent_id: { type: 'string' },
+                    action_type: { type: 'string' },
+                    content: { type: 'string' },
+                    session_id: { type: 'string' },
+                    provider: { type: 'string' },
+                    model: { type: 'string' },
+                    client: { type: 'string' },
+                    metadata: { type: 'object' },
+                  },
+                },
+              },
             },
           },
           responses: {
-            201: { description: 'Action stored and reputation updated' },
-            400: { description: 'Invalid action' },
+            201: { description: 'Memory stored through Walrus Memory' },
           },
+        },
+      },
+      '/v1/projects/{project_id}/recall': {
+        post: {
+          operationId: 'recallProjectMemory',
+          summary: 'Semantically recall project memories',
+          responses: { 200: { description: 'Relevant memories' } },
         },
       },
       '/v1/projects/{project_id}/context': {
         get: {
           operationId: 'getProjectContext',
-          summary: 'Get shared project memory',
-          parameters: [
-            {
-              name: 'project_id',
-              in: 'path',
-              required: true,
-              schema: { type: 'string' },
-            },
-            {
-              name: 'format',
-              in: 'query',
-              required: false,
-              schema: { type: 'string', enum: ['json', 'text'] },
-            },
-          ],
-          responses: {
-            200: {
-              description: 'Prompt-ready context and raw actions',
-              content: {
-                'application/json': {},
-                'text/plain': {},
-              },
-            },
-          },
+          summary: 'Get prompt-ready semantic project context',
+          responses: { 200: { description: 'Prompt-ready context' } },
         },
       },
-      '/v1/projects/{project_id}/agents': {
+      '/v1/projects/{project_id}/bootstrap': {
         get: {
-          operationId: 'getProjectAgents',
-          summary: 'Get project agent genomes and current scores',
-          parameters: [
-            {
-              name: 'project_id',
-              in: 'path',
-              required: true,
-              schema: { type: 'string' },
-            },
-          ],
+          operationId: 'bootstrapAnyAgent',
+          summary: 'Get universal instructions and project context',
           responses: {
             200: {
               description:
-                'Agent reputation plus verified average output ratings',
+                'Plain-text bootstrap compatible with any HTTP client',
             },
           },
         },
@@ -512,117 +571,10 @@ function buildOpenApiDocument(baseUrl) {
       '/scoring-policy': {
         get: {
           operationId: 'getScoringPolicy',
-          summary: 'Get the active public scoring policy',
-          responses: {
-            200: {
-              description: 'Versioned policy and verified prompt hash',
-            },
-          },
+          summary: 'Get the transparent evaluation policy',
+          responses: { 200: { description: 'Versioned scoring policy' } },
         },
       },
     },
-  };
-}
-
-function enrichAgentsWithRatings(agents, actions) {
-  return agents
-    .map((agent) => {
-      const ratings = actions
-        .filter(isVerifiedRating)
-        .filter(
-          (action) =>
-            action.genome_object_id === agent.genome_object_id ||
-            (!action.genome_object_id &&
-              action.agent_id === agent.agent_name),
-        )
-        .map((action) => Number(action.score_delta));
-      const ratingTotal = ratings.reduce((total, score) => total + score, 0);
-
-      return {
-        ...agent,
-        average_rating:
-          ratings.length > 0 ? ratingTotal / ratings.length : null,
-        verified_rating_count: ratings.length,
-      };
-    })
-    .sort(
-      (a, b) =>
-        (b.average_rating ?? -Infinity) - (a.average_rating ?? -Infinity) ||
-        (b.reputation_score ?? 0) - (a.reputation_score ?? 0),
-    );
-}
-
-function isVerifiedRating(action) {
-  if (action.score_status) {
-    return action.score_status === 'scored';
-  }
-
-  return (
-    action.score_automatic === true &&
-    !String(action.score_reasoning || '').includes('unavailable')
-  );
-}
-
-async function loadProjectContext(projectId) {
-  const { context } = await loadProjectData(projectId);
-  return context;
-}
-
-export async function resolveActionScore(
-  action,
-  {
-    contextLoader = loadProjectContext,
-    scorer = scoreAction,
-  } = {},
-) {
-  try {
-    const projectContext = await contextLoader(action.project_id);
-    const { score_delta: _ignoredScoreDelta, ...scorableAction } = action;
-    return await scorer(scorableAction, projectContext);
-  } catch (error) {
-    console.warn('Scorer unavailable, using neutral score');
-    if (process.env.NODE_ENV === 'development') {
-      console.warn('[scorer]', error.message);
-    }
-    return signScoreResult(neutralScore(), action);
-  }
-}
-
-async function loadProjectData(projectId) {
-  const [blobIds, receipts] = await Promise.all([
-    getProjectBlobIds(projectId),
-    getProjectActionReceipts(projectId),
-  ]);
-  console.log(`[context] Loading ${blobIds.length} blobs for ${projectId}`);
-  const results = await Promise.allSettled(
-    blobIds.map(async (blobId) => {
-      const bytes = await downloadBlob(blobId);
-      const action = JSON.parse(new TextDecoder().decode(bytes));
-      const receipt = receipts[action.action_id] || {};
-      return {
-        ...action,
-        blob_id: blobId,
-        tx_digest: receipt.tx_digest || null,
-      };
-    }),
-  );
-  const actions = [];
-  const failedBlobIds = [];
-
-  results.forEach((result, index) => {
-    if (result.status === 'fulfilled') {
-      actions.push(result.value);
-    } else {
-      const blobId = blobIds[index];
-      failedBlobIds.push(blobId);
-      console.error(`[context] Failed to read blob ${blobId}`, result.reason);
-    }
-  });
-  actions.sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
-
-  return {
-    actions,
-    failedBlobIds,
-    context: formatProjectContext(projectId, actions),
   };
 }

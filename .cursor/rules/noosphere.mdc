@@ -1,0 +1,10 @@
+---
+description: Load shared Noosphere memory before working
+alwaysApply: true
+---
+
+Read `.noosphere/context.md` before making changes. Inspect the working tree
+because another AI tool may have updated it. The continuity watcher stores
+settled workspace checkpoints automatically. Append concise findings,
+decisions, evidence, and next steps to `.noosphere/journal.md`. Do not write
+hidden chain-of-thought.

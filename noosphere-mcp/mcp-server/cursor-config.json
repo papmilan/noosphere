@@ -1,12 +1,15 @@
 {
   "mcpServers": {
     "noosphere": {
-      "command": "node",
+      "command": "npx",
       "args": [
-        "/Volumes/T7/agent reputation genome/noosphere-mcp/mcp-server/index.js",
-        "--stdio"
+        "-y",
+        "@mysten-incubation/memwal-mcp@0.0.4",
+        "--staging",
+        "--namespace",
+        "noosphere-noosphere"
       ],
-      "description": "Noosphere — shared mind for AI agents. Agent workflow: 1. session_start → always first, loads shared memory 2. ... do your work ... 3. session_end → always last, stores your summary"
+      "description": "Official Walrus Memory MCP configured for the Noosphere namespace"
     }
   }
 }

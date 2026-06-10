@@ -3,162 +3,231 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Noosphere</title>
+    <meta
+      name="description"
+      content="Noosphere is a thin shared-memory layer for AI agents, built on Walrus Memory."
+    />
+    <title>Noosphere — Shared memory for AI agents</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <header class="masthead">
       <a class="brand" href="/">Noosphere</a>
+      <nav>
+        <a href="#remember">Remember</a>
+        <a href="#recall">Recall</a>
+        <a href="#connect">Connect</a>
+      </nav>
       <div class="status" id="status">Connecting</div>
     </header>
 
     <main>
       <section class="hero">
-        <p class="folio">SUI OVERFLOW 2026 / WALRUS</p>
-        <h1>The shared mind for AI agents.</h1>
-        <p class="intro">
-          Any agent. Any provider. One shared memory.<br />
-          Stored on Walrus. Verified on Sui.
-        </p>
+        <p class="folio">WALRUS MEMORY / SUI OVERFLOW 2026</p>
+        <h1>Agents forget.<br />Projects should not.</h1>
+        <div class="hero-aside">
+          <p>
+            Noosphere gives every AI agent the same project memory. Store a
+            decision once, then recall it by meaning from any CLI, IDE, HTTP
+            client, agent framework, or MCP client.
+          </p>
+          <div class="architecture">
+            <span>No custom chain</span>
+            <span>No custom indexer</span>
+            <span>Official Walrus Memory</span>
+          </div>
+        </div>
       </section>
 
-      <section class="workspace">
-        <form id="action-form" class="action-form">
-          <div class="section-heading">
-            <span>01</span>
-            <h2>Record an action</h2>
-          </div>
+      <section class="aperture" id="remember">
+        <div class="mode-tabs" role="tablist" aria-label="Memory mode">
+          <button
+            class="mode-tab active"
+            id="remember-tab"
+            type="button"
+            role="tab"
+            aria-selected="true"
+          >
+            01 Remember
+          </button>
+          <button
+            class="mode-tab"
+            id="recall-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+          >
+            02 Recall
+          </button>
+        </div>
 
-          <div class="fields">
-            <label>
-              Project ID
-              <input name="project_id" value="noosphere" required />
-            </label>
-            <label>
-              Agent ID
-              <input
-                name="agent_id"
-                value="codex"
-                list="agent-suggestions"
-                placeholder="Any agent name"
-                required
-              />
-              <datalist id="agent-suggestions">
-                <option value="codex"></option>
-                <option value="claude"></option>
-                <option value="cursor"></option>
-                <option value="gpt"></option>
-                <option value="gemini"></option>
-                <option value="copilot"></option>
-                <option value="windsurf"></option>
-                <option value="aider"></option>
-              </datalist>
-            </label>
-            <label>
-              Genome object ID
-              <input name="genome_object_id" value="demo-genome-codex" required />
-            </label>
-            <label>
-              Session ID
-              <input name="session_id" value="local-demo" required />
-            </label>
-            <label>
-              Provider
-              <input name="provider" placeholder="Optional" />
-            </label>
-            <label>
-              Model
-              <input name="model" placeholder="Optional" />
-            </label>
-            <label>
-              Client or runtime
-              <input name="client" placeholder="IDE, CLI, framework, or app" />
-            </label>
-            <label>
-              Action type
-              <select name="action_type">
-                <option value="decision">Decision</option>
-                <option value="code">Code</option>
-                <option value="review">Review</option>
-                <option value="research">Research</option>
-              </select>
-            </label>
-            <label class="wide">
-              Agent output
+        <div class="aperture-body">
+          <form id="action-form" class="memory-form" data-panel="remember">
+            <div class="panel-copy">
+              <h2>Write to shared memory</h2>
+              <p>
+                Noosphere wraps the output in a portable record and sends it
+                to Walrus Memory for encrypted storage and semantic retrieval.
+                Remote AI evaluation is optional and off by default.
+              </p>
+            </div>
+
+            <div class="fields">
+              <label>
+                Project
+                <input name="project_id" value="noosphere" required />
+              </label>
+              <label>
+                Agent
+                <input
+                  name="agent_id"
+                  value="codex"
+                  placeholder="Any stable agent name"
+                  required
+                />
+              </label>
+              <label>
+                Action
+                <select name="action_type">
+                  <option value="decision">Decision</option>
+                  <option value="code">Code</option>
+                  <option value="review">Review</option>
+                  <option value="debug">Debug</option>
+                  <option value="research">Research</option>
+                  <option value="session">Session summary</option>
+                </select>
+              </label>
+              <label>
+                Model
+                <input name="model" placeholder="Optional" />
+              </label>
+              <label class="wide">
+                Agent output
+                <textarea
+                  name="content"
+                  rows="8"
+                  placeholder="Paste the decision, implementation summary, finding, or handoff that another agent should remember."
+                  required
+                ></textarea>
+              </label>
+            </div>
+
+            <button class="primary" type="submit" id="submit-button">
+              Remember this
+            </button>
+            <output id="result" class="result"></output>
+          </form>
+
+          <form id="recall-form" class="memory-form hidden" data-panel="recall">
+            <div class="panel-copy">
+              <h2>Recall by meaning</h2>
+              <p>
+                Ask for the work you need now. Walrus Memory retrieves
+                semantically relevant records instead of dumping an entire
+                project history into the prompt.
+              </p>
+            </div>
+
+            <label class="query-field">
+              What should the next agent know?
               <textarea
-                name="content"
-                rows="6"
-                placeholder="Enter the action or decision that should become shared project memory."
+                name="query"
+                rows="4"
+                placeholder="What changed in authentication, and what remains unresolved?"
                 required
               ></textarea>
             </label>
-          </div>
-
-          <button type="submit" id="submit-button">Store to Noosphere</button>
-          <output id="result" class="result"></output>
-        </form>
-
-        <aside class="agents-panel">
-          <div class="section-heading">
-            <span>02</span>
-            <h2>Agent leaderboard</h2>
-          </div>
-          <div id="agents" class="agents">
-            <p class="empty">No actions recorded for this project.</p>
-          </div>
-        </aside>
+            <button class="primary" type="submit" id="recall-button">
+              Recall memory
+            </button>
+          </form>
+        </div>
       </section>
 
-      <section class="ratings">
+      <section class="results" id="recall">
         <div class="section-heading">
           <span>03</span>
-          <h2>Immutable ratings</h2>
+          <div>
+            <h2>Relevant memory</h2>
+            <p id="result-description">
+              Run a semantic recall to see project memories here.
+            </p>
+          </div>
         </div>
-        <p class="section-intro">
-          Every output is scored by Noosphere, stored on Walrus, and anchored
-          to a Sui transaction. Agent owners cannot submit or edit ratings.
-        </p>
-        <div id="ratings" class="rating-ledger">
-          <p class="empty">No rated outputs for this project.</p>
+        <div id="memories" class="memory-list">
+          <p class="empty">No recall has been run.</p>
         </div>
       </section>
 
-      <section class="memory">
+      <section class="continuity">
         <div class="section-heading">
           <span>04</span>
-          <h2>Shared project context</h2>
-          <button class="secondary" id="copy-button" type="button">Copy context</button>
+          <div>
+            <h2>Switch tools without losing the thread</h2>
+            <p>
+              A local watcher checkpoints settled workspace changes and keeps
+              one context file refreshed for every agent. Raw source diffs
+              stay local unless you explicitly enable them.
+            </p>
+          </div>
         </div>
-        <pre id="context">Loading project context...</pre>
+        <div class="continuity-flow">
+          <article>
+            <strong>1</strong>
+            <h3>A tool changes the project</h3>
+            <p>Git state changes are detected after an eight-second pause.</p>
+          </article>
+          <article>
+            <strong>2</strong>
+            <h3>Noosphere checkpoints it</h3>
+            <p>File paths and diff statistics enter shared project memory.</p>
+          </article>
+          <article>
+            <strong>3</strong>
+            <h3>The next tool continues</h3>
+            <p>Any tool reads the refreshed filesystem or HTTP context.</p>
+          </article>
+        </div>
+        <pre><code>npm --prefix noosphere-mcp run continuity:init
+npm --prefix noosphere-mcp run continuity:watch</code></pre>
       </section>
 
-      <section class="integration">
+      <section class="connect" id="connect">
         <div class="section-heading">
           <span>05</span>
-          <h2>Connect any agent</h2>
-          <button class="secondary" id="copy-command-button" type="button">
-            Copy request
-          </button>
+          <div>
+            <h2>Connect any agent</h2>
+            <p>
+              Use the official Walrus Memory MCP server. No Noosphere-specific
+              protocol or local MCP service is required.
+            </p>
+          </div>
         </div>
-        <p>
-          The relayer exposes a vendor-neutral JSON API, OpenAPI schema, CORS,
-          and plain-text context. Any agent that can call HTTP can participate.
-        </p>
-        <pre id="integration-command"></pre>
+        <div class="connect-grid">
+          <article>
+            <h3>Any CLI, IDE, or agent framework</h3>
+            <pre><code>npx -y @mysten-incubation/memwal-mcp --staging --namespace noosphere-&lt;project&gt;</code></pre>
+          </article>
+          <article>
+            <h3>HTTP compatibility API</h3>
+            <pre id="integration-command"></pre>
+          </article>
+        </div>
         <div class="links">
-          <a href="/.well-known/noosphere.json" target="_blank">Discovery</a>
-          <a href="/openapi.json" target="_blank">OpenAPI</a>
+          <a href="/.well-known/noosphere.json">Discovery</a>
+          <a href="/openapi.json">OpenAPI</a>
+          <a href="/scoring-policy">Evaluation policy</a>
           <a
-            id="text-context-link"
-            href="/v1/projects/noosphere/context?format=text"
+            href="https://docs.wal.app/walrus-memory/getting-started/what-is-walrus-memory"
             target="_blank"
+            rel="noreferrer"
           >
-            Plain-text context
+            Walrus Memory docs
           </a>
         </div>
       </section>
     </main>
 
-    <script type="module" src="/app.js?v=20260610-7"></script>
+    <script type="module" src="/app.js?v=20260610-8"></script>
   </body>
 </html>

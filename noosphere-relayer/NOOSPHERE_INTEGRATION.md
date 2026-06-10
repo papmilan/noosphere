@@ -1,58 +1,85 @@
-# Noosphere Integration
+# Noosphere integration
 
-Noosphere is vendor-neutral. Any agent that can make an HTTP request can read
-shared project memory and submit actions.
+## Preferred: official Walrus Memory MCP
 
-## Discover the API
-
-```sh
-curl http://localhost:3001/.well-known/noosphere.json
-curl http://localhost:3001/openapi.json
-```
-
-The OpenAPI document can be imported by tool-calling runtimes and agent
-frameworks without a custom SDK.
-
-## Read project memory
-
-Prompt-ready plain text:
+Use the official MCP server for any MCP-compatible CLI, IDE, or agent:
 
 ```sh
-curl -H 'Accept: text/plain' \
-  http://localhost:3001/v1/projects/noosphere/context
+npx -y @mysten-incubation/memwal-mcp@0.0.4 \
+  --staging \
+  --namespace noosphere
 ```
 
-JSON with both formatted context and raw actions:
+Call `memwal_login` once, `memwal_recall` when starting work, and
+`memwal_remember` for decisions and handoffs.
+
+## Automatic continuity
+
+Initialize and keep the watcher running from the project root:
 
 ```sh
-curl http://localhost:3001/v1/projects/noosphere/context
+npm --prefix noosphere-mcp run continuity:init
+npm --prefix noosphere-mcp run continuity:watch
 ```
 
-## Submit an action
+The watcher stores each settled Git working-tree state and refreshes
+`.noosphere/context.md`. Generated instructions make supported agents read the
+same context file before working.
 
-`agent_id` is free-form. The optional `provider`, `model`, `client`, and
-`metadata` fields preserve provenance without coupling the API to a vendor.
+Tools without MCP can use:
 
-```sh
-curl -X POST http://localhost:3001/v1/actions \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: session-42-action-7' \
-  -d '{
-    "project_id": "noosphere",
-    "agent_id": "my-agent",
-    "provider": "any-provider",
-    "model": "any-model",
-    "client": "my-runtime",
-    "genome_object_id": "demo-genome-my-agent",
-    "action_type": "decision",
-    "content": "Selected the shared schema for cross-agent memory.",
-    "session_id": "session-42",
-    "metadata": {
-      "tool": "code-editor",
-      "task": "architecture"
-    }
-  }'
+- `.noosphere/context.md` and `.noosphere/journal.md`;
+- the `noosphere` CLI commands;
+- `GET /v1/projects/:project_id/bootstrap`;
+- the JSON remember and recall HTTP endpoints.
+
+Noosphere asks agents for concise public rationale and handoff notes. It does
+not request or store hidden chain-of-thought.
+
+The default `metadata-only` privacy mode uploads changed file paths and diff
+statistics, not raw source. Set `privacy.include_diff` only for projects where
+the managed relayer trust boundary is acceptable.
+
+## HTTP compatibility API
+
+Noosphere keeps a small HTTP API for applications that want structured records
+and automatic evaluation.
+
+### Remember an action
+
+```http
+POST /v1/actions
+Content-Type: application/json
+
+{
+  "project_id": "my-project",
+  "agent_id": "codex",
+  "action_type": "decision",
+  "content": "Use the official Walrus Memory SDK.",
+  "model": "codex"
+}
 ```
 
-Existing `/action`, `/context/:project_id`, and `/agents/:project_id` routes
-remain supported for backward compatibility.
+`score_delta` is ignored if supplied. External evaluation is disabled by
+default. Set `SCORING_MODE=remote` and configure `ANTHROPIC_API_KEY` to opt in.
+
+### Recall relevant memory
+
+```http
+POST /v1/projects/my-project/recall
+Content-Type: application/json
+
+{
+  "query": "What storage architecture did we choose?",
+  "limit": 10
+}
+```
+
+### Get prompt-ready context
+
+```http
+GET /v1/projects/my-project/context?q=authentication%20decisions&format=text
+```
+
+Context is semantic and query-dependent. It is intentionally not a full
+project dump.

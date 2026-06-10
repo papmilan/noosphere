@@ -1,0 +1,11 @@
+{
+  "project_id": "noosphere",
+  "relayer_url": "http://127.0.0.1:3001",
+  "checkpoint_debounce_ms": 8000,
+  "context_refresh_ms": 20000,
+  "privacy": {
+    "checkpoint_content": "metadata-only",
+    "include_diff": false,
+    "share_journal": false
+  }
+}
