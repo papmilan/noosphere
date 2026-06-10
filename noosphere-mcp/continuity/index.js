@@ -99,7 +99,7 @@ export async function initializeProject(root) {
     path.join(root, '.noosphere', 'journal.md'),
     journalTemplate(projectId),
   );
-  await writeAgentInstructions(root, projectId);
+  await writeAgentAdapters(root, projectId);
   await writeUniversalProtocol(root, projectId);
   await writeMcpConfigs(root, projectId);
   await ensureGitignore(root);
@@ -312,49 +312,6 @@ async function printStatus(root) {
   );
 }
 
-async function writeAgentInstructions(root, projectId) {
-  const shared = `${MANAGED_START}
-## Noosphere continuity
-
-This project shares memory across AI tools.
-
-1. Before working, read \`.noosphere/context.md\`.
-2. Inspect the current working tree before changing files; another agent may
-   have modified it moments ago.
-3. Do not overwrite or revert another agent's work without checking the shared
-   context.
-4. The Noosphere watcher checkpoints settled working-tree changes
-   automatically.
-5. After a material finding, decision, failed approach, or change of plan,
-   append a concise public note to \`.noosphere/journal.md\`. Record the
-   conclusion, evidence, and next step. Do not record hidden chain-of-thought
-   or private internal reasoning.
-6. Before stopping or when context is running low, add a handoff journal entry.
-
-Project memory namespace: \`noosphere-${sanitizeProjectId(projectId)}\`.
-${MANAGED_END}`;
-  await upsertManagedBlock(path.join(root, 'AGENTS.md'), shared);
-  await upsertManagedBlock(path.join(root, 'CLAUDE.md'), shared);
-  await upsertManagedBlock(path.join(root, 'GEMINI.md'), shared);
-
-  await mkdir(path.join(root, '.cursor', 'rules'), { recursive: true });
-  await writeFile(
-    path.join(root, '.cursor', 'rules', 'noosphere.mdc'),
-    `---
-description: Load shared Noosphere memory before working
-alwaysApply: true
----
-
-Read \`.noosphere/context.md\` before making changes. Inspect the working tree
-because another AI tool may have updated it. The continuity watcher stores
-settled workspace checkpoints automatically. Append concise findings,
-decisions, evidence, and next steps to \`.noosphere/journal.md\`. Do not write
-hidden chain-of-thought.
-`,
-    'utf8',
-  );
-}
-
 async function writeMcpConfigs(root, projectId) {
   const namespace = `noosphere-${sanitizeProjectId(projectId)}`;
   const server = {
@@ -374,6 +331,43 @@ async function writeMcpConfigs(root, projectId) {
   await writeJson(path.join(root, '.cursor', 'mcp.json'), {
     mcpServers: { noosphere: server },
   });
+}
+
+async function writeAgentAdapters(root, projectId) {
+  const shared = `${MANAGED_START}
+## Noosphere continuity adapter
+
+Noosphere's core protocol is vendor-neutral. This file is an auto-load adapter
+for tools that recognize this filename.
+
+1. Before working, read \`.noosphere/context.md\` and
+   \`.noosphere/journal.md\`.
+2. Inspect the working tree because another tool may have changed it.
+3. Append concise findings, evidence, decisions, failed approaches, and
+   handoffs to \`.noosphere/journal.md\`.
+4. Do not record hidden chain-of-thought, secrets, or private internal
+   reasoning.
+
+Project namespace: \`noosphere-${sanitizeProjectId(projectId)}\`.
+${MANAGED_END}`;
+  await upsertManagedBlock(path.join(root, 'AGENTS.md'), shared);
+  await upsertManagedBlock(path.join(root, 'CLAUDE.md'), shared);
+  await upsertManagedBlock(path.join(root, 'GEMINI.md'), shared);
+
+  await mkdir(path.join(root, '.cursor', 'rules'), { recursive: true });
+  await writeFile(
+    path.join(root, '.cursor', 'rules', 'noosphere.mdc'),
+    `---
+description: Load the universal Noosphere continuity protocol
+alwaysApply: true
+---
+
+Read \`NOOSPHERE.md\`, \`.noosphere/context.md\`, and
+\`.noosphere/journal.md\` before working. Append concise, verifiable findings
+and handoffs to the journal. Do not write hidden chain-of-thought.
+`,
+    'utf8',
+  );
 }
 
 async function ensureGitignore(root) {
@@ -407,7 +401,7 @@ async function upsertManagedBlock(file, block) {
   try {
     current = await readFile(file, 'utf8');
   } catch {
-    // Create the instructions file when the project does not have one.
+    // Create the adapter when the tool-specific file is absent.
   }
   const pattern = new RegExp(
     `${escapeRegExp(MANAGED_START)}[\\s\\S]*?${escapeRegExp(MANAGED_END)}`,

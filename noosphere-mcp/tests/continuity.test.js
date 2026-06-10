@@ -87,26 +87,26 @@ describe('Noosphere continuity CLI', () => {
     await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 
     const [
+      mcpConfig,
+      cursorMcp,
+      cursorRule,
       agents,
       claude,
       gemini,
-      cursorRule,
-      claudeMcp,
-      cursorMcp,
       protocol,
       protocolJson,
       journal,
     ] =
       await Promise.all([
-        readFile(path.join(projectDir, 'AGENTS.md'), 'utf8'),
-        readFile(path.join(projectDir, 'CLAUDE.md'), 'utf8'),
-        readFile(path.join(projectDir, 'GEMINI.md'), 'utf8'),
+        readFile(path.join(projectDir, '.mcp.json'), 'utf8'),
+        readFile(path.join(projectDir, '.cursor', 'mcp.json'), 'utf8'),
         readFile(
           path.join(projectDir, '.cursor', 'rules', 'noosphere.mdc'),
           'utf8',
         ),
-        readFile(path.join(projectDir, '.mcp.json'), 'utf8'),
-        readFile(path.join(projectDir, '.cursor', 'mcp.json'), 'utf8'),
+        readFile(path.join(projectDir, 'AGENTS.md'), 'utf8'),
+        readFile(path.join(projectDir, 'CLAUDE.md'), 'utf8'),
+        readFile(path.join(projectDir, 'GEMINI.md'), 'utf8'),
         readFile(path.join(projectDir, 'NOOSPHERE.md'), 'utf8'),
         readFile(
           path.join(projectDir, '.noosphere', 'protocol.json'),
@@ -115,12 +115,12 @@ describe('Noosphere continuity CLI', () => {
         readFile(path.join(projectDir, '.noosphere', 'journal.md'), 'utf8'),
       ]);
 
-    assert.match(agents, /\.noosphere\/context\.md/);
-    assert.match(claude, /\.noosphere\/context\.md/);
-    assert.match(gemini, /\.noosphere\/context\.md/);
-    assert.match(cursorRule, /alwaysApply: true/);
-    assert.match(claudeMcp, /memwal-mcp@0\.0\.4/);
+    assert.match(mcpConfig, /memwal-mcp@0\.0\.4/);
     assert.match(cursorMcp, /memwal-mcp@0\.0\.4/);
+    assert.match(cursorRule, /universal Noosphere continuity protocol/);
+    assert.match(agents, /vendor-neutral/);
+    assert.match(claude, /vendor-neutral/);
+    assert.match(gemini, /vendor-neutral/);
     assert.match(protocol, /universal agent protocol/i);
     assert.match(protocol, /Do not reveal or request hidden chain-of-thought/);
     assert.match(protocolJson, /"filesystem"/);

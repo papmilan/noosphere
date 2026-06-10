@@ -35,10 +35,18 @@ npm --prefix noosphere-mcp run continuity:watch
 Initialization creates:
 
 - `.noosphere.json`
-- `.mcp.json` for Claude Code and compatible clients
-- `.cursor/mcp.json`
-- `.cursor/rules/noosphere.mdc`
-- managed Noosphere sections in `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`
+- `.mcp.json` using the open Model Context Protocol
+- `.noosphere/context.md`
+- `.noosphere/journal.md`
+- `.noosphere/protocol.json`
+- `NOOSPHERE.md`
+
+It also creates small compatibility adapters for tools that support automatic
+project instructions. These adapters do not contain separate memory or logic;
+they only point the tool back to the universal protocol and shared files:
+
+- `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`;
+- `.cursor/mcp.json` and `.cursor/rules/noosphere.mdc`.
 
 The MCP configs invoke the official package:
 

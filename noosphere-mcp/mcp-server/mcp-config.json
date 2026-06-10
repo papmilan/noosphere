@@ -9,7 +9,7 @@
         "--namespace",
         "noosphere-project"
       ],
-      "description": "Noosphere adapter using the universal project memory namespace"
+      "description": "Official Walrus Memory MCP using a project-specific Noosphere namespace"
     }
   }
 }

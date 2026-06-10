@@ -7,9 +7,9 @@
         "@mysten-incubation/memwal-mcp@0.0.4",
         "--staging",
         "--namespace",
-        "noosphere-noosphere"
+        "noosphere-project"
       ],
-      "description": "Official Walrus Memory MCP configured for the Noosphere namespace"
+      "description": "Noosphere adapter using the universal project memory namespace"
     }
   }
 }

@@ -1,20 +1,16 @@
 <!-- noosphere:continuity:start -->
-## Noosphere continuity
+## Noosphere continuity adapter
 
-This project shares memory across AI tools.
+Noosphere's core protocol is vendor-neutral. This file is an auto-load adapter
+for tools that recognize this filename.
 
-1. Before working, read `.noosphere/context.md`.
-2. Inspect the current working tree before changing files; another agent may
-   have modified it moments ago.
-3. Do not overwrite or revert another agent's work without checking the shared
-   context.
-4. The Noosphere watcher checkpoints settled working-tree changes
-   automatically.
-5. After a material finding, decision, failed approach, or change of plan,
-   append a concise public note to `.noosphere/journal.md`. Record the
-   conclusion, evidence, and next step. Do not record hidden chain-of-thought
-   or private internal reasoning.
-6. Before stopping or when context is running low, add a handoff journal entry.
+1. Before working, read `.noosphere/context.md` and
+   `.noosphere/journal.md`.
+2. Inspect the working tree because another tool may have changed it.
+3. Append concise findings, evidence, decisions, failed approaches, and
+   handoffs to `.noosphere/journal.md`.
+4. Do not record hidden chain-of-thought, secrets, or private internal
+   reasoning.
 
-Project memory namespace: `noosphere-noosphere`.
+Project namespace: `noosphere-noosphere`.
 <!-- noosphere:continuity:end -->

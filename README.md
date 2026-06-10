@@ -56,8 +56,10 @@ npm --prefix noosphere-mcp run continuity:watch
 
 It checkpoints each settled working-tree change after an eight-second
 debounce, then refreshes `.noosphere/context.md` every twenty seconds. Project
-instructions and the universal `NOOSPHERE.md` protocol make the same context
-available through files, CLI commands, HTTP, and MCP.
+The universal `NOOSPHERE.md` protocol makes the same context available through
+files, CLI commands, HTTP, and MCP. Small compatibility adapters let tools
+that recognize project-specific instruction filenames load that protocol
+automatically; they do not create separate memory systems.
 
 Keep the watcher running while any supported CLI or IDE is editing the
 workspace.

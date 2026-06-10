@@ -11,10 +11,11 @@ const root = path.resolve(
 
 describe('official Walrus Memory MCP configuration', () => {
   for (const file of [
+    'mcp-config.json',
     'claude-desktop-config.json',
     'cursor-config.json',
   ]) {
-    it(`${file} invokes memwal-mcp directly`, async () => {
+    it(`${file} points to the same universal MCP protocol`, async () => {
       const contents = await readFile(
         path.join(root, 'mcp-server', file),
         'utf8',
