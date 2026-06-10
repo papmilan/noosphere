@@ -20,8 +20,65 @@ function createAgentGenomeServer() {
     version: '0.1.0',
   }, {
     instructions:
-      'At the start of every project session, call get_project_context with the current project_id before making changes. Store important decisions and completed work with store_action so the next agent can continue.',
+      'IMPORTANT: At the start of every session, you MUST call the session_start tool before doing anything else. This loads the shared Noosphere memory for the current project — what other agents have already done, decided, and discovered. Never start working without reading shared memory first. Other agents are counting on you to also store your work when you’re done.',
   });
+
+  server.registerTool(
+    'session_start',
+    {
+      title: 'Start Noosphere session',
+      description:
+        'Call this FIRST before any other action. Loads shared project memory so you know what Claude, Codex, Cursor, and other agents have already done. Prevents duplicate work and builds on previous decisions.',
+      inputSchema: {
+        project_id: z
+          .string()
+          .min(1)
+          .describe(
+            'The project identifier. If unsure, use the current directory name.',
+          ),
+      },
+    },
+    async ({ project_id }) => {
+      try {
+        const encodedProjectId = encodeURIComponent(project_id);
+        const [contextResponse, agentsResponse] = await Promise.all([
+          relayerRequest(
+            `/v1/projects/${encodedProjectId}/context`,
+            { headers: { Accept: 'application/json' } },
+          ),
+          relayerRequest(`/v1/projects/${encodedProjectId}/agents`),
+        ]);
+        const [contextResult, agentsResult] = await Promise.all([
+          contextResponse.json(),
+          agentsResponse.json(),
+        ]);
+        const actions = Array.isArray(contextResult.actions)
+          ? contextResult.actions
+          : [];
+        const agents = Array.isArray(agentsResult.agents)
+          ? agentsResult.agents
+          : [];
+        const clientName =
+          server.server.getClientVersion()?.name || 'connecting-agent';
+        const output = formatSessionStart({
+          projectId: project_id,
+          agents,
+          actions,
+          context: contextResult.context,
+        });
+
+        console.error(
+          `🧠 Noosphere: ${clientName} loaded ${actions.length} decisions from ${agents.length} agents for project ${project_id}`,
+        );
+
+        return {
+          content: [{ type: 'text', text: output }],
+        };
+      } catch (error) {
+        return relayerToolError('load shared project memory', error);
+      }
+    },
+  );
 
   server.registerTool(
     'get_project_context',
@@ -137,12 +194,165 @@ function createAgentGenomeServer() {
     },
   );
 
+  server.registerTool(
+    'session_end',
+    {
+      title: 'End Noosphere session',
+      description:
+        'Call this when you finish working on a task. Stores a summary of what you did so other agents can build on your work.',
+      inputSchema: {
+        project_id: z.string().min(1),
+        agent_id: z.string().min(1),
+        genome_object_id: z
+          .string()
+          .min(1)
+          .describe('From .noosphere.json config file'),
+        summary: z
+          .string()
+          .min(1)
+          .describe(
+            'What you did, what you decided, what you found. Be specific so other agents can understand your work.',
+          ),
+        action_type: z
+          .enum(['code', 'decision', 'review', 'debug', 'session'])
+          .describe('What kind of work did you do?'),
+      },
+    },
+    async ({
+      project_id,
+      agent_id,
+      genome_object_id,
+      summary,
+      action_type,
+    }) => {
+      try {
+        const timestamp = Date.now();
+        const sessionId = `mcp-session-${timestamp}`;
+        const response = await relayerRequest('/v1/actions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': `${sessionId}-${crypto.randomUUID()}`,
+          },
+          body: JSON.stringify({
+            project_id,
+            agent_id,
+            genome_object_id,
+            action_type,
+            content: summary,
+            score_delta: 0,
+            session_id: String(timestamp),
+          }),
+        });
+        const result = await response.json();
+        const score = result.score_delta ?? 0;
+        const reasoning =
+          result.score_reasoning || 'No score explanation was provided.';
+        const output = [
+          '✓ Stored to Noosphere. Other agents will see your work.',
+          `Blob ID: ${result.blob_id}`,
+          `Score: ${formatScore(score)} (${reasoning})`,
+        ].join('\n');
+
+        return {
+          content: [{ type: 'text', text: output }],
+        };
+      } catch (error) {
+        return relayerToolError('store your session summary', error);
+      }
+    },
+  );
+
   return server;
+}
+
+function formatSessionStart({
+  projectId,
+  agents,
+  actions,
+  context,
+}) {
+  const agentList =
+    agents.length === 0
+      ? 'None recorded yet'
+      : agents.map(formatSessionAgent).join(', ');
+  const recentActions = [...actions]
+    .sort((a, b) => toTimestamp(a.timestamp) - toTimestamp(b.timestamp))
+    .slice(-5)
+    .map(formatRecentAction);
+
+  return [
+    '--- 🧠 NOOSPHERE MEMORY LOADED ---',
+    `Project: ${projectId}`,
+    `Agents who worked on this: ${agentList}`,
+    `Total decisions recorded: ${actions.length}`,
+    '',
+    'Recent activity:',
+    ...(recentActions.length > 0
+      ? recentActions
+      : ['No decisions recorded yet.']),
+    '',
+    'Full context:',
+    context || `--- PROJECT CONTEXT: ${projectId} ---\n--- END CONTEXT ---`,
+    '--- END NOOSPHERE MEMORY ---',
+  ].join('\n');
+}
+
+function formatSessionAgent(agent) {
+  const name = agent.agent_name || agent.agent_id || 'Unnamed agent';
+  const reputation = agent.reputation_score ?? 'unknown';
+  const rating =
+    agent.average_rating === null || agent.average_rating === undefined
+      ? null
+      : `rating ${formatSigned(agent.average_rating)}/10`;
+  return `${name} (reputation ${reputation}${rating ? `, ${rating}` : ''})`;
+}
+
+function formatRecentAction(action) {
+  const timestamp = formatTimestamp(action.timestamp);
+  const agentId = action.agent_id || action.agent_name || 'unknown-agent';
+  const actionType = action.action_type || 'action';
+  const content = String(action.content || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 150);
+  return `[${timestamp}] ${agentId} (${actionType}): ${content}`;
+}
+
+function formatTimestamp(value) {
+  const timestamp = toTimestamp(value);
+  return Number.isFinite(timestamp)
+    ? new Date(timestamp).toISOString()
+    : String(value || 'unknown time');
+}
+
+function toTimestamp(value) {
+  if (typeof value === 'string' && !/^\d+$/.test(value)) {
+    return Date.parse(value);
+  }
+  return Number(value);
 }
 
 function formatSigned(value) {
   const number = Number(value);
   return `${number > 0 ? '+' : ''}${number.toFixed(1)}`;
+}
+
+function formatScore(value) {
+  const number = Number(value);
+  return `${number > 0 ? '+' : ''}${Number.isFinite(number) ? number : 0}`;
+}
+
+function relayerToolError(action, error) {
+  return {
+    isError: true,
+    content: [
+      {
+        type: 'text',
+        text: `Noosphere could not ${action}. Make sure the relayer is running at ${RELAYER_URL}, then try again. Details: ${error.message}`,
+      },
+    ],
+  };
 }
 
 async function relayerRequest(pathname, options = {}) {

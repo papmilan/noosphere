@@ -6,7 +6,7 @@
         "/Volumes/T7/agent reputation genome/noosphere-mcp/mcp-server/index.js",
         "--stdio"
       ],
-      "description": "Noosphere — shared mind for AI agents"
+      "description": "Noosphere — shared mind for AI agents. Agent workflow: 1. session_start → always first, loads shared memory 2. ... do your work ... 3. session_end → always last, stores your summary"
     }
   }
 }

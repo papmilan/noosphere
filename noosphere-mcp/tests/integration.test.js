@@ -37,6 +37,8 @@ before(async () => {
         success: true,
         blob_id: `blob-${actions.length}`,
         tx_digest: `tx-${actions.length}`,
+        score_delta: 7,
+        score_reasoning: 'Clear and complete session summary.',
       });
       return;
     }
@@ -46,10 +48,30 @@ before(async () => {
     );
     if (req.method === 'GET' && contextMatch) {
       const projectId = decodeURIComponent(contextMatch[1]);
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end(
-        `--- PROJECT CONTEXT: ${projectId} ---\nStored project memory.\n--- END CONTEXT ---`,
-      );
+      const context =
+        `--- PROJECT CONTEXT: ${projectId} ---\nStored project memory.\n--- END CONTEXT ---`;
+      if (
+        url.searchParams.get('format') === 'text' ||
+        req.headers.accept === 'text/plain'
+      ) {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end(context);
+      } else {
+        respondJson(res, 200, {
+          success: true,
+          project_id: projectId,
+          context,
+          actions: Array.from({ length: 6 }, (_, index) => ({
+            timestamp: Date.UTC(2026, 5, 1, index),
+            agent_id: index % 2 === 0 ? 'codex' : 'claude-code',
+            action_type: index === 5 ? 'debug' : 'code',
+            content:
+              index === 5
+                ? 'Found and fixed the null pointer bug in auth.js.'
+                : `Completed shared task ${index + 1}.`,
+          })),
+        });
+      }
       return;
     }
 
@@ -107,7 +129,13 @@ describe('MCP stdio transport', () => {
       const listed = await client.listTools();
       assert.deepEqual(
         listed.tools.map((tool) => tool.name).sort(),
-        ['get_project_context', 'list_agents', 'store_action'],
+        [
+          'get_project_context',
+          'list_agents',
+          'session_end',
+          'session_start',
+          'store_action',
+        ],
       );
 
       const context = await client.callTool({
@@ -134,6 +162,77 @@ describe('MCP stdio transport', () => {
       });
       assert.match(agents.content[0].text, /reputation 507/);
       assert.match(agents.content[0].text, /average rating \+6.5\/10/);
+    } finally {
+      await transport.close();
+    }
+  });
+
+  it('session_start loads agents, recent activity, and full context', async () => {
+    const { client, transport } = await connectStdioClient(
+      'noosphere-session-start-test',
+    );
+
+    try {
+      assert.match(
+        client.getInstructions(),
+        /MUST call the session_start tool before doing anything else/,
+      );
+
+      const result = await client.callTool({
+        name: 'session_start',
+        arguments: { project_id: 'memory-project' },
+      });
+      const text = result.content[0].text;
+
+      assert.match(text, /NOOSPHERE MEMORY LOADED/);
+      assert.match(text, /Project: memory-project/);
+      assert.match(text, /claude-code \(reputation 507, rating \+6.5\/10\)/);
+      assert.match(text, /Total decisions recorded: 6/);
+      assert.match(text, /Found and fixed the null pointer bug in auth\.js/);
+      assert.match(text, /Full context:/);
+      assert.match(text, /Stored project memory/);
+      assert.doesNotMatch(text, /Completed shared task 1\./);
+    } finally {
+      await transport.close();
+    }
+  });
+
+  it('session_end stores an auto-scored summary for the next agent', async () => {
+    const { client, transport } = await connectStdioClient(
+      'noosphere-session-end-test',
+    );
+
+    try {
+      const result = await client.callTool({
+        name: 'session_end',
+        arguments: {
+          project_id: 'handoff-project',
+          agent_id: 'codex',
+          genome_object_id: 'demo-genome-codex',
+          summary: 'Fixed auth.js and added regression coverage.',
+          action_type: 'debug',
+        },
+      });
+      const text = result.content[0].text;
+
+      assert.match(text, /Stored to Noosphere/);
+      assert.match(text, /Blob ID: blob-/);
+      assert.match(
+        text,
+        /Score: \+7 \(Clear and complete session summary\.\)/,
+      );
+
+      const uploaded = actions.find(
+        (action) =>
+          action.project_id === 'handoff-project' &&
+          action.content === 'Fixed auth.js and added regression coverage.',
+      );
+      assert.ok(uploaded);
+      assert.equal(uploaded.agent_id, 'codex');
+      assert.equal(uploaded.genome_object_id, 'demo-genome-codex');
+      assert.equal(uploaded.action_type, 'debug');
+      assert.equal(uploaded.score_delta, 0);
+      assert.match(uploaded.session_id, /^\d+$/);
     } finally {
       await transport.close();
     }
@@ -165,7 +264,7 @@ describe('MCP SSE transport', () => {
       await client.connect(transport);
 
       const listed = await client.listTools();
-      assert.equal(listed.tools.length, 3);
+      assert.equal(listed.tools.length, 5);
       const result = await client.callTool({
         name: 'get_project_context',
         arguments: { project_id: 'sse-project' },
@@ -262,6 +361,25 @@ describe('hook installer', () => {
 function respondJson(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
+}
+
+async function connectStdioClient(name) {
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [mcpEntry, '--stdio'],
+    cwd: packageDir,
+    env: {
+      ...process.env,
+      NOOSPHERE_RELAYER_URL: mockUrl,
+    },
+    stderr: 'pipe',
+  });
+  const client = new Client({
+    name,
+    version: '1.0.0',
+  });
+  await client.connect(transport);
+  return { client, transport };
 }
 
 async function getFreePort() {
