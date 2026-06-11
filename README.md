@@ -2,77 +2,58 @@
 
 The shared mind for AI agents.
 
-Noosphere is a thin application layer on top of
-[Walrus Memory](https://docs.wal.app/walrus-memory/getting-started/what-is-walrus-memory).
-It gives any agent, CLI, IDE, or HTTP client a common format for project
-decisions, handoffs, and quality evaluations.
+Noosphere gives AI agents a common project memory that survives switches
+between CLIs, IDEs, models, and sessions. An agent can store a decision once,
+and another agent can retrieve it later through files, CLI commands, HTTP, or
+the Model Context Protocol.
 
-## Why version 2 is smaller
+Noosphere is built on
+[Walrus Memory](https://docs.wal.app/walrus-memory/getting-started/what-is-walrus-memory)
+for encrypted storage and semantic recall.
 
-The first version maintained its own Move contract, direct Walrus uploader,
-local JSON index, Sui transaction layer, and MCP server. Walrus Memory already
-provides encrypted storage, semantic indexing, account permissions, restore,
-and an official cross-agent MCP server. Rebuilding those pieces added
-complexity without adding product value.
+## What it provides
 
-Noosphere 2 keeps only what is specific to the product:
-
-- a portable agent-memory record format;
-- automatic workspace checkpoints and refreshed cross-agent context;
-- privacy-first, optional output evaluation;
-- a small HTTP compatibility API;
-- a focused remember/recall interface;
-- ready-to-use configuration for the official Walrus Memory MCP server.
+- A portable format for decisions, findings, code changes, and handoffs
+- Automatic checkpoints when the working tree changes
+- A refreshed project context file for tools without MCP support
+- Semantic recall instead of repeatedly loading an entire project history
+- Optional, privacy-aware output evaluation
+- HTTP and browser interfaces for universal compatibility
+- Configuration for the official Walrus Memory MCP server
 
 ## Architecture
 
 ```text
-AI agent or web UI
-        |
-        v
-Noosphere record + optional evaluation
-        |
-        v
-Official Walrus Memory SDK / MCP
-        |
-        +-- Seal encryption
-        +-- Walrus blob storage
-        +-- semantic index and recall
-        +-- Sui account and delegate permissions
+AI agent, CLI, IDE, or web UI
+              |
+              v
+     Noosphere memory record
+              |
+              v
+ Official Walrus Memory SDK / MCP
+              |
+              +-- Seal encryption
+              +-- Walrus blob storage
+              +-- Semantic indexing and recall
+              +-- Sui account ownership and delegate permissions
 ```
 
-Noosphere does not deploy a custom smart contract and does not claim that its
-AI-generated evaluations are trustless or immutable. Walrus Memory's Sui
-contract is used by the platform for ownership and delegate access.
+Walrus stores the encrypted project memories. Sui provides ownership and
+delegate access control through Walrus Memory. Noosphere does not require a
+custom smart contract.
 
-## Seamless continuity
-
-Run the continuity daemon in a project:
-
-```sh
-npm --prefix noosphere-mcp run continuity:init
-npm --prefix noosphere-mcp run continuity:watch
-```
-
-It checkpoints each settled working-tree change after an eight-second
-debounce, then refreshes `.noosphere/context.md` every twenty seconds. Project
-The universal `NOOSPHERE.md` protocol makes the same context available through
-files, CLI commands, HTTP, and MCP. Small compatibility adapters let tools
-that recognize project-specific instruction filenames load that protocol
-automatically; they do not create separate memory systems.
-
-Keep the watcher running while any supported CLI or IDE is editing the
-workspace.
-
-The default checkpoint contains changed paths and diff statistics, not raw
-source code. The current files remain the source of truth when switching tools
-inside the same workspace.
-
-Agents also maintain `.noosphere/journal.md` with concise findings, evidence,
-decisions, and handoffs. This is not hidden chain-of-thought: it is a short
-public rationale another engineer or model can verify.
+Optional AI evaluations are stored as inspectable metadata beside a memory.
+They are not presented as trustless consensus or immutable on-chain
+reputation.
 
 ## Run locally
+
+Requirements:
+
+- Node.js 20 or newer
+- npm
+
+Install and start the local demo:
 
 ```sh
 cd noosphere-relayer
@@ -80,17 +61,46 @@ npm install
 npm run demo
 ```
 
-Open `http://127.0.0.1:3001`.
+Open [http://127.0.0.1:3001](http://127.0.0.1:3001).
 
-Demo mode uses a gitignored local persistence file. To use Walrus Memory
-staging, copy
-`noosphere-relayer/.env.example` to `.env`, set the delegate credentials from
-the [Walrus Memory dashboard](https://memory.walrus.xyz/), and set
-`DEMO_MODE=false`.
+Demo mode uses a gitignored local persistence file. To connect Walrus Memory:
 
-## Connect an agent
+1. Copy `noosphere-relayer/.env.example` to
+   `noosphere-relayer/.env`.
+2. Create delegate credentials in the
+   [Walrus Memory dashboard](https://memory.walrus.xyz/).
+3. Set `MEMWAL_PRIVATE_KEY` and `MEMWAL_ACCOUNT_ID`.
+4. Set `DEMO_MODE=false`.
 
-The configs in `noosphere-mcp/mcp-server` run the official MCP server:
+## Enable continuity
+
+Initialize Noosphere in a project and start the watcher:
+
+```sh
+npm --prefix noosphere-mcp run continuity:init
+npm --prefix noosphere-mcp run continuity:watch
+```
+
+The watcher fingerprints the Git working tree. After eight quiet seconds, it
+stores a metadata-only checkpoint. It also refreshes
+`.noosphere/context.md` every twenty seconds so the next agent can continue
+from the latest shared state.
+
+Keep the watcher running while supported CLIs or IDEs edit the workspace.
+
+## Connect agents
+
+The universal protocol is documented in `NOOSPHERE.md`. Agents can use:
+
+- `.noosphere/context.md` for current shared context
+- `.noosphere/journal.md` for concise decisions and handoffs
+- `noosphere context`, `recall`, `remember`, and `journal` CLI commands
+- `POST /v1/actions` to store memory
+- `POST /v1/projects/:project_id/recall` for semantic recall
+- `GET /v1/projects/:project_id/bootstrap` for prompt-ready instructions
+- The official Walrus Memory MCP server
+
+Example MCP command:
 
 ```sh
 npx -y @mysten-incubation/memwal-mcp@0.0.4 \
@@ -98,15 +108,40 @@ npx -y @mysten-incubation/memwal-mcp@0.0.4 \
   --namespace noosphere-<project>
 ```
 
-The daemon handles routine checkpoints and context refresh automatically.
-Agents can still use `memwal_remember` for important reasoning and
-`memwal_recall` for focused questions. The official package supports Claude
-Desktop, Claude Code, Cursor, Codex, and Antigravity. Other tools can use the
-filesystem, CLI, or HTTP interfaces documented in `NOOSPHERE.md`.
+Small adapters for Claude, Cursor, Codex, Gemini, and other tools only point
+back to the same universal protocol. They do not create separate memory
+systems.
+
+## Privacy
+
+Automatic checkpoints contain changed paths, the current branch and commit,
+diff statistics, and a timestamp. Raw source diffs are not uploaded by
+default.
+
+Noosphere never asks agents to reveal hidden chain-of-thought. Agents record
+short, externally understandable conclusions, evidence, failed approaches,
+and handoffs instead.
+
+Remote output evaluation is disabled by default. Enabling
+`SCORING_MODE=remote` sends the action and recalled context to the configured
+AI provider.
+
+See `noosphere-relayer/TRUST.md` for the complete trust and privacy model.
 
 ## Packages
 
-- `noosphere-relayer`: thin API, evaluation, Walrus Memory adapter, and UI.
-- `noosphere-mcp`: continuity daemon, project integration, official MCP
-  configuration, and optional Claude hook.
-- `noosphere-contract`: retired; no custom Move package is part of version 2.
+- `noosphere-relayer`: HTTP API, Walrus Memory adapter, optional evaluation,
+  and browser interface
+- `noosphere-mcp`: continuity watcher, CLI, universal project integration,
+  MCP configuration, and optional Claude session hook
+
+## Verification
+
+```sh
+cd noosphere-relayer
+npm run check
+npm test
+
+cd ../noosphere-mcp
+npm run check
+```

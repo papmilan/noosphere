@@ -33,27 +33,24 @@ export async function scoreAction(action, projectContext) {
       maxRetries: 0,
       timeout: TIMEOUT_MS,
     });
-    const message = await client.messages.create(
-      {
-        model: POLICY.model,
-        max_tokens: 300,
-        temperature: 0,
-        system: SYSTEM_PROMPT,
-        messages: [
-          {
-            role: 'user',
-            content: `Project context:
+    const message = await client.messages.create({
+      model: POLICY.model,
+      max_tokens: 300,
+      temperature: 0,
+      system: SYSTEM_PROMPT,
+      messages: [
+        {
+          role: 'user',
+          content: `Project context:
 ${projectContext || '(No relevant project memory was recalled.)'}
 
 Agent: ${action.agent_id}
 Action type: ${action.action_type}
 Output to evaluate:
 ${action.content}`,
-          },
-        ],
-      },
-      { signal: AbortSignal.timeout(TIMEOUT_MS) },
-    );
+        },
+      ],
+    });
 
     const text = message.content
       .filter((block) => block.type === 'text')

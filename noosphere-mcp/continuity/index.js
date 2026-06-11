@@ -143,13 +143,13 @@ export async function watchProject(root, options = {}) {
           await checkpointProject(root);
         } catch (error) {
           pendingSince = Date.now();
-          throw error;
+          logBackgroundError(error);
+        } finally {
+          checkpointRunning = false;
         }
       }
     } catch (error) {
       logBackgroundError(error);
-    } finally {
-      checkpointRunning = false;
     }
   }, Math.min(2_000, Math.max(500, Math.floor(debounceMs / 4))));
 

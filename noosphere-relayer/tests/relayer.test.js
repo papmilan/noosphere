@@ -5,8 +5,9 @@ import { after, before, describe, it } from 'node:test';
 process.env.DEMO_MODE = 'true';
 process.env.NODE_ENV = 'test';
 
-const { app, resolveActionScore } = await import('../index.js');
-const { memoryStore, parseMemory, serializeMemory } =
+const { app, parseTrustProxy, resolveActionScore } =
+  await import('../index.js');
+const { MemoryStore, memoryStore, parseMemory, serializeMemory } =
   await import('../memory.js');
 
 describe('Noosphere memory API', () => {
@@ -32,6 +33,37 @@ describe('Noosphere memory API', () => {
     };
     assert.deepEqual(parseMemory(serializeMemory(record)), record);
     assert.equal(parseMemory('plain text from another namespace'), null);
+    const circular = {};
+    circular.self = circular;
+    assert.throws(
+      () => serializeMemory(circular),
+      /Memory record cannot be serialized/,
+    );
+  });
+
+  it('parses trust proxy configuration into Express-compatible values', () => {
+    assert.equal(parseTrustProxy(undefined), undefined);
+    assert.equal(parseTrustProxy('true'), true);
+    assert.equal(parseTrustProxy('false'), false);
+    assert.equal(parseTrustProxy('1'), 1);
+    assert.equal(parseTrustProxy('loopback'), 'loopback');
+  });
+
+  it('recovers the local persistence queue after a failed write', async () => {
+    const store = new MemoryStore();
+    store.persistDemo = true;
+    let attempts = 0;
+    store._writeDemoToDisk = async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('temporary disk failure');
+    };
+
+    await assert.rejects(
+      store.persistDemoMemories(),
+      /temporary disk failure/,
+    );
+    await assert.doesNotReject(store.persistDemoMemories());
+    assert.equal(attempts, 2);
   });
 
   it('reports demo memory and scorer status', async () => {
@@ -42,6 +74,16 @@ describe('Noosphere memory API', () => {
     assert.equal(body.memory.mode, 'demo');
     assert.equal(body.memory.ready, true);
     assert.equal(body.scorer_configured, false);
+  });
+
+  it('ignores forwarded protocol headers unless trust proxy is enabled', async () => {
+    const response = await fetch(
+      `${baseUrl}/.well-known/noosphere.json`,
+      { headers: { 'x-forwarded-proto': 'https' } },
+    );
+    const body = await response.json();
+
+    assert.match(body.endpoints.remember, /^http:\/\//);
   });
 
   it('stores an action without blockchain-specific fields', async () => {
@@ -186,16 +228,43 @@ describe('Noosphere memory API', () => {
     assert.equal(secondBody.blob_id, firstBody.blob_id);
   });
 
-  it('keeps a compatibility agent summary without claiming a leaderboard', async () => {
-    const response = await fetch(
-      `${baseUrl}/v1/projects/test-project/agents`,
-    );
-    const body = await response.json();
+  it('expires idempotency receipts after 24 hours', async () => {
+    const realNow = Date.now;
+    let now = realNow();
+    Date.now = () => now;
+    const payload = JSON.stringify({
+      project_id: 'test-project',
+      agent_id: 'codex',
+      action_type: 'review',
+      content: 'Receipt expiry check.',
+    });
+    const headers = {
+      'content-type': 'application/json',
+      'idempotency-key': 'expiring-action',
+    };
 
-    assert.equal(response.status, 200);
-    assert.equal(body.scope, 'semantic recall sample');
-    assert.equal(body.agents[0].agent_id, 'codex');
-    assert.equal('reputation_score' in body.agents[0], false);
+    try {
+      const first = await fetch(`${baseUrl}/v1/actions`, {
+        method: 'POST',
+        headers,
+        body: payload,
+      });
+      const firstBody = await first.json();
+      now += 24 * 60 * 60 * 1000 + 1;
+      const second = await fetch(`${baseUrl}/v1/actions`, {
+        method: 'POST',
+        headers,
+        body: payload,
+      });
+      const secondBody = await second.json();
+
+      assert.equal(first.status, 201);
+      assert.equal(second.status, 201);
+      assert.notEqual(secondBody.blob_id, firstBody.blob_id);
+      assert.equal(secondBody.deduplicated, undefined);
+    } finally {
+      Date.now = realNow;
+    }
   });
 
   it('publishes the simplified discovery and OpenAPI documents', async () => {

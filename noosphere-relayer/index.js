@@ -17,9 +17,41 @@ import {
 } from './scorer.js';
 
 export const app = express();
+
+const trustProxy = parseTrustProxy(process.env.TRUST_PROXY);
+if (trustProxy !== undefined) {
+  app.set('trust proxy', trustProxy);
+}
+
 const port = Number(process.env.PORT || 3001);
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const receipts = new Map();
+const receiptTimestamps = new Map();
+const RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
+
+function setReceipt(key, value) {
+  receipts.set(key, value);
+  receiptTimestamps.set(key, Date.now());
+  for (const [k, ts] of receiptTimestamps) {
+    if (Date.now() - ts > RECEIPT_TTL_MS) {
+      receipts.delete(k);
+      receiptTimestamps.delete(k);
+    }
+  }
+}
+
+function getReceipt(key) {
+  const timestamp = receiptTimestamps.get(key);
+  if (
+    timestamp === undefined ||
+    Date.now() - timestamp > RECEIPT_TTL_MS
+  ) {
+    receipts.delete(key);
+    receiptTimestamps.delete(key);
+    return null;
+  }
+  return receipts.get(key) || null;
+}
 
 app.use((req, res, next) => {
   res.set({
@@ -98,15 +130,16 @@ app.get('/scoring-policy', (_req, res) => {
   res.json(getScoringPolicy());
 });
 
-app.post(['/action', '/v1/actions'], async (req, res, next) => {
+app.post('/v1/actions', async (req, res, next) => {
   try {
     const action = validateAction(req.body);
     const actionId =
       requireOptionalString(req.get('Idempotency-Key')) || randomUUID();
     const receiptKey = `${action.project_id}:${actionId}`;
 
-    if (receipts.has(receiptKey)) {
-      res.json({ ...receipts.get(receiptKey), deduplicated: true });
+    const previousReceipt = getReceipt(receiptKey);
+    if (previousReceipt) {
+      res.json({ ...previousReceipt, deduplicated: true });
       return;
     }
 
@@ -163,43 +196,43 @@ app.post(['/action', '/v1/actions'], async (req, res, next) => {
       storage: 'walrus-memory',
     };
 
-    receipts.set(receiptKey, response);
+    setReceipt(receiptKey, response);
     res.status(201).json(response);
   } catch (error) {
     next(error);
   }
 });
 
-app.all(
-  ['/recall/:project_id', '/v1/projects/:project_id/recall'],
-  async (req, res, next) => {
-    try {
-      const projectId = requireNonEmptyString(
-        req.params.project_id,
-        'project_id',
-      );
-      const query = requireNonEmptyString(
-        req.method === 'GET' ? req.query.q : req.body?.query,
-        'query',
-      );
-      const limit = parseLimit(
-        req.method === 'GET' ? req.query.limit : req.body?.limit,
-      );
-      const recalled = await recallProject(projectId, query, limit);
+const recallRouteHandler = async (req, res, next) => {
+  try {
+    const projectId = requireNonEmptyString(
+      req.params.project_id,
+      'project_id',
+    );
+    const query = requireNonEmptyString(
+      req.method === 'GET' ? req.query.q : req.body?.query,
+      'query',
+    );
+    const limit = parseLimit(
+      req.method === 'GET' ? req.query.limit : req.body?.limit,
+    );
+    const recalled = await recallProject(projectId, query, limit);
 
-      res.json({
-        success: true,
-        project_id: projectId,
-        query,
-        retrieval: 'semantic',
-        total: recalled.length,
-        memories: recalled,
-      });
-    } catch (error) {
-      next(error);
-    }
-  },
-);
+    res.json({
+      success: true,
+      project_id: projectId,
+      query,
+      retrieval: 'semantic',
+      total: recalled.length,
+      memories: recalled,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+app.get('/v1/projects/:project_id/recall', recallRouteHandler);
+app.post('/v1/projects/:project_id/recall', recallRouteHandler);
 
 app.get(
   '/v1/projects/:project_id/bootstrap',
@@ -226,7 +259,7 @@ app.get(
 );
 
 app.get(
-  ['/context/:project_id', '/v1/projects/:project_id/context'],
+  '/v1/projects/:project_id/context',
   async (req, res, next) => {
     try {
       const projectId = requireNonEmptyString(
@@ -258,33 +291,6 @@ app.get(
         retrieval: 'semantic',
         context,
         actions,
-      });
-    } catch (error) {
-      next(error);
-    }
-  },
-);
-
-// Compatibility endpoint. Results describe the recalled sample, not a global
-// or on-chain leaderboard.
-app.get(
-  ['/agents/:project_id', '/v1/projects/:project_id/agents'],
-  async (req, res, next) => {
-    try {
-      const projectId = requireNonEmptyString(
-        req.params.project_id,
-        'project_id',
-      );
-      const actions = await recallProject(
-        projectId,
-        'agents contributors work decisions and sessions',
-        100,
-      );
-      res.json({
-        success: true,
-        project_id: projectId,
-        scope: 'semantic recall sample',
-        agents: summarizeAgents(actions),
       });
     } catch (error) {
       next(error);
@@ -362,6 +368,7 @@ async function recallProject(projectId, query, limit) {
     })
     .sort(
       (a, b) =>
+        (a.distance ?? 1) - (b.distance ?? 1) ||
         (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0),
     );
 }
@@ -417,42 +424,6 @@ function formatBootstrap(projectId, context) {
   ].join('\n');
 }
 
-function summarizeAgents(actions) {
-  const agents = new Map();
-  for (const action of actions) {
-    const current = agents.get(action.agent_id) || {
-      agent_id: action.agent_id,
-      provider: action.provider,
-      model: action.model,
-      client: action.client,
-      recalled_actions: 0,
-      evaluated_actions: 0,
-      score_total: 0,
-      latest_activity: action.timestamp,
-    };
-    current.recalled_actions += 1;
-    if (action.evaluation?.status === 'scored') {
-      current.evaluated_actions += 1;
-      current.score_total += action.evaluation.score;
-    }
-    if (
-      (Date.parse(action.timestamp) || 0) >
-      (Date.parse(current.latest_activity) || 0)
-    ) {
-      current.latest_activity = action.timestamp;
-    }
-    agents.set(action.agent_id, current);
-  }
-
-  return [...agents.values()].map(({ score_total, ...agent }) => ({
-    ...agent,
-    average_evaluation:
-      agent.evaluated_actions > 0
-        ? score_total / agent.evaluated_actions
-        : null,
-  }));
-}
-
 function parseLimit(value, fallback = 10) {
   if (value === undefined || value === null || value === '') return fallback;
   const limit = Number(value);
@@ -492,7 +463,18 @@ function badRequest(message) {
 }
 
 function getBaseUrl(req) {
-  return `${req.get('x-forwarded-proto') || req.protocol}://${req.get('host')}`;
+  return `${req.protocol}://${req.get('host')}`;
+}
+
+export function parseTrustProxy(value) {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === 'true') return true;
+  if (normalized === 'false') return false;
+  if (/^\d+$/.test(normalized)) return Number(normalized);
+  return value;
 }
 
 function buildOpenApiDocument(baseUrl) {

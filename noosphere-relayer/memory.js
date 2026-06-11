@@ -14,7 +14,7 @@ const DEFAULT_SERVER_URL =
 const DEFAULT_NAMESPACE_PREFIX = 'noosphere';
 const directory = path.dirname(fileURLToPath(import.meta.url));
 
-class MemoryStore {
+export class MemoryStore {
   constructor() {
     this.mode = process.env.DEMO_MODE === 'true' ? 'demo' : 'walrus-memory';
     this.demoMemories = new Map();
@@ -24,6 +24,7 @@ class MemoryStore {
       process.env.LOCAL_MEMORY_PATH ||
       path.join(directory, '.noosphere-local-memory.json');
     this.clientPromise = null;
+    this._writeChain = Promise.resolve();
   }
 
   async health() {
@@ -139,6 +140,13 @@ class MemoryStore {
 
   async persistDemoMemories() {
     if (!this.persistDemo) return;
+    this._writeChain = this._writeChain
+      .catch(() => undefined)
+      .then(() => this._writeDemoToDisk());
+    return this._writeChain;
+  }
+
+  async _writeDemoToDisk() {
     const temporary = `${this.demoPath}.${randomUUID()}.tmp`;
     await mkdir(path.dirname(this.demoPath), { recursive: true });
     await writeFile(
@@ -157,7 +165,13 @@ class MemoryStore {
 export const memoryStore = new MemoryStore();
 
 export function serializeMemory(record) {
-  return `${MEMORY_PREFIX}${JSON.stringify(record)}`;
+  try {
+    return `${MEMORY_PREFIX}${JSON.stringify(record)}`;
+  } catch (error) {
+    const bad = new Error(`Memory record cannot be serialized: ${error.message}`);
+    bad.status = 400;
+    throw bad;
+  }
 }
 
 export function parseMemory(text) {
