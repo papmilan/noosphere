@@ -10,10 +10,10 @@
     "demo": "DEMO_MODE=true node index.js",
     "dev": "node --watch index.js",
     "test": "node --experimental-vm-modules --test tests/relayer.test.js",
-    "check": "node --check index.js && node --check memory.js && node --check walrus-memory.js && node --check scorer.js"
+    "check": "node --check index.js && node --check memory.js && node --check walrus-memory.js && node --check durable-store.js && node --check security.js && node --check scorer.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",

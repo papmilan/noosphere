@@ -91,6 +91,10 @@ PAYLOAD=$(jq -n \
 
 RESPONSE_FILE=$(mktemp)
 HOOK_TIMEOUT_SECONDS=${NOOSPHERE_HOOK_TIMEOUT_SECONDS:-130}
+AUTH_HEADER=()
+if [ -n "${NOOSPHERE_API_TOKEN:-}" ]; then
+  AUTH_HEADER=(-H "Authorization: Bearer $NOOSPHERE_API_TOKEN")
+fi
 HTTP_STATUS=$(curl -sS \
   --connect-timeout 2 \
   --max-time "$HOOK_TIMEOUT_SECONDS" \
@@ -99,6 +103,7 @@ HTTP_STATUS=$(curl -sS \
   -X POST "$RELAYER_URL/v1/actions" \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: claude-code-$SESSION_ID" \
+  "${AUTH_HEADER[@]}" \
   --data "$PAYLOAD" 2>/dev/null)
 CURL_STATUS=$?
 

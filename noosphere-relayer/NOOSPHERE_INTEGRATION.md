@@ -45,6 +45,15 @@ the managed relayer trust boundary is acceptable.
 Noosphere keeps a small HTTP API for applications that want structured records
 and automatic evaluation.
 
+When `NOOSPHERE_API_TOKEN` is configured, send it on every `/v1` request:
+
+```http
+Authorization: Bearer <token>
+```
+
+The continuity CLI and Claude hook automatically read this value from the
+`NOOSPHERE_API_TOKEN` environment variable.
+
 ### Remember an action
 
 ```http

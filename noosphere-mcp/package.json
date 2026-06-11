@@ -8,14 +8,18 @@
     "noosphere": "continuity/index.js"
   },
   "scripts": {
+    "install:user": "node lifecycle/install.js install",
+    "uninstall:user": "node lifecycle/install.js uninstall",
+    "doctor": "node lifecycle/install.js doctor",
+    "activate": "node continuity/index.js activate",
     "continuity:init": "node continuity/index.js init",
     "continuity:watch": "node continuity/index.js watch",
     "continuity:checkpoint": "node continuity/index.js checkpoint",
     "continuity:refresh": "node continuity/index.js refresh",
-    "check": "node --check continuity/index.js && node --test tests/*.test.js",
+    "check": "node --check continuity/index.js && node --check lifecycle/registry.js && node --check lifecycle/manager.js && node --check lifecycle/install.js && node --test tests/*.test.js",
     "test": "node --test tests/*.test.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }

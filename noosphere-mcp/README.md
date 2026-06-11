@@ -16,20 +16,32 @@ or whether an agent remembers to call an MCP tool.
 The next agent sees the current files locally and receives the cross-session
 history through the shared context file.
 
-## Install in a project
+## Install once on macOS
 
-From the project root, using this repository checkout:
+From this repository:
 
 ```sh
-node /absolute/path/to/noosphere-mcp/continuity/index.js init
-node /absolute/path/to/noosphere-mcp/continuity/index.js watch
+npm --prefix noosphere-mcp run install:user
 ```
 
-Inside the Noosphere repository itself:
+The installer:
+
+- installs the `noosphere` command under `~/.noosphere/bin`;
+- copies the relayer and continuity runtime into `~/.noosphere/app`;
+- installs a relayer LaunchAgent that starts at login and stays running;
+- installs a project-manager LaunchAgent that manages every watcher;
+- adds a small zsh directory hook.
+
+When a new terminal enters a Git repository, the hook runs
+`noosphere activate --quiet`. The command discovers the repository root,
+initializes Noosphere if needed, and registers it with the project manager.
+Create `.noosphere-ignore` in a repository to prevent automatic activation.
+`noosphere deactivate` unregisters a project from the background manager.
+
+Existing terminals load the integration after:
 
 ```sh
-npm --prefix noosphere-mcp run continuity:init
-npm --prefix noosphere-mcp run continuity:watch
+source ~/.zshrc
 ```
 
 Initialization creates:
@@ -76,12 +88,19 @@ when that trust boundary is unacceptable.
 ## Commands
 
 ```sh
-node continuity/index.js init
-node continuity/index.js watch
-node continuity/index.js checkpoint
-node continuity/index.js refresh
-node continuity/index.js status
+noosphere install
+noosphere doctor
+noosphere activate
+noosphere deactivate
+noosphere projects
+noosphere checkpoint
+noosphere refresh
+noosphere status
+noosphere uninstall
 ```
+
+`noosphere activate` may also be used explicitly from an IDE terminal. It
+works from any nested folder inside the repository.
 
 The Claude Code SessionEnd hook remains available for richer reasoning
 summaries. File checkpoints preserve work state; the hook preserves intent.

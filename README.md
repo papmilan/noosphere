@@ -50,7 +50,7 @@ reputation.
 
 Requirements:
 
-- Node.js 20 or newer
+- Node.js 22 or newer
 - npm
 
 Install and start the local demo:
@@ -77,21 +77,42 @@ Noosphere validates the account object and registered delegate key on the
 selected Sui network before storing or recalling memory. The matching Walrus
 Memory relayer URL is selected automatically.
 
+The relayer binds to `127.0.0.1` by default. For a public deployment, set
+`HOST=0.0.0.0`, generate `NOOSPHERE_API_TOKEN` with
+`openssl rand -hex 32`, and configure exact `CORS_ORIGINS`. Production startup
+fails closed when the API token is missing. CLI tools and hooks read the token
+from the `NOOSPHERE_API_TOKEN` environment variable. Production and
+non-loopback modes never permit the local authentication bypass.
+
+Every action is written to a permission-restricted local pending queue before
+upload. Temporary Walrus failures are retried with exponential backoff, and
+pending writes plus idempotency receipts survive process restarts. Successful
+memory content remains in Walrus; the local pending entry is removed.
+
 ## Enable continuity
 
-Initialize Noosphere in a project and start the watcher:
+Install the user lifecycle once on macOS:
 
 ```sh
-npm --prefix noosphere-mcp run continuity:init
-npm --prefix noosphere-mcp run continuity:watch
+npm --prefix noosphere-mcp run install:user
+source ~/.zshrc
 ```
 
-The watcher fingerprints the Git working tree. After eight quiet seconds, it
-stores a metadata-only checkpoint. It also refreshes
-`.noosphere/context.md` every twenty seconds so the next agent can continue
-from the latest shared state.
+The installer copies a self-contained runtime to `~/.noosphere`, adds the
+`noosphere` command, and installs two macOS LaunchAgents. The relayer starts
+at login. A single project manager starts and supervises one watcher for every
+registered repository.
 
-Keep the watcher running while supported CLIs or IDEs edit the workspace.
+The zsh integration automatically activates the Git repository whenever a
+terminal enters it. First activation creates the project files and registers
+the repository; later activations are effectively no-ops. Each repository
+gets its own project ID and Walrus namespace. Add `.noosphere-ignore` to a
+repository to opt out, or run `noosphere deactivate`.
+
+The watcher fingerprints the Git working tree. After eight quiet seconds, it
+stores a metadata-only checkpoint and refreshes `.noosphere/context.md` so
+the next agent can continue from the latest shared state. No manual watcher
+command is required after installation.
 
 ## Connect agents
 
@@ -149,4 +170,28 @@ npm test
 
 cd ../noosphere-mcp
 npm run check
+npm test
 ```
+
+For public deployments, verify authenticated access as well:
+
+```sh
+NODE_ENV=production HOST=0.0.0.0 npm start
+curl -H "Authorization: Bearer $NOOSPHERE_API_TOKEN" \
+  "http://127.0.0.1:3001/v1/projects/<project>/context?q=status"
+```
+
+The relayer also includes a non-root production container:
+
+```sh
+docker build -t noosphere-relayer noosphere-relayer
+docker run --rm -p 3001:3001 \
+  --env-file noosphere-relayer/.env \
+  -e NODE_ENV=production \
+  -e HOST=0.0.0.0 \
+  -v noosphere-state:/app/.noosphere-runtime \
+  noosphere-relayer
+```
+
+Set `NOOSPHERE_API_TOKEN` and deployment-specific `CORS_ORIGINS` before
+starting the container.

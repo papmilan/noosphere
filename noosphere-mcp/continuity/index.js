@@ -12,9 +12,17 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import {
+  disableProject,
+  readRegistry,
+  registerProject,
+} from '../lifecycle/registry.js';
+
 const execFileAsync = promisify(execFile);
+const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_RELAYER_URL = 'http://127.0.0.1:3001';
 const DEFAULT_DEBOUNCE_MS = 8_000;
 const DEFAULT_REFRESH_MS = 20_000;
@@ -34,6 +42,22 @@ try {
   switch (command) {
     case 'init':
       await initializeProject(projectDir);
+      break;
+    case 'activate':
+      await activateProject(projectDir, {
+        quiet: process.argv.includes('--quiet'),
+      });
+      break;
+    case 'deactivate':
+      await deactivateProject(projectDir);
+      break;
+    case 'projects':
+      await printProjects();
+      break;
+    case 'install':
+    case 'uninstall':
+    case 'doctor':
+      await runLifecycleCommand(command);
       break;
     case 'watch':
       await watchProject(projectDir);
@@ -107,7 +131,60 @@ export async function initializeProject(root) {
   await ensureGitignore(root);
 
   console.log(`Noosphere continuity initialized for ${projectId}.`);
-  console.log('Run: npm --prefix noosphere-mcp run continuity:watch');
+  console.log('The Noosphere project manager will start its watcher.');
+}
+
+export async function activateProject(start, { quiet = false } = {}) {
+  const root = await findGitRoot(start);
+  if (!root) {
+    if (!quiet) console.log('Noosphere: current directory is not a Git project.');
+    return { skipped: true, reason: 'not-git' };
+  }
+  if (await exists(path.join(root, '.noosphere-ignore'))) {
+    if (!quiet) console.log(`Noosphere: ignored ${root}`);
+    return { skipped: true, reason: 'ignored', root };
+  }
+
+  const configPath = path.join(root, '.noosphere.json');
+  if (!(await exists(configPath))) {
+    await initializeProject(root);
+  }
+  const config = await loadConfig(root);
+  await registerProject(root, config.project_id);
+  if (!quiet) {
+    console.log(`Noosphere active: ${config.project_id} (${root})`);
+  }
+  return { activated: true, root, project_id: config.project_id };
+}
+
+export async function deactivateProject(start) {
+  const root = (await findGitRoot(start)) || path.resolve(start);
+  await disableProject(root);
+  console.log(`Noosphere disabled for ${root}`);
+}
+
+async function printProjects() {
+  const registry = await readRegistry();
+  console.log(JSON.stringify(registry.projects, null, 2));
+}
+
+async function runLifecycleCommand(action) {
+  const installer = path.resolve(
+    moduleDirectory,
+    '..',
+    'lifecycle',
+    'install.js',
+  );
+  const { stdout, stderr } = await execFileAsync(
+    process.execPath,
+    [installer, action],
+    {
+      env: process.env,
+      maxBuffer: 2_000_000,
+    },
+  );
+  if (stdout) process.stdout.write(stdout);
+  if (stderr) process.stderr.write(stderr);
 }
 
 export async function watchProject(root, options = {}) {
@@ -700,7 +777,7 @@ async function git(root, args) {
     cwd: root,
     maxBuffer: 2_000_000,
   });
-  return stdout.trim();
+  return stdout.trimEnd();
 }
 
 async function assertGitRepository(root) {
@@ -708,9 +785,21 @@ async function assertGitRepository(root) {
   if (inside !== 'true') throw new Error('Current directory is not a Git repository.');
 }
 
+async function findGitRoot(start) {
+  try {
+    return await git(path.resolve(start), [
+      'rev-parse',
+      '--show-toplevel',
+    ]);
+  } catch {
+    return null;
+  }
+}
+
 async function requestJson(url, options) {
   const response = await fetch(url, {
     ...options,
+    headers: withAuthentication(options?.headers),
     signal: AbortSignal.timeout(
       Number(process.env.NOOSPHERE_WRITE_TIMEOUT_MS) ||
         DEFAULT_WRITE_TIMEOUT_MS,
@@ -725,7 +814,7 @@ async function requestJson(url, options) {
 
 async function requestText(url) {
   const response = await fetch(url, {
-    headers: { accept: 'text/plain' },
+    headers: withAuthentication({ accept: 'text/plain' }),
     signal: AbortSignal.timeout(
       Number(process.env.NOOSPHERE_READ_TIMEOUT_MS) ||
         DEFAULT_READ_TIMEOUT_MS,
@@ -738,12 +827,30 @@ async function requestText(url) {
   return text;
 }
 
+function withAuthentication(headers = {}) {
+  const token = process.env.NOOSPHERE_API_TOKEN;
+  if (!token) return headers;
+  return {
+    ...headers,
+    authorization: `Bearer ${token}`,
+  };
+}
+
 async function readJson(file) {
   try {
     return JSON.parse(await readFile(file, 'utf8'));
   } catch (error) {
     if (error.code === 'ENOENT') return null;
     throw error;
+  }
+}
+
+async function exists(file) {
+  try {
+    await access(file);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -812,6 +919,12 @@ function printHelp() {
   console.log(`Noosphere continuity
 
 Commands:
+  install     Install Noosphere and automatic macOS startup
+  uninstall   Remove the user installation and LaunchAgents
+  doctor      Check the installed lifecycle and credentials
+  activate    Auto-initialize and register the current Git project
+  deactivate  Stop automatically watching the current project
+  projects    List registered projects
   init        Add project config and agent instructions
   watch       Checkpoint settled working-tree changes and refresh context
   checkpoint  Store the current workspace state now

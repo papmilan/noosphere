@@ -17,6 +17,13 @@
 - It can ask an AI model to evaluate an output only when
   `SCORING_MODE=remote` is explicitly enabled.
 - It stores the evaluation beside the output so later agents can inspect it.
+- It binds to loopback by default and requires bearer-token authentication
+  for production or non-loopback deployments.
+- It restricts browser access to an explicit origin allowlist and rate-limits
+  clients.
+- It persists pending uploads and idempotency receipts atomically with
+  owner-only filesystem permissions, then removes pending content after a
+  successful Walrus write.
 
 ## Honest limitations
 
@@ -32,6 +39,11 @@
 - Demo mode persists to a local gitignored file, but it is not shared across
   machines, does not use Walrus, and should be treated as local plaintext
   development storage.
+- Pending uploads are temporarily present as plaintext in the local
+  permission-restricted runtime queue until Walrus confirms storage. Operators
+  must protect the host and runtime volume.
+- The built-in rate limiter is process-local. Multi-instance public
+  deployments should enforce an additional shared limit at the reverse proxy.
 - Automatic checkpoints preserve observable workspace state, not unspoken
   reasoning. Session summaries or explicit memories are still needed for
   decisions that are not visible in files.

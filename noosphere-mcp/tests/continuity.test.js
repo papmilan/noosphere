@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import {
   mkdtemp,
   mkdir,
+  realpath,
   readFile,
   rm,
   writeFile,
@@ -25,6 +26,8 @@ const cli = path.join(packageRoot, 'continuity', 'index.js');
 let server;
 let serverUrl;
 let projectDir;
+let secondProjectDir;
+let lifecycleHome;
 let storedActions;
 
 before(async () => {
@@ -58,6 +61,12 @@ before(async () => {
   serverUrl = `http://127.0.0.1:${server.address().port}`;
 
   projectDir = await mkdtemp(path.join(os.tmpdir(), 'noosphere-continuity-'));
+  secondProjectDir = await mkdtemp(
+    path.join(os.tmpdir(), 'noosphere-second-project-'),
+  );
+  lifecycleHome = await mkdtemp(
+    path.join(os.tmpdir(), 'noosphere-user-home-'),
+  );
   await execFileAsync('git', ['init'], { cwd: projectDir });
   await execFileAsync('git', ['config', 'user.email', 'test@example.com'], {
     cwd: projectDir,
@@ -70,11 +79,30 @@ before(async () => {
   await execFileAsync('git', ['commit', '-m', 'initial'], {
     cwd: projectDir,
   });
+  await execFileAsync('git', ['init'], { cwd: secondProjectDir });
+  await execFileAsync('git', ['config', 'user.email', 'test@example.com'], {
+    cwd: secondProjectDir,
+  });
+  await execFileAsync('git', ['config', 'user.name', 'Noosphere Test'], {
+    cwd: secondProjectDir,
+  });
+  await writeFile(
+    path.join(secondProjectDir, 'second.js'),
+    'export const second = 1;\n',
+  );
+  await execFileAsync('git', ['add', 'second.js'], {
+    cwd: secondProjectDir,
+  });
+  await execFileAsync('git', ['commit', '-m', 'initial'], {
+    cwd: secondProjectDir,
+  });
 });
 
 after(async () => {
   await new Promise((resolve) => server.close(resolve));
   await rm(projectDir, { recursive: true, force: true });
+  await rm(secondProjectDir, { recursive: true, force: true });
+  await rm(lifecycleHome, { recursive: true, force: true });
 });
 
 describe('Noosphere continuity CLI', () => {
@@ -84,6 +112,8 @@ describe('Noosphere continuity CLI', () => {
     const config = JSON.parse(await readFile(configPath, 'utf8'));
     config.project_id = 'continuity-test';
     config.relayer_url = serverUrl;
+    config.checkpoint_debounce_ms = 100;
+    config.context_refresh_ms = 60_000;
     await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 
     const [
@@ -138,8 +168,85 @@ describe('Noosphere continuity CLI', () => {
     assert.equal(action.action_type, 'checkpoint');
     assert.match(action.content, /app\.js/);
     assert.match(action.content, /Raw source diff was not uploaded/);
+    assert.ok(action.metadata.checkpoint.changed_files.includes('app.js'));
     assert.equal(action.metadata.privacy.include_diff, false);
     assert.equal('diff' in action.metadata.checkpoint, false);
+  });
+
+  it('auto-initializes and registers separate Git projects', async () => {
+    const nested = path.join(secondProjectDir, 'src', 'nested');
+    await mkdir(nested, { recursive: true });
+    await runCli(['activate', '--quiet'], secondProjectDir);
+    const secondConfigPath = path.join(secondProjectDir, '.noosphere.json');
+    const secondConfig = JSON.parse(
+      await readFile(secondConfigPath, 'utf8'),
+    );
+    secondConfig.project_id = 'second-project';
+    secondConfig.relayer_url = serverUrl;
+    secondConfig.checkpoint_debounce_ms = 100;
+    secondConfig.context_refresh_ms = 60_000;
+    await writeFile(
+      secondConfigPath,
+      `${JSON.stringify(secondConfig, null, 2)}\n`,
+    );
+    await runCli(['activate', '--quiet'], nested);
+    await runCli(['activate', '--quiet'], projectDir);
+
+    const registry = JSON.parse(
+      await readFile(path.join(lifecycleHome, 'projects.json'), 'utf8'),
+    );
+    const canonicalFirst = await realpath(projectDir);
+    const canonicalSecond = await realpath(secondProjectDir);
+    assert.equal(registry.projects.length, 2);
+    assert.ok(
+      registry.projects.some((project) => project.path === canonicalFirst),
+    );
+    assert.ok(
+      registry.projects.some(
+        (project) => project.path === canonicalSecond,
+      ),
+    );
+  });
+
+  it('one manager automatically watches every registered project', async () => {
+    const manager = path.join(packageRoot, 'lifecycle', 'manager.js');
+    const child = spawn(process.execPath, [manager], {
+      env: {
+        ...process.env,
+        NOOSPHERE_HOME: lifecycleHome,
+        NOOSPHERE_MANAGER_POLL_MS: '100',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const startingCount = storedActions.length;
+    try {
+      await delay(250);
+      await writeFile(
+        path.join(projectDir, 'app.js'),
+        'export const value = 4;\n',
+      );
+      await writeFile(
+        path.join(secondProjectDir, 'second.js'),
+        'export const second = 2;\n',
+      );
+      await waitFor(
+        () => {
+          const recent = storedActions.slice(startingCount);
+          return (
+            recent.some(
+              (action) => action.project_id === 'continuity-test',
+            ) &&
+            recent.some(
+              (action) => action.project_id === 'second-project',
+            )
+          );
+        },
+        5_000,
+      );
+    } finally {
+      child.kill('SIGTERM');
+      await new Promise((resolve) => child.once('close', resolve));
+    }
   });
 
   it('refreshes the shared context file for every agent', async () => {
@@ -222,12 +329,13 @@ describe('Noosphere continuity CLI', () => {
   });
 });
 
-async function runCli(args) {
+async function runCli(args, cwd = projectDir) {
   const child = spawn(process.execPath, [cli, ...args], {
-    cwd: projectDir,
+    cwd,
     env: {
       ...process.env,
-      NOOSPHERE_PROJECT_DIR: projectDir,
+      NOOSPHERE_HOME: lifecycleHome,
+      NOOSPHERE_PROJECT_DIR: cwd,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

@@ -27,4 +27,5 @@ tests/.tmp-*
 .noosphere/state.json
 .noosphere/*.tmp
 noosphere-relayer/.noosphere-local-memory.json
+noosphere-relayer/.noosphere-runtime/
 .noosphere/journal.md

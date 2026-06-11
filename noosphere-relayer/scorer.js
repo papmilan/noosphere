@@ -84,7 +84,9 @@ function normalizeScore(result) {
     0,
   );
   const dimensionMaximum = Math.max(
-    ...POLICY.dimensions.map(({ range }) => Math.abs(range[1])),
+    ...POLICY.dimensions.map(({ range }) =>
+      Math.max(Math.abs(range[0]), Math.abs(range[1])),
+    ),
   );
 
   return {

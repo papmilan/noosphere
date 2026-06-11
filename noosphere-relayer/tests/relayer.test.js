@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { mkdtemp } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
+import express from 'express';
 
 process.env.DEMO_MODE = 'true';
 process.env.NODE_ENV = 'test';
@@ -11,6 +15,14 @@ const { MemoryStore, memoryStore, parseMemory, serializeMemory } =
   await import('../memory.js');
 const { resolveWalrusConfig, WALRUS_NETWORKS } =
   await import('../walrus-memory.js');
+const { DurableStore, retryOperation } =
+  await import('../durable-store.js');
+const {
+  authenticationMiddleware,
+  corsMiddleware,
+  rateLimitMiddleware,
+  resolveSecurityConfig,
+} = await import('../security.js');
 
 describe('Noosphere memory API', () => {
   let server;
@@ -86,6 +98,131 @@ describe('Noosphere memory API', () => {
     );
   });
 
+  it('requires authentication for production and non-loopback binding', () => {
+    assert.throws(
+      () => resolveSecurityConfig({ NODE_ENV: 'production' }),
+      /NOOSPHERE_API_TOKEN/,
+    );
+    assert.throws(
+      () => resolveSecurityConfig({ HOST: '0.0.0.0' }),
+      /NOOSPHERE_API_TOKEN/,
+    );
+
+    const config = resolveSecurityConfig({
+      HOST: '0.0.0.0',
+      NODE_ENV: 'production',
+      NOOSPHERE_API_TOKEN: 'test-secret',
+      CORS_ORIGINS: 'https://app.noosphere.example',
+    });
+    assert.equal(config.host, '0.0.0.0');
+    assert.equal(config.allowLoopbackWithoutToken, false);
+    assert.deepEqual(config.corsOrigins, [
+      'https://app.noosphere.example',
+    ]);
+  });
+
+  it('enforces bearer auth, exact CORS origins, and rate limits', async () => {
+    const protectedApp = express();
+    const config = resolveSecurityConfig({
+      NOOSPHERE_API_TOKEN: 'test-secret',
+      ALLOW_LOOPBACK_WITHOUT_TOKEN: 'false',
+      CORS_ORIGINS: 'https://allowed.example',
+      RATE_LIMIT_MAX: '2',
+    });
+    protectedApp.use(corsMiddleware(config));
+    protectedApp.use(rateLimitMiddleware(config, () => 1_000));
+    protectedApp.use(authenticationMiddleware(config));
+    protectedApp.get('/v1/test', (_req, res) => res.json({ ok: true }));
+    const protectedServer = protectedApp.listen(0, '127.0.0.1');
+    await once(protectedServer, 'listening');
+    const protectedUrl =
+      `http://127.0.0.1:${protectedServer.address().port}/v1/test`;
+
+    try {
+      const forbiddenOrigin = await fetch(protectedUrl, {
+        headers: { origin: 'https://blocked.example' },
+      });
+      assert.equal(forbiddenOrigin.status, 403);
+
+      const unauthorized = await fetch(protectedUrl, {
+        headers: { origin: 'https://allowed.example' },
+      });
+      assert.equal(unauthorized.status, 401);
+
+      const authorized = await fetch(protectedUrl, {
+        headers: {
+          authorization: 'Bearer test-secret',
+          origin: 'https://allowed.example',
+        },
+      });
+      assert.equal(authorized.status, 200);
+      assert.equal(
+        authorized.headers.get('access-control-allow-origin'),
+        'https://allowed.example');
+
+      const limited = await fetch(protectedUrl, {
+        headers: {
+          authorization: 'Bearer test-secret',
+          origin: 'https://allowed.example',
+        },
+      });
+      assert.equal(limited.status, 429);
+    } finally {
+      await new Promise((resolve) => protectedServer.close(resolve));
+    }
+  });
+
+  it('persists pending jobs and idempotency receipts across restarts', async () => {
+    const stateDirectory = await mkdtemp(
+      path.join(os.tmpdir(), 'noosphere-state-'),
+    );
+    const filePath = path.join(stateDirectory, 'state.json');
+    const first = new DurableStore({ filePath });
+    await first.enqueue('project:action', {
+      projectId: 'project',
+      serializedRecord: 'record',
+      responseTemplate: { success: true },
+    });
+
+    const restarted = new DurableStore({ filePath });
+    assert.equal(
+      (await restarted.getPending('project:action')).projectId,
+      'project',
+    );
+    await restarted.complete('project:action', {
+      success: true,
+      blob_id: 'remote-blob',
+    });
+
+    const secondRestart = new DurableStore({ filePath });
+    assert.deepEqual(await secondRestart.getReceipt('project:action'), {
+      success: true,
+      blob_id: 'remote-blob',
+    });
+    assert.equal(await secondRestart.getPending('project:action'), null);
+  });
+
+  it('retries temporary upload failures with exponential backoff', async () => {
+    let calls = 0;
+    const delays = [];
+    const result = await retryOperation(
+      async () => {
+        calls += 1;
+        if (calls < 3) throw new Error('temporary failure');
+        return 'stored';
+      },
+      {
+        attempts: 3,
+        baseDelayMs: 10,
+        sleep: async (delay) => delays.push(delay),
+      },
+    );
+
+    assert.equal(result, 'stored');
+    assert.equal(calls, 3);
+    assert.deepEqual(delays, [10, 20]);
+  });
+
   it('recovers the local persistence queue after a failed write', async () => {
     const store = new MemoryStore();
     store.persistDemo = true;
@@ -143,7 +280,7 @@ describe('Noosphere memory API', () => {
     assert.equal(response.status, 201);
     assert.equal(body.success, true);
     assert.match(body.blob_id, /^demo-/);
-    assert.equal(body.storage, 'walrus-memory');
+    assert.equal(body.storage, 'demo');
     assert.equal(body.score_delta, 0);
     assert.equal(body.score_status, 'private');
     assert.equal(body.privacy.remote_evaluation, false);

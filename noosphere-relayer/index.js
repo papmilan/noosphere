@@ -6,10 +6,21 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  DurableStore,
+  retryOperation,
+} from './durable-store.js';
+import {
   memoryStore,
   parseMemory,
   serializeMemory,
 } from './memory.js';
+import {
+  authenticationMiddleware,
+  corsMiddleware,
+  rateLimitMiddleware,
+  resolveSecurityConfig,
+  securityHeaders,
+} from './security.js';
 import {
   getScoringPolicy,
   neutralScore,
@@ -17,6 +28,7 @@ import {
 } from './scorer.js';
 
 export const app = express();
+app.disable('x-powered-by');
 
 const trustProxy = parseTrustProxy(process.env.TRUST_PROXY);
 if (trustProxy !== undefined) {
@@ -25,58 +37,50 @@ if (trustProxy !== undefined) {
 
 const port = Number(process.env.PORT || 3001);
 const directory = path.dirname(fileURLToPath(import.meta.url));
-const receipts = new Map();
-const receiptTimestamps = new Map();
-const RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
-
-function setReceipt(key, value) {
-  receipts.set(key, value);
-  receiptTimestamps.set(key, Date.now());
-  for (const [k, ts] of receiptTimestamps) {
-    if (Date.now() - ts > RECEIPT_TTL_MS) {
-      receipts.delete(k);
-      receiptTimestamps.delete(k);
-    }
-  }
-}
-
-function getReceipt(key) {
-  const timestamp = receiptTimestamps.get(key);
-  if (
-    timestamp === undefined ||
-    Date.now() - timestamp > RECEIPT_TTL_MS
-  ) {
-    receipts.delete(key);
-    receiptTimestamps.delete(key);
-    return null;
-  }
-  return receipts.get(key) || null;
-}
-
-app.use((req, res, next) => {
-  res.set({
-    'Access-Control-Allow-Origin': process.env.CORS_ORIGIN || '*',
-    'Access-Control-Allow-Headers':
-      'Content-Type, Authorization, Idempotency-Key, X-Agent-Id',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  });
-
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(204);
-    return;
-  }
-
-  next();
+export const securityConfig = resolveSecurityConfig(process.env);
+export const runtimeStore = new DurableStore({
+  filePath:
+    process.env.NOOSPHERE_STATE_PATH ||
+    path.join(directory, '.noosphere-runtime', 'state.json'),
+  persist: process.env.NODE_ENV !== 'test',
 });
+const activeJobs = new Map();
+const uploadAttempts = parsePositiveInteger(
+  process.env.UPLOAD_RETRY_ATTEMPTS,
+  3,
+  'UPLOAD_RETRY_ATTEMPTS',
+);
+const uploadRetryBaseMs = parsePositiveInteger(
+  process.env.UPLOAD_RETRY_BASE_MS,
+  1_000,
+  'UPLOAD_RETRY_BASE_MS',
+);
+
+app.use(securityHeaders);
+app.use(corsMiddleware(securityConfig));
+app.use(rateLimitMiddleware(securityConfig));
 app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(directory, 'public')));
 
 app.get('/health', async (_req, res) => {
-  const memory = await memoryStore.health();
+  const [memory, pending] = await Promise.all([
+    memoryStore.health(),
+    runtimeStore.listPending(),
+  ]);
   res.json({
     success: memory.ready,
     service: 'Noosphere',
     memory,
+    queue: {
+      pending: pending.length,
+      durable: runtimeStore.persist,
+    },
+    security: {
+      host: securityConfig.host,
+      authentication:
+        securityConfig.apiToken ? 'bearer-token' : 'loopback-only',
+      cors_origins: securityConfig.corsOrigins,
+    },
     scorer_configured: Boolean(process.env.ANTHROPIC_API_KEY),
     scoring_mode: process.env.SCORING_MODE || 'private',
   });
@@ -95,6 +99,14 @@ app.get('/.well-known/noosphere.json', (req, res) => {
       search: 'Walrus Memory semantic recall',
       access_control: 'Walrus Memory account and delegate permissions',
       custom_smart_contract: false,
+    },
+    security: {
+      loopback_default: true,
+      external_authentication: 'Bearer token',
+      cors_origins: securityConfig.corsOrigins,
+      rate_limit_per_window: securityConfig.rateLimitMax,
+      rate_limit_window_ms: securityConfig.rateLimitWindowMs,
+      durable_upload_queue: true,
     },
     endpoints: {
       remember: `${baseUrl}/v1/actions`,
@@ -130,6 +142,8 @@ app.get('/scoring-policy', (_req, res) => {
   res.json(getScoringPolicy());
 });
 
+app.use('/v1', authenticationMiddleware(securityConfig));
+
 app.post('/v1/actions', async (req, res, next) => {
   try {
     const action = validateAction(req.body);
@@ -137,9 +151,16 @@ app.post('/v1/actions', async (req, res, next) => {
       requireOptionalString(req.get('Idempotency-Key')) || randomUUID();
     const receiptKey = `${action.project_id}:${actionId}`;
 
-    const previousReceipt = getReceipt(receiptKey);
+    const previousReceipt = await runtimeStore.getReceipt(receiptKey);
     if (previousReceipt) {
       res.json({ ...previousReceipt, deduplicated: true });
+      return;
+    }
+
+    const pending = await runtimeStore.getPending(receiptKey);
+    if (pending) {
+      const recovered = await processPendingJob(pending);
+      res.json({ ...recovered, deduplicated: true, recovered: true });
       return;
     }
 
@@ -167,20 +188,9 @@ app.post('/v1/actions', async (req, res, next) => {
         policy_version: scoring.scoring_policy_version,
       },
     };
-
-    console.log(
-      `[memory] Remembering ${record.agent_id}/${record.action_type} in ${record.project_id}`,
-    );
-    const stored = await memoryStore.remember(
-      record.project_id,
-      serializeMemory(record),
-    );
-    const response = {
+    const responseTemplate = {
       success: true,
       action_id: actionId,
-      blob_id: stored.blob_id,
-      memory_id: stored.id,
-      namespace: stored.namespace,
       score_delta: scoring.score_delta,
       score_breakdown: scoring.dimensions,
       score_reasoning: scoring.reasoning,
@@ -193,10 +203,18 @@ app.post('/v1/actions', async (req, res, next) => {
           process.env.SCORING_MODE === 'remote' &&
           scoring.score_status === 'scored',
       },
-      storage: 'walrus-memory',
+      storage: memoryStore.mode,
     };
+    const job = await runtimeStore.enqueue(receiptKey, {
+      projectId: record.project_id,
+      serializedRecord: serializeMemory(record),
+      responseTemplate,
+    });
 
-    setReceipt(receiptKey, response);
+    console.log(
+      `[memory] Remembering ${record.agent_id}/${record.action_type} in ${record.project_id}`,
+    );
+    const response = await processPendingJob(job);
     res.status(201).json(response);
   } catch (error) {
     next(error);
@@ -311,10 +329,15 @@ app.use((error, _req, res, _next) => {
 export let server = null;
 
 if (process.env.NODE_ENV !== 'test') {
-  server = app.listen(port, () => {
-    console.log(`Noosphere is live on port ${port}`);
+  await runtimeStore.initialize();
+  server = app.listen(port, securityConfig.host, () => {
+    console.log(
+      `Noosphere is live on ${securityConfig.host}:${port}`,
+    );
     console.log(`Memory backend: ${memoryStore.mode}`);
+    void recoverPendingJobs();
   });
+  installShutdownHandlers();
 }
 
 export async function resolveActionScore(
@@ -371,6 +394,73 @@ async function recallProject(projectId, query, limit) {
         (a.distance ?? 1) - (b.distance ?? 1) ||
         (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0),
     );
+}
+
+async function processPendingJob(job) {
+  if (activeJobs.has(job.key)) return activeJobs.get(job.key);
+
+  const operation = retryOperation(
+    async () => {
+      const stored = await memoryStore.remember(
+        job.projectId,
+        job.serializedRecord,
+      );
+      const response = {
+        ...job.responseTemplate,
+        blob_id: stored.blob_id,
+        memory_id: stored.id,
+        namespace: stored.namespace,
+      };
+      await runtimeStore.complete(job.key, response);
+      return response;
+    },
+    {
+      attempts: uploadAttempts,
+      baseDelayMs: uploadRetryBaseMs,
+      onFailure: (error) => runtimeStore.markAttempt(job.key, error),
+    },
+  )
+    .catch((error) => {
+      error.status = error.status || 503;
+      throw error;
+    })
+    .finally(() => {
+      activeJobs.delete(job.key);
+    });
+  activeJobs.set(job.key, operation);
+  return operation;
+}
+
+async function recoverPendingJobs() {
+  const pending = await runtimeStore.listPending();
+  if (pending.length === 0) return;
+  console.log(`[queue] Recovering ${pending.length} pending upload(s)`);
+  for (const job of pending) {
+    try {
+      await processPendingJob(job);
+      console.log(`[queue] Recovered ${job.key}`);
+    } catch (error) {
+      console.error(`[queue] Recovery failed for ${job.key}: ${error.message}`);
+    }
+  }
+}
+
+function installShutdownHandlers() {
+  let stopping = false;
+  const stop = (signal) => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`[shutdown] ${signal} received`);
+    const forceExit = setTimeout(() => process.exit(1), 10_000);
+    forceExit.unref();
+    server.close(async () => {
+      await runtimeStore.writeChain.catch(() => undefined);
+      clearTimeout(forceExit);
+      process.exit(0);
+    });
+  };
+  process.once('SIGINT', () => stop('SIGINT'));
+  process.once('SIGTERM', () => stop('SIGTERM'));
 }
 
 function validateAction(body) {
@@ -433,6 +523,15 @@ function parseLimit(value, fallback = 10) {
   return limit;
 }
 
+function parsePositiveInteger(value, fallback, name) {
+  if (value === undefined || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
 function requireNonEmptyString(value, fieldName) {
   if (typeof value !== 'string' || value.trim() === '') {
     throw badRequest(`${fieldName} must be a non-empty string`);
@@ -487,9 +586,18 @@ function buildOpenApiDocument(baseUrl) {
         'Thin agent-memory API backed by the official Walrus Memory service.',
     },
     servers: [{ url: baseUrl }],
+    components: {
+      securitySchemes: {
+        bearerAuth: {
+          type: 'http',
+          scheme: 'bearer',
+        },
+      },
+    },
     paths: {
       '/v1/actions': {
         post: {
+          security: [{ bearerAuth: [] }],
           operationId: 'rememberAgentAction',
           summary: 'Evaluate and remember an agent action',
           requestBody: {
@@ -526,6 +634,7 @@ function buildOpenApiDocument(baseUrl) {
       },
       '/v1/projects/{project_id}/recall': {
         post: {
+          security: [{ bearerAuth: [] }],
           operationId: 'recallProjectMemory',
           summary: 'Semantically recall project memories',
           responses: { 200: { description: 'Relevant memories' } },
@@ -533,6 +642,7 @@ function buildOpenApiDocument(baseUrl) {
       },
       '/v1/projects/{project_id}/context': {
         get: {
+          security: [{ bearerAuth: [] }],
           operationId: 'getProjectContext',
           summary: 'Get prompt-ready semantic project context',
           responses: { 200: { description: 'Prompt-ready context' } },
@@ -540,6 +650,7 @@ function buildOpenApiDocument(baseUrl) {
       },
       '/v1/projects/{project_id}/bootstrap': {
         get: {
+          security: [{ bearerAuth: [] }],
           operationId: 'bootstrapAnyAgent',
           summary: 'Get universal instructions and project context',
           responses: {
