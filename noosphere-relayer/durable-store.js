@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
+  access,
+  constants,
   mkdir,
   readFile,
   rename,
@@ -104,6 +106,17 @@ export class DurableStore {
   async listPending() {
     await this.initialize();
     return Object.values(this.state.pending);
+  }
+
+  async health() {
+    await this.initialize();
+    if (!this.persist) return { ready: true, durable: false };
+    await mkdir(path.dirname(this.filePath), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await access(path.dirname(this.filePath), constants.W_OK);
+    return { ready: true, durable: true };
   }
 
   async prune() {

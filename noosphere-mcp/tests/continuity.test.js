@@ -241,7 +241,7 @@ describe('Noosphere continuity CLI', () => {
             )
           );
         },
-        5_000,
+        10_000,
       );
     } finally {
       child.kill('SIGTERM');

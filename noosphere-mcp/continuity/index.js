@@ -19,7 +19,12 @@ import {
   disableProject,
   readRegistry,
   registerProject,
+  pauseProject,
+  resumeProject,
+  forgetProject,
 } from '../lifecycle/registry.js';
+import { writeHint } from '../lifecycle/ide-bridge.js';
+import { runSetupWizard, runCredentialsCommand } from './credentials-cli.js';
 
 const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -32,8 +37,10 @@ const MANAGED_START = '<!-- noosphere:continuity:start -->';
 const MANAGED_END = '<!-- noosphere:continuity:end -->';
 
 const command = process.argv[2] || 'help';
+const explicitProjectPath = readOption('--path');
 const projectDir = path.resolve(
-  process.env.NOOSPHERE_PROJECT_DIR ||
+  explicitProjectPath ||
+    process.env.NOOSPHERE_PROJECT_DIR ||
     process.env.INIT_CWD ||
     '.',
 );
@@ -85,6 +92,27 @@ try {
       break;
     case 'protocol':
       await printProtocol(projectDir);
+      break;
+    case 'register':
+      await registerCurrentProject(projectDir);
+      break;
+    case 'pause':
+      await pauseProject(process.argv[3]);
+      console.log(`Paused project ${process.argv[3]}`);
+      break;
+    case 'resume':
+      await resumeProject(process.argv[3]);
+      console.log(`Resumed project ${process.argv[3]}`);
+      break;
+    case 'forget':
+      await forgetProject(process.argv[3]);
+      console.log(`Forgot project ${process.argv[3]}`);
+      break;
+    case 'setup':
+      await runSetupWizard();
+      break;
+    case 'credentials':
+      await runCredentialsCommand(process.argv[3]);
       break;
     default:
       printHelp();
@@ -161,6 +189,44 @@ export async function deactivateProject(start) {
   const root = (await findGitRoot(start)) || path.resolve(start);
   await disableProject(root);
   console.log(`Noosphere disabled for ${root}`);
+}
+
+/**
+ * One-time registration of the current project via the IDE bridge hint file.
+ *
+ * 1. Finds the Git root of `start`.
+ * 2. Reads (or generates) the project_id from `.noosphere.json`.
+ * 3. Writes `.noosphere/ide-hint.json`.
+ * 4. Calls registerProject to add the project to the registry.
+ * 5. Prints "Project registered: <project_id>".
+ *
+ * This enables "one-click Add project" from any terminal inside a GUI IDE.
+ */
+export async function registerCurrentProject(start) {
+  const root = await findGitRoot(path.resolve(start));
+  if (!root) {
+    throw new Error('Current directory is not inside a Git repository.');
+  }
+
+  if (await exists(path.join(root, '.noosphere-ignore'))) {
+    throw new Error(`Project is opted out of Noosphere tracking (found .noosphere-ignore).`);
+  }
+
+  // Ensure the project has a .noosphere.json (init if absent)
+  const configPath = path.join(root, '.noosphere.json');
+  if (!(await exists(configPath))) {
+    await initializeProject(root);
+  }
+  const config = await loadConfig(root);
+
+  // Write the hint file so the IDE bridge can pick this project up
+  await writeHint(root, config.project_id);
+
+  // Register immediately in the registry
+  await registerProject(root, config.project_id);
+
+  console.log(`Project registered: ${config.project_id}`);
+  console.log(`Path: ${root}`);
 }
 
 async function printProjects() {
@@ -915,15 +981,26 @@ function logBackgroundError(error) {
   console.warn(`Noosphere continuity: ${error.message}`);
 }
 
+function readOption(name) {
+  const index = process.argv.indexOf(name);
+  if (index === -1) return null;
+  const value = process.argv[index + 1];
+  if (!value || value.startsWith('--')) {
+    throw new Error(`${name} requires a value.`);
+  }
+  return value;
+}
+
 function printHelp() {
   console.log(`Noosphere continuity
 
 Commands:
-  install     Install Noosphere and automatic macOS startup
-  uninstall   Remove the user installation and LaunchAgents
+  install     Install Noosphere and automatic user startup
+  uninstall   Remove the user installation and background services
   doctor      Check the installed lifecycle and credentials
   activate    Auto-initialize and register the current Git project
   deactivate  Stop automatically watching the current project
+  register    Register a project now (supports --path /absolute/repository)
   projects    List registered projects
   init        Add project config and agent instructions
   watch       Checkpoint settled working-tree changes and refresh context

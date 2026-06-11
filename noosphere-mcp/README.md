@@ -16,33 +16,50 @@ or whether an agent remembers to call an MCP tool.
 The next agent sees the current files locally and receives the cross-session
 history through the shared context file.
 
-## Install once on macOS
+## Install once
 
 From this repository:
 
 ```sh
 npm --prefix noosphere-mcp run install:user
+~/.noosphere/bin/noosphere setup
 ```
 
-The installer:
+The installer supports macOS, Linux, and Windows. It:
 
 - installs the `noosphere` command under `~/.noosphere/bin`;
 - copies the relayer and continuity runtime into `~/.noosphere/app`;
-- installs a relayer LaunchAgent that starts at login and stays running;
-- installs a project-manager LaunchAgent that manages every watcher;
-- adds a small zsh directory hook.
+- installs per-user relayer and project-manager background services;
+- adds activation hooks for zsh, bash, fish, and PowerShell.
 
-When a new terminal enters a Git repository, the hook runs
+When a terminal enters a Git repository, the hook runs
 `noosphere activate --quiet`. The command discovers the repository root,
 initializes Noosphere if needed, and registers it with the project manager.
 Create `.noosphere-ignore` in a repository to prevent automatic activation.
 `noosphere deactivate` unregisters a project from the background manager.
 
-Existing terminals load the integration after:
+For a project opened directly in a GUI IDE, add it from the local dashboard at
+`http://127.0.0.1:3001/#projects` or use:
 
 ```sh
-source ~/.zshrc
+noosphere register --path /absolute/path/to/repository
 ```
+
+Noosphere does not scan the whole computer. Registration is explicit, honors
+`.noosphere-ignore`, canonicalizes symlinks, and produces only one watcher per
+physical repository.
+
+Credential commands:
+
+```sh
+noosphere setup
+noosphere credentials status
+noosphere credentials migrate
+noosphere credentials rotate
+```
+
+Setup validates the account and registered delegate on Sui before storage.
+Its optional smoke test performs a real Walrus store and semantic recall.
 
 Initialization creates:
 
@@ -89,9 +106,12 @@ when that trust boundary is unacceptable.
 
 ```sh
 noosphere install
+noosphere setup
+noosphere credentials status
 noosphere doctor
 noosphere activate
 noosphere deactivate
+noosphere register --path /absolute/path/to/repository
 noosphere projects
 noosphere checkpoint
 noosphere refresh

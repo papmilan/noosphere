@@ -12,6 +12,7 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 COPY --chown=node:node index.js memory.js walrus-memory.js ./
 COPY --chown=node:node durable-store.js security.js scorer.js ./
+COPY --chown=node:node credentials.js local-projects.js ./
 COPY --chown=node:node public ./public
 COPY --chown=node:node scoring-policy ./scoring-policy
 

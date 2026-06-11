@@ -241,13 +241,22 @@ describe('Noosphere memory API', () => {
   });
 
   it('reports demo memory and scorer status', async () => {
-    const response = await fetch(`${baseUrl}/health`);
+    const response = await fetch(`${baseUrl}/ready`);
     const body = await response.json();
 
     assert.equal(response.status, 200);
     assert.equal(body.memory.mode, 'demo');
     assert.equal(body.memory.ready, true);
     assert.equal(body.scorer_configured, false);
+  });
+
+  it('keeps liveness independent from Walrus readiness', async () => {
+    const response = await fetch(`${baseUrl}/health`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      status: 'ok',
+      service: 'Noosphere',
+    });
   });
 
   it('ignores forwarded protocol headers unless trust proxy is enabled', async () => {

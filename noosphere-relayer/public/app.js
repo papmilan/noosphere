@@ -9,8 +9,13 @@ const resultDescription = document.querySelector('#result-description');
 const submitButton = document.querySelector('#submit-button');
 const recallButton = document.querySelector('#recall-button');
 const integrationCommand = document.querySelector('#integration-command');
+const projectForm = document.querySelector('#project-form');
+const projectButton = document.querySelector('#project-button');
+const projectResult = document.querySelector('#project-result');
+const projectList = document.querySelector('#project-list');
+const credentialStatus = document.querySelector('#credential-status');
 
-await initialize();
+void initialize();
 
 rememberTab.addEventListener('click', () => showMode('remember'));
 recallTab.addEventListener('click', () => showMode('recall'));
@@ -74,10 +79,45 @@ recallForm.addEventListener('submit', async (event) => {
   }
 });
 
+projectForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  setBusy(projectButton, true, 'Adding...');
+  projectResult.replaceChildren();
+
+  try {
+    const response = await fetch('/v1/local/projects', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        path: projectForm.elements.path.value.trim(),
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.error || 'Project registration failed');
+    }
+
+    const message = document.createElement('p');
+    message.className = 'success';
+    message.textContent =
+      `${result.project.project_id || 'Project'} is registered. ` +
+      'The background watcher will start automatically.';
+    projectResult.replaceChildren(message);
+    projectForm.reset();
+    await loadLocalProjects();
+  } catch (error) {
+    renderError(projectResult, error);
+  } finally {
+    setBusy(projectButton, false, 'Add project');
+  }
+});
+
 async function initialize() {
   updateIntegration();
+  void loadLocalProjects();
+  void loadCredentialStatus();
   try {
-    const response = await fetch('/health');
+    const response = await fetch('/ready');
     const health = await response.json();
     const mode =
       health.memory?.mode === 'demo'
@@ -92,6 +132,150 @@ async function initialize() {
     statusElement.textContent = `${mode} / ${scorer}`;
   } catch {
     statusElement.textContent = 'Service unavailable';
+  }
+}
+
+async function loadCredentialStatus() {
+  try {
+    const response = await fetch('/v1/local/credentials/status');
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error);
+    credentialStatus.textContent = result.configured
+      ? `Credentials ready: ${result.network} / ${result.backend}`
+      : `Credentials are not configured. Run "noosphere setup" in a terminal.`;
+  } catch {
+    credentialStatus.textContent =
+      'Credential status is available only from the local Noosphere service.';
+  }
+}
+
+async function loadLocalProjects() {
+  try {
+    const response = await fetch('/v1/local/projects/state');
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.error || 'Project manager unavailable');
+    }
+    renderLocalProjects(result.states);
+  } catch (error) {
+    projectList.replaceChildren();
+    const message = document.createElement('p');
+    message.className = 'empty';
+    message.textContent =
+      'Local project registration is unavailable from this Noosphere instance.';
+    projectList.append(message);
+  }
+}
+
+function renderLocalProjects(projects) {
+  if (!projects.length) {
+    projectList.innerHTML =
+      '<p class="empty">No repositories registered yet. Add the first one above.</p>';
+    return;
+  }
+
+  projectList.replaceChildren(
+    ...projects.map((project) => {
+      const row = document.createElement('article');
+      const identity = document.createElement('div');
+      const name = document.createElement('strong');
+      name.textContent = project.project_id;
+      const location = document.createElement('code');
+      location.textContent = project.path;
+
+      const details = document.createElement('div');
+      details.className = 'project-details';
+      if (project.last_checkpoint_at) {
+        const cp = document.createElement('small');
+        cp.textContent =
+          `Last checkpoint: ` +
+          `${new Date(project.last_checkpoint_at).toLocaleString()} | `;
+        details.append(cp);
+      }
+      if (project.pending_count > 0) {
+        const pending = document.createElement('small');
+        pending.textContent = `Pending uploads: ${project.pending_count} | `;
+        details.append(pending);
+      }
+      if (project.latest_failure) {
+        const fail = document.createElement('small');
+        fail.style.color = 'red';
+        fail.textContent = `Failure: ${project.latest_failure.message || project.latest_failure}`;
+        details.append(fail);
+      }
+      identity.append(name, location, details);
+
+      const state = document.createElement('span');
+      state.textContent = project.enabled === false ? 'Paused' : 'Watching';
+      state.dataset.state =
+        project.enabled === false ? 'paused' : 'watching';
+
+      const controls = document.createElement('div');
+      controls.className = 'project-controls';
+      controls.style.display = 'flex';
+      controls.style.gap = '8px';
+      controls.style.marginTop = '8px';
+
+      const toggleBtn = document.createElement('button');
+      toggleBtn.textContent = project.enabled === false ? 'Resume' : 'Pause';
+      toggleBtn.type = 'button';
+      toggleBtn.onclick = () =>
+        projectAction(
+          project.project_id,
+          project.enabled === false ? 'resume' : 'pause',
+        );
+
+      const forgetBtn = document.createElement('button');
+      forgetBtn.textContent = 'Forget';
+      forgetBtn.type = 'button';
+      forgetBtn.onclick = () => projectAction(project.project_id, 'forget');
+
+      controls.append(toggleBtn, forgetBtn);
+
+      if (project.latest_failure || project.pending_count > 0) {
+        const retryBtn = document.createElement('button');
+        retryBtn.textContent = 'Retry Upload';
+        retryBtn.type = 'button';
+        retryBtn.onclick = () =>
+          projectAction(
+            project.project_id,
+            'retry',
+            project.retry_job_id,
+          );
+        controls.append(retryBtn);
+      }
+
+      identity.append(controls);
+
+      row.append(identity, state);
+      return row;
+    }),
+  );
+}
+
+async function projectAction(projectId, action, jobId = null) {
+  if (
+    action === 'forget' &&
+    !window.confirm(
+      'Forget this project locally? Files and Walrus memories are not deleted.',
+    )
+  ) {
+    return;
+  }
+  try {
+    const response = await fetch(
+      `/v1/local/projects/${encodeURIComponent(projectId)}/${action}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: jobId ? JSON.stringify({ job_id: jobId }) : undefined,
+      },
+    );
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `Failed to ${action}`);
+    await loadLocalProjects();
+  } catch (error) {
+    renderError(projectResult, error);
   }
 }
 

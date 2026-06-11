@@ -2,6 +2,7 @@ import 'dotenv/config';
 
 import express from 'express';
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -15,6 +16,14 @@ import {
   serializeMemory,
 } from './memory.js';
 import {
+  listLocalProjects,
+  localProjectControl,
+  registerLocalProject,
+  pauseLocalProject,
+  resumeLocalProject,
+  forgetLocalProject,
+} from './local-projects.js';
+import {
   authenticationMiddleware,
   corsMiddleware,
   rateLimitMiddleware,
@@ -26,6 +35,7 @@ import {
   neutralScore,
   scoreAction,
 } from './scorer.js';
+import { CredentialStore } from './credentials.js';
 
 export const app = express();
 app.disable('x-powered-by');
@@ -59,21 +69,52 @@ const uploadRetryBaseMs = parsePositiveInteger(
 app.use(securityHeaders);
 app.use(corsMiddleware(securityConfig));
 app.use(rateLimitMiddleware(securityConfig));
+
+app.use((req, res, next) => {
+  const suppliedRequestId = req.get('X-Request-ID') || '';
+  req.id = /^[A-Za-z0-9._:-]{1,128}$/.test(suppliedRequestId)
+    ? suppliedRequestId
+    : randomUUID();
+  res.set('X-Request-ID', req.id);
+  const start = Date.now();
+  res.on('finish', () => {
+    if (process.env.NODE_ENV !== 'test') {
+      console.log(JSON.stringify({
+        time: new Date().toISOString(),
+        request_id: req.id,
+        method: req.method,
+        path: req.path,
+        status: res.statusCode,
+        duration_ms: Date.now() - start
+      }));
+    }
+  });
+  next();
+});
+
 app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(directory, 'public')));
 
-app.get('/health', async (_req, res) => {
-  const [memory, pending] = await Promise.all([
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', service: 'Noosphere' });
+});
+
+app.get('/ready', async (_req, res) => {
+  const [memory, pending, state] = await Promise.all([
     memoryStore.health(),
     runtimeStore.listPending(),
+    runtimeStore.health(),
   ]);
-  res.json({
-    success: memory.ready,
+  const ready = memory.ready && state.ready;
+  const status = ready ? 200 : 503;
+  res.status(status).json({
+    success: ready,
     service: 'Noosphere',
     memory,
     queue: {
       pending: pending.length,
-      durable: runtimeStore.persist,
+      durable: state.durable,
+      writable: state.ready,
     },
     security: {
       host: securityConfig.host,
@@ -113,6 +154,7 @@ app.get('/.well-known/noosphere.json', (req, res) => {
       recall: `${baseUrl}/v1/projects/{project_id}/recall`,
       context: `${baseUrl}/v1/projects/{project_id}/context`,
       bootstrap: `${baseUrl}/v1/projects/{project_id}/bootstrap`,
+      local_projects: `${baseUrl}/v1/local/projects`,
       scoring_policy: `${baseUrl}/scoring-policy`,
       openapi: `${baseUrl}/openapi.json`,
     },
@@ -143,6 +185,180 @@ app.get('/scoring-policy', (_req, res) => {
 });
 
 app.use('/v1', authenticationMiddleware(securityConfig));
+
+app.get(
+  '/v1/local/projects',
+  localProjectControl(securityConfig),
+  async (_req, res, next) => {
+    try {
+      const projects = await listLocalProjects();
+      res.json({ success: true, projects });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.post(
+  '/v1/local/projects',
+  localProjectControl(securityConfig),
+  async (req, res, next) => {
+    try {
+      const registered = await registerLocalProject(req.body?.path);
+      res.status(201).json({
+        success: true,
+        ...registered,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.post(
+  '/v1/local/projects/:project_id/pause',
+  localProjectControl(securityConfig),
+  async (req, res, next) => {
+    try {
+      await pauseLocalProject(req.params.project_id);
+      res.json({ success: true });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+app.post(
+  '/v1/local/projects/:project_id/resume',
+  localProjectControl(securityConfig),
+  async (req, res, next) => {
+    try {
+      await resumeLocalProject(req.params.project_id);
+      res.json({ success: true });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+app.post(
+  '/v1/local/projects/:project_id/forget',
+  localProjectControl(securityConfig),
+  async (req, res, next) => {
+    try {
+      await forgetLocalProject(req.params.project_id);
+      res.json({ success: true });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+app.post(
+  '/v1/local/projects/:project_id/retry',
+  localProjectControl(securityConfig),
+  async (req, res, next) => {
+    try {
+      const pendingJobs = await runtimeStore.listPending();
+      const requestedKey = requireOptionalString(req.body?.job_id);
+      const candidates = pendingJobs
+        .filter((job) => job.projectId === req.params.project_id)
+        .sort(
+          (a, b) =>
+            (b.lastAttemptAt || b.createdAt || 0) -
+            (a.lastAttemptAt || a.createdAt || 0),
+        );
+      const job = requestedKey
+        ? candidates.find((candidate) => candidate.key === requestedKey)
+        : candidates[0];
+      if (!job) {
+        res.status(404).json({ success: false, error: 'No pending job found' });
+        return;
+      }
+      if (activeJobs.has(job.key)) {
+        res.status(409).json({ success: false, error: 'Job is already active' });
+        return;
+      }
+      void processPendingJob(job).catch((error) => {
+        console.error(
+          JSON.stringify({
+            event: 'upload_retry_failed',
+            project_id: job.projectId,
+            error: error.message,
+          }),
+        );
+      });
+      res.status(202).json({
+        success: true,
+        message: 'Retry initiated',
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+app.get(
+  '/v1/local/projects/state',
+  localProjectControl(securityConfig),
+  async (req, res, next) => {
+    try {
+      const projects = await listLocalProjects();
+      const pendingJobs = await runtimeStore.listPending();
+
+      const states = await Promise.all(projects.map(async (project) => {
+        let lastCheckpoint = null;
+        try {
+          const stateJson = await readFile(
+            path.join(project.path, '.noosphere', 'state.json'),
+            'utf8',
+          );
+          const parsed = JSON.parse(stateJson);
+          lastCheckpoint = parsed.last_checkpoint_at || null;
+        } catch {
+          // A project may not have checkpointed yet.
+        }
+
+        const projPending = pendingJobs
+          .filter((job) => job.projectId === project.project_id)
+          .sort(
+            (a, b) =>
+              (b.lastAttemptAt || b.createdAt || 0) -
+              (a.lastAttemptAt || a.createdAt || 0),
+          );
+        const latestFailure = projPending.find((job) => job.lastError);
+
+        return {
+          project_id: project.project_id,
+          path: project.path,
+          enabled: project.enabled,
+          last_checkpoint_at: lastCheckpoint,
+          pending_count: projPending.length,
+          latest_failure: latestFailure?.lastError || null,
+          retry_job_id: latestFailure?.key || projPending[0]?.key || null,
+        };
+      }));
+      res.json({ success: true, states });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+app.get(
+  '/v1/local/credentials/status',
+  localProjectControl(securityConfig),
+  (_req, res) => {
+    const status = new CredentialStore('default').status();
+    res.json({
+      success: true,
+      configured: status.present && !status.invalid,
+      backend: status.backend,
+      account_id: status.account_id || null,
+      network: status.network || null,
+    });
+  },
+);
 
 app.post('/v1/actions', async (req, res, next) => {
   try {
@@ -629,6 +845,28 @@ function buildOpenApiDocument(baseUrl) {
           },
           responses: {
             201: { description: 'Memory stored through Walrus Memory' },
+          },
+        },
+      },
+      '/v1/local/projects': {
+        get: {
+          security: [{ bearerAuth: [] }],
+          operationId: 'listLocalProjects',
+          summary:
+            'List projects watched by this local Noosphere installation',
+          responses: {
+            200: { description: 'Registered local projects' },
+            404: { description: 'Unavailable on non-loopback deployments' },
+          },
+        },
+        post: {
+          security: [{ bearerAuth: [] }],
+          operationId: 'registerLocalProject',
+          summary:
+            'Initialize and watch a local Git project by explicit path',
+          responses: {
+            201: { description: 'Project registered locally' },
+            404: { description: 'Unavailable on non-loopback deployments' },
           },
         },
       },

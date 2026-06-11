@@ -3,6 +3,9 @@ import {
   getJsonRpcFullnodeUrl,
   SuiJsonRpcClient,
 } from '@mysten/sui/jsonRpc';
+import { loadCredentialsIntoEnv } from './credentials.js';
+
+loadCredentialsIntoEnv();
 
 export const WALRUS_NETWORKS = {
   mainnet: {
@@ -156,7 +159,7 @@ export function resolveWalrusConfig(env = process.env) {
   };
 }
 
-async function validateOnChainAccount(config) {
+export async function validateOnChainAccount(config) {
   const client = new SuiJsonRpcClient({
     url: config.rpcUrl,
     network: config.network,

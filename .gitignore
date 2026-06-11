@@ -25,6 +25,7 @@ tests/.tmp-*
 .claude-flow/
 .noosphere/context.md
 .noosphere/state.json
+.noosphere/ide-hint.json
 .noosphere/*.tmp
 noosphere-relayer/.noosphere-local-memory.json
 noosphere-relayer/.noosphere-runtime/

@@ -9,9 +9,16 @@ import { readRegistry } from './registry.js';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const cli = path.resolve(directory, '..', 'continuity', 'index.js');
+const ideBridge = path.resolve(directory, 'ide-bridge.js');
 const children = new Map();
 const pollMs = Number(process.env.NOOSPHERE_MANAGER_POLL_MS || 5_000);
 let stopping = false;
+let ideBridgeChild = null;
+
+// Optionally start the IDE bridge as a child process (opt-in only).
+if (process.env.NOOSPHERE_ENABLE_IDE_BRIDGE === '1') {
+  startIdeBridge();
+}
 
 await reconcile();
 const timer = setInterval(() => {
@@ -42,6 +49,27 @@ async function reconcile() {
     if (!(await exists(project.path))) continue;
     startWatcher(project);
   }
+}
+
+function startIdeBridge() {
+  if (ideBridgeChild || stopping) return;
+  const child = spawn(process.execPath, [ideBridge], {
+    env: { ...process.env },
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  ideBridgeChild = child;
+  console.log('[manager] IDE bridge started');
+  child.once('exit', (code, signal) => {
+    if (ideBridgeChild === child) ideBridgeChild = null;
+    if (!stopping) {
+      console.error(
+        `[manager] IDE bridge exited (${signal || code}), restarting in 5 s`,
+      );
+      setTimeout(() => {
+        if (!stopping) startIdeBridge();
+      }, 5_000).unref();
+    }
+  });
 }
 
 function startWatcher(project) {
@@ -83,5 +111,7 @@ function stop() {
   clearInterval(timer);
   for (const child of children.values()) child.kill('SIGTERM');
   children.clear();
+  if (ideBridgeChild) ideBridgeChild.kill('SIGTERM');
+  ideBridgeChild = null;
   setTimeout(() => process.exit(0), 100).unref();
 }

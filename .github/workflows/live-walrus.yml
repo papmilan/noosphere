@@ -1,0 +1,35 @@
+name: Live Walrus Memory Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: noosphere-relayer/package-lock.json
+
+      - run: npm ci
+        working-directory: noosphere-relayer
+
+      - name: Require configured repository secrets
+        env:
+          MEMWAL_ACCOUNT_ID: ${{ secrets.MEMWAL_ACCOUNT_ID }}
+          MEMWAL_PRIVATE_KEY: ${{ secrets.MEMWAL_PRIVATE_KEY }}
+        run: |
+          test -n "$MEMWAL_ACCOUNT_ID"
+          test -n "$MEMWAL_PRIVATE_KEY"
+
+      - name: Store and recall a live test memory
+        working-directory: noosphere-relayer
+        env:
+          MEMWAL_ACCOUNT_ID: ${{ secrets.MEMWAL_ACCOUNT_ID }}
+          MEMWAL_PRIVATE_KEY: ${{ secrets.MEMWAL_PRIVATE_KEY }}
+          MEMWAL_NETWORK: testnet
+        run: npm run test:live

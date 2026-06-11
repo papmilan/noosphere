@@ -1,0 +1,136 @@
+import assert from 'node:assert/strict';
+import {
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { after, before, describe, it } from 'node:test';
+
+import { migrateEnvironmentFile } from '../continuity/credentials-cli.js';
+import {
+  CredentialStore,
+  loadCredentialsIntoEnv,
+} from '../lifecycle/credentials.js';
+
+describe('credential storage', () => {
+  let temporaryRoot;
+
+  before(async () => {
+    temporaryRoot = await mkdtemp(
+      path.join(os.tmpdir(), 'noosphere-credentials-'),
+    );
+  });
+
+  after(async () => {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  });
+
+  it('passes macOS secrets through stdin rather than command arguments', () => {
+    const calls = [];
+    const store = new CredentialStore('default', {
+      platform: 'darwin',
+      home: temporaryRoot,
+      run: (command, args, options) => {
+        calls.push({ command, args, options });
+        return { status: 0, stdout: '', stderr: '' };
+      },
+    });
+    const secret = '{"MEMWAL_PRIVATE_KEY":"value with \\"quotes\\"; $(bad)"}';
+
+    store.setPassword(secret);
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].command, '/usr/bin/security');
+    assert.equal(calls[0].args.includes(secret), false);
+    assert.equal(calls[0].options.input, `${secret}\n`);
+  });
+
+  it('uses an owner-only file when no native keychain exists', async () => {
+    const store = new CredentialStore('default', {
+      platform: 'unsupported',
+      home: temporaryRoot,
+      run: () => ({ status: 1, stdout: '', stderr: '' }),
+    });
+    const payload = JSON.stringify({ test: true });
+
+    const result = store.setPassword(payload);
+
+    assert.equal(result.encryptedAtRest, false);
+    assert.equal(store.getPassword(), payload);
+    const file = await readFile(store.fallbackPath, 'utf8');
+    assert.equal(file, payload);
+  });
+
+  it('falls back safely when Linux Secret Service is unavailable', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'noosphere-linux-creds-'));
+    try {
+      const store = new CredentialStore('test', {
+        platform: 'linux',
+        home,
+        run: (_command, args) => ({
+          status: args.includes('--version') ? 0 : 1,
+          stdout: '',
+          stderr: 'Secret Service is unavailable',
+        }),
+      });
+
+      const result = store.setPassword('fallback-secret');
+      assert.equal(result.backend, 'owner-only-file');
+      assert.equal(store.getPassword(), 'fallback-secret');
+      assert.equal(store.backendName(), 'owner-only-file');
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores a corrupt secure-store entry so environment fallback can load', () => {
+    const env = { MEMWAL_ACCOUNT_ID: 'from-env' };
+    const result = loadCredentialsIntoEnv({
+      env,
+      store: {
+        getPassword: () => '{invalid',
+        backendName: () => 'test-store',
+      },
+    });
+
+    assert.equal(result.loaded, false);
+    assert.equal(result.invalid, true);
+    assert.equal(env.MEMWAL_ACCOUNT_ID, 'from-env');
+  });
+
+  it('migrates real newline-delimited env files and scrubs only credentials', async () => {
+    const envPath = path.join(temporaryRoot, '.env');
+    const store = new CredentialStore('migration', {
+      platform: 'unsupported',
+      home: temporaryRoot,
+      run: () => ({ status: 1, stdout: '', stderr: '' }),
+    });
+    await writeFile(
+      envPath,
+      [
+        'PORT=3001',
+        `MEMWAL_PRIVATE_KEY=${'a'.repeat(64)}`,
+        `MEMWAL_ACCOUNT_ID=0x${'b'.repeat(64)}`,
+        'MEMWAL_NETWORK=testnet',
+        'SCORING_MODE=private',
+        '',
+      ].join('\n'),
+      { mode: 0o600 },
+    );
+
+    await migrateEnvironmentFile(store, {
+      envPath,
+      validator: async () => ({ valid: true }),
+    });
+
+    const scrubbed = await readFile(envPath, 'utf8');
+    assert.match(scrubbed, /PORT=3001/);
+    assert.match(scrubbed, /SCORING_MODE=private/);
+    assert.doesNotMatch(scrubbed, /MEMWAL_PRIVATE_KEY/);
+    assert.doesNotMatch(scrubbed, /MEMWAL_ACCOUNT_ID/);
+    assert.equal(JSON.parse(store.getPassword()).MEMWAL_NETWORK, 'testnet');
+  });
+});

@@ -91,23 +91,37 @@ memory content remains in Walrus; the local pending entry is removed.
 
 ## Enable continuity
 
-Install the user lifecycle once on macOS:
+Install the user lifecycle once on macOS, Linux, or Windows:
 
 ```sh
 npm --prefix noosphere-mcp run install:user
-source ~/.zshrc
+~/.noosphere/bin/noosphere setup
 ```
 
 The installer copies a self-contained runtime to `~/.noosphere`, adds the
-`noosphere` command, and installs two macOS LaunchAgents. The relayer starts
-at login. A single project manager starts and supervises one watcher for every
-registered repository.
+`noosphere` command, and installs per-user background services. The relayer
+starts at login. A single project manager starts and supervises one watcher
+for every canonical registered repository.
 
-The zsh integration automatically activates the Git repository whenever a
-terminal enters it. First activation creates the project files and registers
-the repository; later activations are effectively no-ops. Each repository
-gets its own project ID and Walrus namespace. Add `.noosphere-ignore` to a
-repository to opt out, or run `noosphere deactivate`.
+Shell integration for zsh, bash, fish, and PowerShell automatically activates
+the Git repository whenever a terminal enters it. For projects opened only
+through a GUI IDE, open `http://127.0.0.1:3001/#projects`, paste the repository
+path, and click **Add project**, or run:
+
+```sh
+noosphere register --path /absolute/path/to/repository
+```
+
+Noosphere does not scan the whole computer. First registration creates the
+project files and registers the repository; later registrations are
+idempotent. Each repository gets its own project ID and Walrus namespace.
+Add `.noosphere-ignore` to a repository to opt out, or run
+`noosphere deactivate`.
+
+`noosphere setup` validates the MemWal account and registered delegate on Sui
+before storing credentials in the operating-system credential store. It can
+optionally perform a real Walrus store/recall verification. Existing plaintext
+credentials can be migrated with `noosphere credentials migrate`.
 
 The watcher fingerprints the Git working tree. After eight quiet seconds, it
 stores a metadata-only checkpoint and refreshes `.noosphere/context.md` so
@@ -152,7 +166,11 @@ Remote output evaluation is disabled by default. Enabling
 `SCORING_MODE=remote` sends the action and recalled context to the configured
 AI provider.
 
-See `noosphere-relayer/TRUST.md` for the complete trust and privacy model.
+See:
+
+- `noosphere-relayer/TRUST.md` for the trust model
+- `docs/PRIVACY.md` for data handling and retention
+- `docs/DEPLOYMENT.md` for installation, TLS, backup, and recovery
 
 ## Packages
 

@@ -35,17 +35,30 @@ export async function registerProject(root, projectId, env = process.env) {
   const registry = await readRegistry(env);
   const normalized = await canonicalPath(root);
   const now = new Date().toISOString();
-  const existing = registry.projects.find(
+
+  const existingById = registry.projects.find(
+    (project) => project.project_id === projectId,
+  );
+  const existingByPath = registry.projects.find(
     (project) => project.path === normalized,
   );
-  if (existing) {
+
+  if (existingById && existingById.path !== normalized) {
+    registry.projects = registry.projects.filter(
+      (project) =>
+        project === existingById || project.path !== normalized,
+    );
+    existingById.path = normalized;
+    existingById.enabled = true;
+    existingById.last_activated_at = now;
+  } else if (existingByPath) {
     const unchanged =
-      existing.project_id === projectId && existing.enabled === true;
-    existing.project_id = projectId;
-    existing.enabled = true;
-    const lastActivation = Date.parse(existing.last_activated_at || 0);
+      existingByPath.project_id === projectId && existingByPath.enabled === true;
+    existingByPath.project_id = projectId;
+    existingByPath.enabled = true;
+    const lastActivation = Date.parse(existingByPath.last_activated_at || 0);
     if (unchanged && Date.now() - lastActivation < 60_000) return registry;
-    existing.last_activated_at = now;
+    existingByPath.last_activated_at = now;
   } else {
     registry.projects.push({
       path: normalized,
@@ -55,6 +68,37 @@ export async function registerProject(root, projectId, env = process.env) {
       last_activated_at: now,
     });
   }
+  await writeRegistry(registry, env);
+  return registry;
+}
+
+export async function pauseProject(projectId, env = process.env) {
+  const registry = await readRegistry(env);
+  const project = requireProject(registry, projectId);
+  if (project.enabled !== false) {
+    project.enabled = false;
+    await writeRegistry(registry, env);
+  }
+  return registry;
+}
+
+export async function resumeProject(projectId, env = process.env) {
+  const registry = await readRegistry(env);
+  const project = requireProject(registry, projectId);
+  if (project.enabled !== true) {
+    project.enabled = true;
+    project.last_activated_at = new Date().toISOString();
+    await writeRegistry(registry, env);
+  }
+  return registry;
+}
+
+export async function forgetProject(projectId, env = process.env) {
+  const registry = await readRegistry(env);
+  requireProject(registry, projectId);
+  registry.projects = registry.projects.filter(
+    (project) => project.project_id !== projectId,
+  );
   await writeRegistry(registry, env);
   return registry;
 }
@@ -70,6 +114,25 @@ export async function disableProject(root, env = process.env) {
     await writeRegistry(registry, env);
   }
   return registry;
+}
+
+function requireProject(registry, projectId) {
+  if (typeof projectId !== 'string' || projectId.trim() === '') {
+    throw projectError('project_id is required', 400);
+  }
+  const project = registry.projects.find(
+    (entry) => entry.project_id === projectId,
+  );
+  if (!project) {
+    throw projectError(`Project not found: ${projectId}`, 404);
+  }
+  return project;
+}
+
+function projectError(message, status) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
 }
 
 async function canonicalPath(value) {

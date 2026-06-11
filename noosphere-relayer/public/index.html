@@ -16,6 +16,7 @@
       <nav>
         <a href="#remember">Remember</a>
         <a href="#recall">Recall</a>
+        <a href="#projects">Projects</a>
         <a href="#connect">Connect</a>
       </nav>
       <div class="status" id="status">Connecting</div>
@@ -159,7 +160,7 @@
         </div>
       </section>
 
-      <section class="continuity">
+      <section class="continuity" id="projects">
         <div class="section-heading">
           <span>04</span>
           <div>
@@ -188,8 +189,41 @@
             <p>Any tool reads the refreshed filesystem or HTTP context.</p>
           </article>
         </div>
-        <pre><code>npm --prefix noosphere-mcp run continuity:init
-npm --prefix noosphere-mcp run continuity:watch</code></pre>
+        <div class="project-control">
+          <div>
+            <p class="project-kicker">Local project manager</p>
+            <h3>Add a project opened from any IDE</h3>
+            <p>
+              Paste the repository path once. Noosphere initializes its shared
+              files and starts one background watcher for that repository,
+              even when it was opened directly in Cursor, VS Code, Claude
+              Code, Codex, or another GUI.
+            </p>
+            <p class="credential-status" id="credential-status">
+              Checking credential setup...
+            </p>
+            <pre><code>noosphere setup
+noosphere credentials status</code></pre>
+          </div>
+          <form id="project-form" class="project-form">
+            <label>
+              Repository path
+              <input
+                name="path"
+                placeholder="/Users/you/projects/my-app"
+                autocomplete="off"
+                required
+              />
+            </label>
+            <button class="primary" id="project-button" type="submit">
+              Add project
+            </button>
+            <output id="project-result" class="project-result"></output>
+          </form>
+        </div>
+        <div id="project-list" class="project-list">
+          <p class="empty">Loading registered projects...</p>
+        </div>
       </section>
 
       <section class="connect" id="connect">
@@ -228,6 +262,6 @@ npm --prefix noosphere-mcp run continuity:watch</code></pre>
       </section>
     </main>
 
-    <script type="module" src="/app.js?v=20260610-8"></script>
+    <script type="module" src="/app.js?v=20260611-9"></script>
   </body>
 </html>

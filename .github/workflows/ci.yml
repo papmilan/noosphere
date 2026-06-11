@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.package }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        package: [noosphere-mcp, noosphere-relayer]
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.package }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ matrix.package }}/package-lock.json
+
+      - run: npm ci
+      - run: npm run check
+      - run: npm audit --audit-level=high
+
+  security:
+    name: Secret and container scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan repository for verified secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          extra_args: --only-verified
+
+      - name: Build production image
+        run: docker build -t noosphere-relayer:test noosphere-relayer
+
+      - name: Scan production image
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: noosphere-relayer:test
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
