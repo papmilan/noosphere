@@ -70,7 +70,12 @@ Demo mode uses a gitignored local persistence file. To connect Walrus Memory:
 2. Create delegate credentials in the
    [Walrus Memory dashboard](https://memory.walrus.xyz/).
 3. Set `MEMWAL_PRIVATE_KEY` and `MEMWAL_ACCOUNT_ID`.
-4. Set `DEMO_MODE=false`.
+4. Set `MEMWAL_NETWORK=mainnet` or `testnet` to match the account.
+5. Set `DEMO_MODE=false`.
+
+Noosphere validates the account object and registered delegate key on the
+selected Sui network before storing or recalling memory. The matching Walrus
+Memory relayer URL is selected automatically.
 
 ## Enable continuity
 

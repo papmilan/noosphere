@@ -4,7 +4,16 @@ set -u
 
 HOOK_INPUT=$(cat 2>/dev/null || true)
 HOOK_CWD=$(printf '%s' "$HOOK_INPUT" | jq -r '.cwd // empty' 2>/dev/null)
-PROJECT_DIR=${HOOK_CWD:-$PWD}
+TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)
+
+if [ -z "$HOOK_CWD" ] && [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
+  HOOK_CWD=$(jq -rs '
+    [.[] | .cwd? | select(type == "string" and length > 0)]
+    | last // empty
+  ' "$TRANSCRIPT_PATH" 2>/dev/null)
+fi
+
+PROJECT_DIR=${HOOK_CWD:-${CLAUDE_PROJECT_DIR:-$PWD}}
 CONFIG_FILE="$PROJECT_DIR/.noosphere.json"
 
 if [ -f "$CONFIG_FILE" ]; then
@@ -24,7 +33,6 @@ SESSION_ID=${SESSION_ID:-$(date -u '+%Y%m%dT%H%M%SZ')}
 SUMMARY=${CLAUDE_SESSION_SUMMARY:-}
 
 if [ -z "$SUMMARY" ]; then
-  TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)
   if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
     SUMMARY=$(jq -rs '
       [
@@ -82,9 +90,10 @@ PAYLOAD=$(jq -n \
   }')
 
 RESPONSE_FILE=$(mktemp)
+HOOK_TIMEOUT_SECONDS=${NOOSPHERE_HOOK_TIMEOUT_SECONDS:-130}
 HTTP_STATUS=$(curl -sS \
   --connect-timeout 2 \
-  --max-time 10 \
+  --max-time "$HOOK_TIMEOUT_SECONDS" \
   -o "$RESPONSE_FILE" \
   -w '%{http_code}' \
   -X POST "$RELAYER_URL/v1/actions" \

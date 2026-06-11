@@ -8,9 +8,9 @@ import {
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { WalrusMemoryAdapter } from './walrus-memory.js';
+
 const MEMORY_PREFIX = 'NOOSPHERE_AGENT_MEMORY_V2\n';
-const DEFAULT_SERVER_URL =
-  'https://relayer-staging.memory.walrus.xyz';
 const DEFAULT_NAMESPACE_PREFIX = 'noosphere';
 const directory = path.dirname(fileURLToPath(import.meta.url));
 
@@ -23,8 +23,8 @@ export class MemoryStore {
     this.demoPath =
       process.env.LOCAL_MEMORY_PATH ||
       path.join(directory, '.noosphere-local-memory.json');
-    this.clientPromise = null;
     this._writeChain = Promise.resolve();
+    this.walrus = new WalrusMemoryAdapter();
   }
 
   async health() {
@@ -36,15 +36,7 @@ export class MemoryStore {
       };
     }
 
-    const configured = Boolean(
-      process.env.MEMWAL_PRIVATE_KEY && process.env.MEMWAL_ACCOUNT_ID,
-    );
-    return {
-      ready: configured,
-      mode: this.mode,
-      server_url: process.env.MEMWAL_SERVER_URL || DEFAULT_SERVER_URL,
-      configured,
-    };
+    return this.walrus.health();
   }
 
   async remember(projectId, text) {
@@ -64,10 +56,7 @@ export class MemoryStore {
       return memory;
     }
 
-    const client = await this.getClient();
-    return client.rememberAndWait(text, namespace, {
-      timeoutMs: Number(process.env.MEMWAL_REMEMBER_TIMEOUT_MS || 120_000),
-    });
+    return this.walrus.remember(text, namespace);
   }
 
   async recall(projectId, query, limit = 10) {
@@ -85,38 +74,13 @@ export class MemoryStore {
       return { results, total: results.length };
     }
 
-    const client = await this.getClient();
-    return client.recall({ query, limit, namespace });
+    return this.walrus.recall(query, limit, namespace);
   }
 
   async resetDemo() {
     this.demoMemories.clear();
     this.demoLoaded = true;
     await this.persistDemoMemories();
-  }
-
-  async getClient() {
-    if (!process.env.MEMWAL_PRIVATE_KEY || !process.env.MEMWAL_ACCOUNT_ID) {
-      const error = new Error(
-        'Walrus Memory is not configured. Set MEMWAL_PRIVATE_KEY and MEMWAL_ACCOUNT_ID, or run npm run demo.',
-      );
-      error.status = 503;
-      throw error;
-    }
-
-    if (!this.clientPromise) {
-      this.clientPromise = import('@mysten-incubation/memwal').then(
-        ({ MemWal }) =>
-          MemWal.create({
-            key: process.env.MEMWAL_PRIVATE_KEY,
-            accountId: process.env.MEMWAL_ACCOUNT_ID,
-            serverUrl:
-              process.env.MEMWAL_SERVER_URL || DEFAULT_SERVER_URL,
-            namespace: DEFAULT_NAMESPACE_PREFIX,
-          }),
-      );
-    }
-    return this.clientPromise;
   }
 
   async loadDemo() {

@@ -4,6 +4,8 @@
 
 - Walrus Memory encrypts memories with Seal before storing them on Walrus.
 - Walrus Memory's Sui account contract controls owner and delegate access.
+- Noosphere checks the configured MemWalAccount on the selected Sui network
+  and verifies that the derived delegate public key is registered before use.
 - The managed Walrus Memory relayer performs embedding, encryption, upload,
   indexing, download, and decryption.
 - Project isolation uses the Walrus Memory `owner + namespace` boundary.

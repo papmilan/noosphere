@@ -9,6 +9,8 @@ const { app, parseTrustProxy, resolveActionScore } =
   await import('../index.js');
 const { MemoryStore, memoryStore, parseMemory, serializeMemory } =
   await import('../memory.js');
+const { resolveWalrusConfig, WALRUS_NETWORKS } =
+  await import('../walrus-memory.js');
 
 describe('Noosphere memory API', () => {
   let server;
@@ -47,6 +49,41 @@ describe('Noosphere memory API', () => {
     assert.equal(parseTrustProxy('false'), false);
     assert.equal(parseTrustProxy('1'), 1);
     assert.equal(parseTrustProxy('loopback'), 'loopback');
+  });
+
+  it('selects matching Walrus and Sui network configuration', () => {
+    const mainnet = resolveWalrusConfig({});
+    const testnet = resolveWalrusConfig({ MEMWAL_NETWORK: 'testnet' });
+
+    assert.equal(mainnet.network, 'mainnet');
+    assert.equal(mainnet.relayerUrl, WALRUS_NETWORKS.mainnet.relayerUrl);
+    assert.match(mainnet.rpcUrl, /mainnet/);
+    assert.equal(testnet.network, 'testnet');
+    assert.equal(testnet.relayerUrl, WALRUS_NETWORKS.testnet.relayerUrl);
+    assert.match(testnet.rpcUrl, /testnet/);
+  });
+
+  it('rejects malformed or mismatched Walrus configuration early', () => {
+    assert.throws(
+      () => resolveWalrusConfig({ MEMWAL_NETWORK: 'devnet' }),
+      /mainnet.*testnet/,
+    );
+    assert.throws(
+      () =>
+        resolveWalrusConfig({
+          MEMWAL_PRIVATE_KEY: 'not-hex',
+          MEMWAL_ACCOUNT_ID: `0x${'1'.repeat(64)}`,
+        }),
+      /64-character Ed25519/,
+    );
+    assert.throws(
+      () =>
+        resolveWalrusConfig({
+          MEMWAL_PRIVATE_KEY: '1'.repeat(64),
+          MEMWAL_ACCOUNT_ID: '1234',
+        }),
+      /Sui object ID/,
+    );
   });
 
   it('recovers the local persistence queue after a failed write', async () => {

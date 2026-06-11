@@ -18,6 +18,8 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_RELAYER_URL = 'http://127.0.0.1:3001';
 const DEFAULT_DEBOUNCE_MS = 8_000;
 const DEFAULT_REFRESH_MS = 20_000;
+const DEFAULT_WRITE_TIMEOUT_MS = 130_000;
+const DEFAULT_READ_TIMEOUT_MS = 30_000;
 const MANAGED_START = '<!-- noosphere:continuity:start -->';
 const MANAGED_END = '<!-- noosphere:continuity:end -->';
 
@@ -709,7 +711,10 @@ async function assertGitRepository(root) {
 async function requestJson(url, options) {
   const response = await fetch(url, {
     ...options,
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(
+      Number(process.env.NOOSPHERE_WRITE_TIMEOUT_MS) ||
+        DEFAULT_WRITE_TIMEOUT_MS,
+    ),
   });
   const body = await response.json();
   if (!response.ok) {
@@ -721,7 +726,10 @@ async function requestJson(url, options) {
 async function requestText(url) {
   const response = await fetch(url, {
     headers: { accept: 'text/plain' },
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(
+      Number(process.env.NOOSPHERE_READ_TIMEOUT_MS) ||
+        DEFAULT_READ_TIMEOUT_MS,
+    ),
   });
   const text = await response.text();
   if (!response.ok) {

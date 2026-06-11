@@ -40,11 +40,20 @@ jq --arg command "$HOOK_COMMAND" '
         "hooks": [{
           "type": "command",
           "command": $command,
-          "timeout": 15,
+          "timeout": 145,
           "statusMessage": "Storing session in Noosphere..."
         }]
       }]
     end
+  | .hooks.SessionEnd |= map(
+      .hooks |= map(
+        if .command == $command
+        then .timeout = 145
+          | .statusMessage = "Storing session in Noosphere..."
+        else .
+        end
+      )
+    )
 ' "$SETTINGS_PATH" > "$TEMP_SETTINGS"
 
 jq empty "$TEMP_SETTINGS"
