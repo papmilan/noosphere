@@ -14,7 +14,10 @@ if [ -z "$HOOK_CWD" ] && [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ];
 fi
 
 PROJECT_DIR=${HOOK_CWD:-${CLAUDE_PROJECT_DIR:-$PWD}}
-CONFIG_FILE="$PROJECT_DIR/.noosphere.json"
+CONFIG_FILE="$PROJECT_DIR/.noosphere/config.json"
+if [ ! -f "$CONFIG_FILE" ]; then
+  CONFIG_FILE="$PROJECT_DIR/.noosphere.json"
+fi
 
 if [ -f "$CONFIG_FILE" ]; then
   PROJECT_ID=$(jq -r '.project_id // empty' "$CONFIG_FILE" 2>/dev/null)

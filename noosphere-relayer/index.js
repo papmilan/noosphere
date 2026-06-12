@@ -30,11 +30,6 @@ import {
   resolveSecurityConfig,
   securityHeaders,
 } from './security.js';
-import {
-  getScoringPolicy,
-  neutralScore,
-  scoreAction,
-} from './scorer.js';
 import { CredentialStore } from './credentials.js';
 
 export const app = express();
@@ -154,8 +149,6 @@ app.get('/ready', async (_req, res) => {
         securityConfig.apiToken ? 'bearer-token' : 'loopback-only',
       cors_origins: securityConfig.corsOrigins,
     },
-    scorer_configured: Boolean(process.env.ANTHROPIC_API_KEY),
-    scoring_mode: process.env.SCORING_MODE || 'private',
   });
 });
 
@@ -165,7 +158,7 @@ app.get('/.well-known/noosphere.json', (req, res) => {
     name: 'Noosphere',
     version: '2.0.0',
     description:
-      'A thin, vendor-neutral agent memory and evaluation layer built on Walrus Memory.',
+      'Persistent shared project memory for AI agents, built on Walrus Memory.',
     architecture: {
       memory: 'Official Walrus Memory managed relayer',
       encryption: 'Seal encryption managed by Walrus Memory',
@@ -187,7 +180,6 @@ app.get('/.well-known/noosphere.json', (req, res) => {
       context: `${baseUrl}/v1/projects/{project_id}/context`,
       bootstrap: `${baseUrl}/v1/projects/{project_id}/bootstrap`,
       local_projects: `${baseUrl}/v1/local/projects`,
-      scoring_policy: `${baseUrl}/scoring-policy`,
       openapi: `${baseUrl}/openapi.json`,
     },
     universal_interfaces: {
@@ -210,10 +202,6 @@ app.get('/.well-known/noosphere.json', (req, res) => {
 
 app.get('/openapi.json', (req, res) => {
   res.json(buildOpenApiDocument(getBaseUrl(req)));
-});
-
-app.get('/scoring-policy', (_req, res) => {
-  res.json(getScoringPolicy());
 });
 
 app.get('/install.sh', (_req, res) => {
@@ -459,7 +447,10 @@ app.post('/v1/actions', async (req, res, next) => {
 
     const previousReceipt = await runtimeStore.getReceipt(receiptKey);
     if (previousReceipt) {
-      res.json({ ...previousReceipt, deduplicated: true });
+      res.json({
+        ...normalizeMemoryResponse(previousReceipt),
+        deduplicated: true,
+      });
       return;
     }
 
@@ -490,7 +481,6 @@ app.post('/v1/actions', async (req, res, next) => {
     }
 
     const timestamp = new Date().toISOString();
-    const scoring = await resolveActionScore({ ...action, timestamp });
     const record = {
       schema: 'noosphere.agent-memory.v2',
       action_id: actionId,
@@ -504,30 +494,10 @@ app.post('/v1/actions', async (req, res, next) => {
       client: action.client,
       metadata: action.metadata,
       timestamp,
-      evaluation: {
-        score: scoring.score_delta,
-        reasoning: scoring.reasoning,
-        dimensions: scoring.dimensions,
-        status: scoring.score_status,
-        model: scoring.scorer_model,
-        policy_version: scoring.scoring_policy_version,
-      },
     };
     const responseTemplate = {
       success: true,
       action_id: actionId,
-      score_delta: scoring.score_delta,
-      score_breakdown: scoring.dimensions,
-      score_reasoning: scoring.reasoning,
-      score_status: scoring.score_status,
-      scorer_model: scoring.scorer_model,
-      scoring_policy_version: scoring.scoring_policy_version,
-      privacy: {
-        scoring_mode: process.env.SCORING_MODE || 'private',
-        remote_evaluation:
-          process.env.SCORING_MODE === 'remote' &&
-          scoring.score_status === 'scored',
-      },
       storage: memoryStore.mode,
     };
     const job = await runtimeStore.enqueue(receiptKey, {
@@ -676,44 +646,12 @@ if (process.env.NODE_ENV !== 'test') {
   installShutdownHandlers();
 }
 
-export async function resolveActionScore(
-  action,
-  {
-    contextLoader = loadRelevantContext,
-    scorer = scoreAction,
-  } = {},
-) {
-  try {
-    const { score_delta: _ignoredScore, ...scorableAction } = action;
-    const needsProjectContext =
-      process.env.SCORING_MODE === 'remote' || scorer !== scoreAction;
-    const projectContext = needsProjectContext
-      ? await contextLoader(scorableAction)
-      : '';
-    return await scorer(scorableAction, projectContext);
-  } catch (error) {
-    console.warn('Scorer unavailable, using neutral score');
-    if (process.env.NODE_ENV === 'development') {
-      console.warn('[scorer]', error.message);
-    }
-    return neutralScore();
-  }
-}
-
-async function loadRelevantContext(action) {
-  const memories = await recallProject(
-    action.project_id,
-    action.content,
-    8,
-  );
-  return formatProjectContext(action.project_id, action.content, memories);
-}
-
 async function recallProject(projectId, query, limit) {
   const result = await memoryStore.recall(projectId, query, limit);
   return result.results
     .map((memory) => {
-      const record = parseMemory(memory.text) || {
+      const parsed = parseMemory(memory.text);
+      const record = parsed ? normalizeMemoryRecord(parsed) : {
         schema: 'walrus-memory.external',
         action_id: memory.blob_id,
         project_id: projectId,
@@ -721,7 +659,6 @@ async function recallProject(projectId, query, limit) {
         action_type: 'memory',
         content: memory.text,
         timestamp: null,
-        evaluation: null,
       };
       return {
         ...record,
@@ -752,12 +689,12 @@ async function processPendingJob(job) {
         job.projectId,
         job.serializedRecord,
       );
-      const response = {
+      const response = normalizeMemoryResponse({
         ...job.responseTemplate,
         blob_id: stored.blob_id,
         memory_id: stored.id,
         namespace: stored.namespace,
-      };
+      });
       await runtimeStore.complete(job.key, response);
       return response;
     },
@@ -874,7 +811,7 @@ function uploadDelayRemaining() {
 
 function queuedResponse(job) {
   return {
-    ...job.responseTemplate,
+    ...normalizeMemoryResponse(job.responseTemplate),
     success: true,
     pending: true,
     action_id: job.responseTemplate?.action_id || job.key.split(':').at(-1),
@@ -935,11 +872,10 @@ function validateAction(body) {
 }
 
 function formatProjectContext(projectId, query, actions) {
-  const lines = actions.map((action) => {
-    const score = action.evaluation?.score;
-    const scoreLabel = Number.isFinite(score) ? `, evaluation ${score}` : '';
-    return `[${action.timestamp || 'time not recorded'}] ${action.agent_id} (${action.action_type}${scoreLabel}): ${action.content}`;
-  });
+  const lines = actions.map(
+    (action) =>
+      `[${action.timestamp || 'time not recorded'}] ${action.agent_id} (${action.action_type}): ${action.content}`,
+  );
 
   return [
     `--- NOOSPHERE CONTEXT: ${projectId} ---`,
@@ -1052,7 +988,7 @@ function buildOpenApiDocument(baseUrl) {
         post: {
           security: [{ bearerAuth: [] }],
           operationId: 'rememberAgentAction',
-          summary: 'Evaluate and remember an agent action',
+          summary: 'Remember an agent action',
           requestBody: {
             required: true,
             content: {
@@ -1136,13 +1072,44 @@ function buildOpenApiDocument(baseUrl) {
           },
         },
       },
-      '/scoring-policy': {
-        get: {
-          operationId: 'getScoringPolicy',
-          summary: 'Get the transparent evaluation policy',
-          responses: { 200: { description: 'Versioned scoring policy' } },
-        },
-      },
     },
   };
+}
+
+function normalizeMemoryRecord(record) {
+  return definedEntries({
+    schema: record.schema,
+    action_id: record.action_id,
+    project_id: record.project_id,
+    agent_id: record.agent_id,
+    action_type: record.action_type,
+    content: record.content,
+    session_id: record.session_id,
+    provider: record.provider,
+    model: record.model,
+    client: record.client,
+    metadata: record.metadata,
+    timestamp: record.timestamp,
+  });
+}
+
+function normalizeMemoryResponse(response = {}) {
+  return definedEntries({
+    success: response.success,
+    action_id: response.action_id,
+    storage: response.storage,
+    blob_id: response.blob_id,
+    memory_id: response.memory_id,
+    namespace: response.namespace,
+    pending: response.pending,
+    message: response.message,
+    deduplicated: response.deduplicated,
+    recovered: response.recovered,
+  });
+}
+
+function definedEntries(value) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => entry !== undefined),
+  );
 }

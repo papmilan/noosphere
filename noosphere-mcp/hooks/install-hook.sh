@@ -63,4 +63,4 @@ chmod 600 "$SETTINGS_PATH"
 printf 'Installed Noosphere hook: %s\n' "$HOOK_PATH"
 printf 'Registered Claude Code SessionEnd hook in: %s\n' "$SETTINGS_PATH"
 printf 'Backup created: %s\n' "$BACKUP_PATH"
-printf 'Add .noosphere.json to each project you want to track.\n'
+printf 'Run noosphere activate inside each project you want to track.\n'

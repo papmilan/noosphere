@@ -2,7 +2,7 @@
   "name": "noosphere-relayer",
   "version": "2.0.0",
   "private": true,
-  "description": "Thin agent memory and evaluation layer built on Walrus Memory",
+  "description": "Persistent shared project memory for AI agents built on Walrus Memory",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -11,13 +11,12 @@
     "dev": "node --watch index.js",
     "test": "node --experimental-vm-modules --test tests/*.test.js",
     "test:live": "node scripts/live-walrus-smoke.js",
-    "check": "node --check index.js && node --check memory.js && node --check walrus-memory.js && node --check durable-store.js && node --check security.js && node --check scorer.js && node --check credentials.js && node --check local-projects.js && node --check public/app.js"
+    "check": "node --check index.js && node --check memory.js && node --check walrus-memory.js && node --check durable-store.js && node --check security.js && node --check credentials.js && node --check local-projects.js && node --check public/app.js"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.104.1",
     "@mysten-incubation/memwal": "0.0.7",
     "@mysten/sui": "^2.17.0",
     "dotenv": "17.4.2",

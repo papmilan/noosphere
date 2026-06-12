@@ -64,7 +64,10 @@ describe('local project control', () => {
     assert.equal(projects[0].enabled, true);
 
     const config = JSON.parse(
-      await readFile(path.join(project, '.noosphere.json'), 'utf8'),
+      await readFile(
+        path.join(project, '.noosphere', 'config.json'),
+        'utf8',
+      ),
     );
     assert.equal(config.project_id, 'gui-project');
   });

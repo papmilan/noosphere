@@ -15,177 +15,7 @@ const projectResult = document.querySelector('#project-result');
 const projectList = document.querySelector('#project-list');
 const credentialStatus = document.querySelector('#credential-status');
 
-// ── Wallet auth ──────────────────────────────────────────────────────────────
-
-const authOverlay = document.querySelector('#auth-overlay');
-const walletListEl = document.querySelector('#wallet-list');
-const authSkip = document.querySelector('#auth-skip');
-const walletBadge = document.querySelector('#wallet-badge');
-const walletAddressDisplay = document.querySelector('#wallet-address-display');
-const walletDisconnect = document.querySelector('#wallet-disconnect');
-
-const SESSION_KEY = 'noosphere:wallet';
-
-const registeredWallets = new Map();
-
-// Wallet Standard — collect wallets that register themselves
-function onWalletRegister(wallet) {
-  if (wallet?.name) registeredWallets.set(wallet.name, wallet);
-}
-
-window.addEventListener('wallet-standard:register-wallet', (event) => {
-  onWalletRegister(event.detail?.wallet);
-});
-
-// Announce the app is ready so wallets can register
-window.dispatchEvent(
-  new CustomEvent('wallet-standard:app-ready', {
-    detail: { register: onWalletRegister },
-  }),
-);
-
-function getSession() {
-  try {
-    return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
-  } catch {
-    return null;
-  }
-}
-
-function saveSession(address, walletName) {
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify({ address, walletName }));
-}
-
-function clearSession() {
-  sessionStorage.removeItem(SESSION_KEY);
-}
-
-function shortenAddress(addr) {
-  if (!addr || addr.length < 12) return addr;
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
-}
-
-function applyAuthState(authenticated) {
-  authOverlay.classList.toggle('hidden', authenticated);
-  walletBadge.classList.toggle('hidden', !authenticated);
-
-  const lockable = document.querySelectorAll('[data-auth-required]');
-  lockable.forEach((el) => el.classList.toggle('write-locked', !authenticated));
-  document.querySelectorAll('[data-auth-gate]').forEach((btn) => {
-    btn.disabled = !authenticated;
-    btn.title = authenticated ? '' : 'Connect wallet to write memory';
-  });
-}
-
-function setConnected(address, walletName) {
-  saveSession(address, walletName);
-  walletAddressDisplay.textContent = shortenAddress(address);
-  applyAuthState(true);
-}
-
-function disconnect() {
-  clearSession();
-  walletAddressDisplay.textContent = '';
-  applyAuthState(false);
-  renderWalletList();
-}
-
-walletDisconnect.addEventListener('click', disconnect);
-
-authSkip.addEventListener('click', () => {
-  authOverlay.classList.add('hidden');
-  // write operations remain locked — clicking them re-shows overlay
-  document.querySelectorAll('[data-auth-required]').forEach((el) => {
-    el.addEventListener('click', () => {
-      if (!getSession()) authOverlay.classList.remove('hidden');
-    }, { once: false });
-  });
-});
-
-async function connectWallet(wallet) {
-  const feature = wallet.features?.['standard:connect'];
-  if (!feature) throw new Error(`${wallet.name} does not support standard:connect`);
-  const result = await feature.connect();
-  const account = result?.accounts?.[0];
-  if (!account?.address) throw new Error('No account returned from wallet');
-  return account.address;
-}
-
-function renderWalletList() {
-  walletListEl.replaceChildren();
-
-  // Give wallets 150 ms to register on first render
-  setTimeout(() => {
-    const wallets = [...registeredWallets.values()];
-
-    if (wallets.length === 0) {
-      const msg = document.createElement('p');
-      msg.className = 'wallet-no-wallets';
-      msg.innerHTML =
-        'No Sui wallet detected. Install ' +
-        '<a href="https://slush.app" target="_blank" rel="noreferrer">Slush</a> ' +
-        'or another Sui wallet extension and refresh.';
-      walletListEl.append(msg);
-      return;
-    }
-
-    wallets.forEach((wallet) => {
-      const btn = document.createElement('button');
-      btn.className = 'wallet-btn';
-      btn.type = 'button';
-
-      const icon = document.createElement('span');
-      icon.className = 'wallet-btn-icon';
-      if (wallet.icon) {
-        const img = document.createElement('img');
-        img.src = wallet.icon;
-        img.width = 20;
-        img.height = 20;
-        img.alt = '';
-        icon.append(img);
-      } else {
-        icon.textContent = '◆';
-      }
-
-      const name = document.createElement('span');
-      name.textContent = wallet.name;
-
-      btn.append(icon, name);
-      btn.addEventListener('click', async () => {
-        btn.disabled = true;
-        btn.querySelector('span:last-child').textContent = 'Connecting…';
-        try {
-          const address = await connectWallet(wallet);
-          setConnected(address, wallet.name);
-        } catch (error) {
-          btn.disabled = false;
-          btn.querySelector('span:last-child').textContent = wallet.name;
-          const err = document.createElement('p');
-          err.className = 'error';
-          err.style.marginTop = '10px';
-          err.textContent = error.message;
-          walletListEl.append(err);
-        }
-      });
-
-      walletListEl.append(btn);
-    });
-  }, 150);
-}
-
-function initAuth() {
-  const session = getSession();
-  if (session?.address) {
-    walletAddressDisplay.textContent = shortenAddress(session.address);
-    applyAuthState(true);
-  } else {
-    applyAuthState(false);
-    renderWalletList();
-  }
-}
-
 void initialize();
-initAuth();
 
 rememberTab.addEventListener('click', () => showMode('remember'));
 recallTab.addEventListener('click', () => showMode('recall'));
@@ -299,11 +129,7 @@ async function initialize() {
         : health.memory?.ready
           ? 'Walrus Memory ready'
           : 'Walrus Memory needs credentials';
-    const scorer =
-      health.scoring_mode === 'remote' && health.scorer_configured
-        ? 'remote evaluation enabled'
-        : 'private scoring mode';
-    statusElement.textContent = `${mode} / ${scorer}`;
+    statusElement.textContent = mode;
   } catch {
     statusElement.textContent = 'Service unavailable';
   }
@@ -465,29 +291,24 @@ function showMode(mode) {
 }
 
 function renderStoredResult(result) {
-  const score = Number(result.score_delta || 0);
   const summary = document.createElement('div');
   summary.className = 'stored-summary';
 
   const mark = document.createElement('strong');
-  mark.textContent = 'Stored';
+  mark.textContent = result.pending ? 'Queued' : 'Stored';
 
   const copy = document.createElement('span');
-  copy.textContent =
-    result.score_status === 'scored'
-      ? `${formatScore(score)} evaluation. ${result.score_reasoning}`
-      : result.score_status === 'private'
-        ? 'Stored without sending private content to a separate AI evaluator.'
-        : 'Stored with a neutral evaluation because the scorer is unavailable.';
+  copy.textContent = result.pending
+    ? 'Saved to the durable queue and waiting for the next Walrus upload slot.'
+    : 'Available to every connected agent in this project namespace.';
   summary.append(mark, copy);
 
   const receipt = document.createElement('small');
-  receipt.textContent = `Walrus blob ${result.blob_id} / namespace ${result.namespace}`;
+  receipt.textContent = result.blob_id
+    ? `Walrus blob ${result.blob_id} / namespace ${result.namespace}`
+    : `Action ${result.action_id}`;
 
-  resultElement.append(summary);
-  const dimensions = createDimensionBars(result.score_breakdown);
-  if (dimensions) resultElement.append(dimensions);
-  resultElement.append(receipt);
+  resultElement.append(summary, receipt);
 }
 
 function renderMemories(memories, query) {
@@ -525,13 +346,6 @@ function renderMemories(memories, query) {
       meta.className = 'memory-meta';
       meta.append(
         createMeta(memory.timestamp),
-        createMeta(
-          memory.evaluation?.status === 'scored'
-            ? `${formatScore(memory.evaluation.score)} evaluation`
-            : memory.evaluation?.status === 'private'
-              ? 'private / not externally scored'
-              : 'neutral evaluation',
-        ),
         createMeta(memory.model || memory.provider || 'model not recorded'),
       );
 
@@ -539,32 +353,6 @@ function renderMemories(memories, query) {
       return article;
     }),
   );
-}
-
-function createDimensionBars(dimensions) {
-  if (!dimensions) return null;
-  const container = document.createElement('div');
-  container.className = 'dimension-list';
-
-  for (const [name, value] of Object.entries(dimensions)) {
-    const row = document.createElement('div');
-    row.className = 'dimension';
-    const label = document.createElement('span');
-    label.textContent = name.replace('_', ' ');
-    const track = document.createElement('span');
-    track.className = 'dimension-track';
-    const fill = document.createElement('span');
-    fill.className = 'dimension-fill';
-    fill.style.width = `${Math.abs(value) * 50}%`;
-    fill.dataset.direction =
-      value > 0 ? 'positive' : value < 0 ? 'negative' : 'neutral';
-    track.append(fill);
-    const score = document.createElement('strong');
-    score.textContent = formatScore(value);
-    row.append(label, track, score);
-    container.append(row);
-  }
-  return container;
 }
 
 function createMeta(value) {
@@ -598,11 +386,6 @@ function renderError(element, error) {
   message.className = 'error';
   message.textContent = error.message;
   element.replaceChildren(message);
-}
-
-function formatScore(value) {
-  const number = Number(value);
-  return number > 0 ? `+${number}` : String(number);
 }
 
 // Install section — OS detection, tab switching, copy buttons

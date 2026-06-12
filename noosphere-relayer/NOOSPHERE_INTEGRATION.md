@@ -1,60 +1,34 @@
 # Noosphere integration
 
-## Preferred: official Walrus Memory MCP
+Noosphere gives every AI tool access to the same project memory. Use the
+interface that the tool already supports: files, CLI, HTTP, or MCP.
 
-Use the official MCP server for any MCP-compatible CLI, IDE, or agent:
+## Files
 
-```sh
-npx -y @mysten-incubation/memwal-mcp@0.0.4 \
-  --staging \
-  --namespace noosphere
-```
+Agents that can read the repository should start with:
 
-Call `memwal_login` once, `memwal_recall` when starting work, and
-`memwal_remember` for decisions and handoffs.
+- `.noosphere/context.md` for recalled shared context;
+- `.noosphere/journal.md` for concise local handoffs;
+- `.noosphere/instructions.md` for the universal working protocol.
 
-## Automatic continuity
-
-Initialize and keep the watcher running from the project root:
+## CLI
 
 ```sh
-npm --prefix noosphere-mcp run continuity:init
-npm --prefix noosphere-mcp run continuity:watch
+noosphere context
+noosphere recall "What changed in authentication?"
+noosphere remember --agent codex --type decision "Use rotating refresh tokens."
+noosphere journal --agent codex "Verified login; logout remains untested."
 ```
 
-The watcher stores each settled Git working-tree state and refreshes
-`.noosphere/context.md`. Generated instructions make supported agents read the
-same context file before working.
+## HTTP
 
-Tools without MCP can use:
-
-- `.noosphere/context.md` and `.noosphere/journal.md`;
-- the `noosphere` CLI commands;
-- `GET /v1/projects/:project_id/bootstrap`;
-- the JSON remember and recall HTTP endpoints.
-
-Noosphere asks agents for concise public rationale and handoff notes. It does
-not request or store hidden chain-of-thought.
-
-The default `metadata-only` privacy mode uploads changed file paths and diff
-statistics, not raw source. Set `privacy.include_diff` only for projects where
-the managed relayer trust boundary is acceptable.
-
-## HTTP compatibility API
-
-Noosphere keeps a small HTTP API for applications that want structured records
-and automatic evaluation.
-
-When `NOOSPHERE_API_TOKEN` is configured, send it on every `/v1` request:
+When `NOOSPHERE_API_TOKEN` is configured, send:
 
 ```http
 Authorization: Bearer <token>
 ```
 
-The continuity CLI and Claude hook automatically read this value from the
-`NOOSPHERE_API_TOKEN` environment variable.
-
-### Remember an action
+Store a memory:
 
 ```http
 POST /v1/actions
@@ -69,10 +43,7 @@ Content-Type: application/json
 }
 ```
 
-`score_delta` is ignored if supplied. External evaluation is disabled by
-default. Set `SCORING_MODE=remote` and configure `ANTHROPIC_API_KEY` to opt in.
-
-### Recall relevant memory
+Recall memory:
 
 ```http
 POST /v1/projects/my-project/recall
@@ -84,11 +55,39 @@ Content-Type: application/json
 }
 ```
 
-### Get prompt-ready context
+Get prompt-ready context:
 
 ```http
 GET /v1/projects/my-project/context?q=authentication%20decisions&format=text
 ```
 
-Context is semantic and query-dependent. It is intentionally not a full
-project dump.
+Bootstrap an HTTP-capable agent:
+
+```http
+GET /v1/projects/my-project/bootstrap
+```
+
+## MCP
+
+Use the official Walrus Memory MCP server:
+
+```sh
+npx -y @mysten-incubation/memwal-mcp@0.0.4 \
+  --staging \
+  --namespace noosphere-<project>
+```
+
+MCP is optional. It accesses the same project memory used by the filesystem,
+CLI, and HTTP integrations.
+
+## Automatic continuity
+
+The watcher fingerprints the Git working tree. After settled changes, it
+stores a metadata-only checkpoint and refreshes `.noosphere/context.md`.
+
+The default checkpoint contains changed paths, branch and commit information,
+diff statistics, and a timestamp. It does not upload raw source diffs unless
+`privacy.include_diff` is explicitly enabled.
+
+Noosphere records concise conclusions and handoffs. It does not request hidden
+chain-of-thought.

@@ -109,9 +109,13 @@ after(async () => {
 });
 
 describe('Noosphere continuity CLI', () => {
-  it('initializes cross-agent instructions and project-specific MCP configs', async () => {
+  it('initializes the universal protocol inside one .noosphere folder', async () => {
     await runCli(['init']);
-    const configPath = path.join(projectDir, '.noosphere.json');
+    const configPath = path.join(
+      projectDir,
+      '.noosphere',
+      'config.json',
+    );
     const config = JSON.parse(await readFile(configPath, 'utf8'));
     config.project_id = 'continuity-test';
     config.relayer_url = serverUrl;
@@ -119,46 +123,67 @@ describe('Noosphere continuity CLI', () => {
     config.context_refresh_ms = 60_000;
     await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 
-    const [
-      mcpConfig,
-      cursorMcp,
-      cursorRule,
-      agents,
-      claude,
-      gemini,
-      protocol,
-      protocolJson,
-      journal,
-    ] =
-      await Promise.all([
-        readFile(path.join(projectDir, '.mcp.json'), 'utf8'),
-        readFile(path.join(projectDir, '.cursor', 'mcp.json'), 'utf8'),
-        readFile(
-          path.join(projectDir, '.cursor', 'rules', 'noosphere.mdc'),
-          'utf8',
-        ),
-        readFile(path.join(projectDir, 'AGENTS.md'), 'utf8'),
-        readFile(path.join(projectDir, 'CLAUDE.md'), 'utf8'),
-        readFile(path.join(projectDir, 'GEMINI.md'), 'utf8'),
-        readFile(path.join(projectDir, 'NOOSPHERE.md'), 'utf8'),
-        readFile(
-          path.join(projectDir, '.noosphere', 'protocol.json'),
-          'utf8',
-        ),
-        readFile(path.join(projectDir, '.noosphere', 'journal.md'), 'utf8'),
-      ]);
+    const [protocol, protocolJson, journal] = await Promise.all([
+      readFile(
+        path.join(projectDir, '.noosphere', 'instructions.md'),
+        'utf8',
+      ),
+      readFile(
+        path.join(projectDir, '.noosphere', 'protocol.json'),
+        'utf8',
+      ),
+      readFile(path.join(projectDir, '.noosphere', 'journal.md'), 'utf8'),
+    ]);
 
-    assert.match(mcpConfig, /memwal-mcp@0\.0\.4/);
-    assert.match(cursorMcp, /memwal-mcp@0\.0\.4/);
-    assert.match(cursorRule, /universal Noosphere continuity protocol/);
-    assert.match(agents, /vendor-neutral/);
-    assert.match(claude, /vendor-neutral/);
-    assert.match(gemini, /vendor-neutral/);
+    assert.deepEqual(config.adapters, []);
     assert.match(protocol, /universal agent protocol/i);
     assert.match(protocol, /Do not reveal or request hidden chain-of-thought/);
     assert.match(protocolJson, /"filesystem"/);
     assert.match(protocolJson, /"http"/);
     assert.match(journal, /public work journal/i);
+    for (const adapterPath of [
+      '.mcp.json',
+      '.noosphere.json',
+      'AGENTS.md',
+      'CLAUDE.md',
+      'GEMINI.md',
+      'NOOSPHERE.md',
+      '.cursor',
+    ]) {
+      await assert.rejects(
+        readFile(path.join(projectDir, adapterPath), 'utf8'),
+      );
+    }
+  });
+
+  it('keeps only the selected agent adapters', async () => {
+    await runCli(['adapters', '--only', 'claude']);
+    const config = JSON.parse(
+      await readFile(
+        path.join(projectDir, '.noosphere', 'config.json'),
+        'utf8',
+      ),
+    );
+
+    assert.deepEqual(config.adapters, ['claude']);
+    assert.match(
+      await readFile(path.join(projectDir, 'CLAUDE.md'), 'utf8'),
+      /Noosphere continuity adapter/,
+    );
+    await assert.rejects(readFile(path.join(projectDir, 'AGENTS.md'), 'utf8'));
+    await assert.rejects(readFile(path.join(projectDir, 'GEMINI.md'), 'utf8'));
+    await assert.rejects(readFile(path.join(projectDir, '.mcp.json'), 'utf8'));
+    await assert.rejects(
+      readFile(path.join(projectDir, '.cursor', 'mcp.json'), 'utf8'),
+    );
+    await assert.rejects(readFile(path.join(projectDir, 'NOOSPHERE.md'), 'utf8'));
+    assert.match(
+      await readFile(
+        path.join(projectDir, '.noosphere', 'instructions.md'),
+        'utf8',
+      ),
+      /universal agent protocol/i,
+    );
   });
 
   it('stores metadata-only checkpoints after workspace edits', async () => {
@@ -225,7 +250,11 @@ describe('Noosphere continuity CLI', () => {
     const nested = path.join(secondProjectDir, 'src', 'nested');
     await mkdir(nested, { recursive: true });
     await runCli(['activate', '--quiet'], secondProjectDir);
-    const secondConfigPath = path.join(secondProjectDir, '.noosphere.json');
+    const secondConfigPath = path.join(
+      secondProjectDir,
+      '.noosphere',
+      'config.json',
+    );
     const secondConfig = JSON.parse(
       await readFile(secondConfigPath, 'utf8'),
     );
@@ -379,7 +408,11 @@ describe('Noosphere continuity CLI', () => {
   it('watch mode retries a checkpoint after a temporary relayer failure', async () => {
     const actionCountBeforeWatch = storedActions.length;
     const originalUrl = serverUrl;
-    const configPath = path.join(projectDir, '.noosphere.json');
+    const configPath = path.join(
+      projectDir,
+      '.noosphere',
+      'config.json',
+    );
     const config = JSON.parse(await readFile(configPath, 'utf8'));
     config.relayer_url = 'http://127.0.0.1:1';
     config.checkpoint_debounce_ms = 100;

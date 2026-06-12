@@ -11,23 +11,6 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <div id="auth-overlay" class="auth-overlay" role="dialog" aria-modal="true" aria-label="Connect wallet">
-      <div class="auth-panel">
-        <p class="auth-kicker">NOOSPHERE / SUI WALLET</p>
-        <h2 class="auth-title">Connect to write memory</h2>
-        <p class="auth-desc">
-          Sign in with your Sui wallet to store decisions, remember findings,
-          and manage projects. Recall is always open without signing in.
-        </p>
-        <div id="wallet-list" class="wallet-list">
-          <p class="wallet-detecting">Detecting wallets…</p>
-        </div>
-        <button class="auth-skip" id="auth-skip" type="button">
-          Continue read-only
-        </button>
-      </div>
-    </div>
-
     <header class="masthead">
       <a class="brand" href="/">Noosphere</a>
       <nav>
@@ -37,14 +20,7 @@
         <a href="#connect">Connect</a>
         <a href="#install">Install</a>
       </nav>
-      <div class="header-right">
-        <div class="status" id="status">Connecting</div>
-        <div class="wallet-badge hidden" id="wallet-badge">
-          <span class="wallet-dot"></span>
-          <span id="wallet-address-display"></span>
-          <button class="wallet-disconnect" id="wallet-disconnect" type="button">✕</button>
-        </div>
-      </div>
+      <div class="status" id="status">Connecting</div>
     </header>
 
     <main>
@@ -88,13 +64,12 @@
         </div>
 
         <div class="aperture-body">
-          <form id="action-form" class="memory-form" data-panel="remember" data-auth-required>
+          <form id="action-form" class="memory-form" data-panel="remember">
             <div class="panel-copy">
               <h2>Write to shared memory</h2>
               <p>
                 Noosphere wraps the output in a portable record and sends it
                 to Walrus Memory for encrypted storage and semantic retrieval.
-                Remote AI evaluation is optional and off by default.
               </p>
             </div>
 
@@ -138,7 +113,7 @@
               </label>
             </div>
 
-            <button class="primary" type="submit" id="submit-button" data-auth-gate>
+            <button class="primary" type="submit" id="submit-button">
               Remember this
             </button>
             <output id="result" class="result"></output>
@@ -230,7 +205,7 @@
             <pre><code>noosphere setup
 noosphere credentials status</code></pre>
           </div>
-          <form id="project-form" class="project-form" data-auth-required>
+          <form id="project-form" class="project-form">
             <label>
               Repository path
               <input
@@ -240,7 +215,7 @@ noosphere credentials status</code></pre>
                 required
               />
             </label>
-            <button class="primary" id="project-button" type="submit" data-auth-gate>
+            <button class="primary" id="project-button" type="submit">
               Add project
             </button>
             <output id="project-result" class="project-result"></output>
@@ -275,7 +250,6 @@ noosphere credentials status</code></pre>
         <div class="links">
           <a href="/.well-known/noosphere.json">Discovery</a>
           <a href="/openapi.json">OpenAPI</a>
-          <a href="/scoring-policy">Evaluation policy</a>
           <a
             href="https://docs.wal.app/walrus-memory/getting-started/what-is-walrus-memory"
             target="_blank"
@@ -285,7 +259,6 @@ noosphere credentials status</code></pre>
           </a>
         </div>
       </section>
-    </main>
 
       <section class="install" id="install">
         <div class="section-heading">
@@ -402,6 +375,6 @@ noosphere credentials status</code></pre>
       </section>
     </main>
 
-    <script type="module" src="/app.js?v=20260612-2"></script>
+    <script type="module" src="/app.js?v=20260612-3"></script>
   </body>
 </html>

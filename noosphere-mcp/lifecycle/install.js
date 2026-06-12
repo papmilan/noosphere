@@ -7,6 +7,7 @@ import {
   chmod,
   cp,
   mkdir,
+  readdir,
   readFile,
   rm,
   writeFile,
@@ -113,20 +114,30 @@ async function install() {
     path.join(installedMcp, 'lifecycle'),
     ['ide-bridge.js'],
   );
-  await copyRuntime(sourceRelayer, installedRelayer, [
+  const relayerRuntimeEntries = [
     'index.js',
     'memory.js',
     'walrus-memory.js',
     'durable-store.js',
     'security.js',
-    'scorer.js',
     'local-projects.js',
     'credentials.js',
     'public',
-    'scoring-policy',
     'package.json',
     'package-lock.json',
     '.env.example',
+  ];
+  await copyRuntime(
+    sourceRelayer,
+    installedRelayer,
+    relayerRuntimeEntries,
+  );
+  await pruneRuntime(installedRelayer, [
+    ...relayerRuntimeEntries,
+    '.env',
+    '.noosphere-local-memory.json',
+    '.noosphere-runtime',
+    'node_modules',
   ]);
 
   const sourceEnv = path.join(sourceRelayer, '.env');
@@ -171,6 +182,14 @@ async function uninstall() {
   await removeAllShellBlocks();
   await rm(home, { recursive: true, force: true });
   console.log('Noosphere user installation removed.');
+}
+
+async function pruneRuntime(root, preservedEntries) {
+  const preserved = new Set(preservedEntries);
+  for (const entry of await readdir(root)) {
+    if (preserved.has(entry)) continue;
+    await rm(path.join(root, entry), { recursive: true, force: true });
+  }
 }
 
 async function doctor() {

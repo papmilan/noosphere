@@ -8,6 +8,8 @@ import {
   mkdir,
   readFile,
   rename,
+  rm,
+  rmdir,
   stat,
   writeFile,
 } from 'node:fs/promises';
@@ -37,6 +39,7 @@ const DEFAULT_WRITE_TIMEOUT_MS = 130_000;
 const DEFAULT_READ_TIMEOUT_MS = 30_000;
 const MANAGED_START = '<!-- noosphere:continuity:start -->';
 const MANAGED_END = '<!-- noosphere:continuity:end -->';
+const ALL_ADAPTERS = ['codex', 'claude', 'gemini', 'cursor', 'mcp'];
 
 const command = process.argv[2] || 'help';
 const explicitProjectPath = readOption('--path');
@@ -98,6 +101,12 @@ try {
     case 'register':
       await registerCurrentProject(projectDir);
       break;
+    case 'adapters':
+      await configureProjectAdapters(
+        projectDir,
+        parseAdapters(readOption('--only') || process.argv[3]),
+      );
+      break;
     case 'pause':
       await pauseProject(process.argv[3]);
       console.log(`Paused project ${process.argv[3]}`);
@@ -124,12 +133,16 @@ try {
   process.exitCode = 1;
 }
 
-export async function initializeProject(root) {
+export async function initializeProject(root, options = {}) {
   await assertGitRepository(root);
-  const configPath = path.join(root, '.noosphere.json');
-  const existing = await readJson(configPath);
+  await mkdir(path.join(root, '.noosphere'), { recursive: true });
+  const existing = await readProjectConfig(root);
   const projectId =
     existing?.project_id || sanitizeProjectId(path.basename(root));
+  const adapters =
+    options.adapters ||
+    existing?.adapters ||
+    [];
   const config = {
     project_id: projectId,
     relayer_url: existing?.relayer_url || DEFAULT_RELAYER_URL,
@@ -143,10 +156,10 @@ export async function initializeProject(root) {
       include_diff: existing?.privacy?.include_diff === true,
       share_journal: existing?.privacy?.share_journal === true,
     },
+    adapters,
   };
 
-  await writeJson(configPath, config);
-  await mkdir(path.join(root, '.noosphere'), { recursive: true });
+  await writeProjectConfig(root, config);
   await writeTextIfMissing(
     path.join(root, '.noosphere', 'context.md'),
     emptyContext(projectId),
@@ -155,10 +168,11 @@ export async function initializeProject(root) {
     path.join(root, '.noosphere', 'journal.md'),
     journalTemplate(projectId),
   );
-  await writeAgentAdapters(root, projectId);
   await writeUniversalProtocol(root, projectId);
-  await writeMcpConfigs(root, projectId);
-  await ensureGitignore(root);
+  await writeAgentAdapters(root, projectId, adapters);
+  await writeMcpConfigs(root, projectId, adapters);
+  await ensureLocalExcludes(root);
+  await removeLegacyProjectFiles(root);
 
   console.log(`Noosphere continuity initialized for ${projectId}.`);
   console.log('The Noosphere project manager will start its watcher.');
@@ -175,8 +189,7 @@ export async function activateProject(start, { quiet = false } = {}) {
     return { skipped: true, reason: 'ignored', root };
   }
 
-  const configPath = path.join(root, '.noosphere.json');
-  if (!(await exists(configPath))) {
+  if (!(await projectConfigExists(root))) {
     await initializeProject(root);
   }
   const config = await loadConfig(root);
@@ -197,7 +210,7 @@ export async function deactivateProject(start) {
  * One-time registration of the current project via the IDE bridge hint file.
  *
  * 1. Finds the Git root of `start`.
- * 2. Reads (or generates) the project_id from `.noosphere.json`.
+ * 2. Reads (or generates) the project_id from `.noosphere/config.json`.
  * 3. Writes `.noosphere/ide-hint.json`.
  * 4. Calls registerProject to add the project to the registry.
  * 5. Prints "Project registered: <project_id>".
@@ -214,9 +227,8 @@ export async function registerCurrentProject(start) {
     throw new Error(`Project is opted out of Noosphere tracking (found .noosphere-ignore).`);
   }
 
-  // Ensure the project has a .noosphere.json (init if absent)
-  const configPath = path.join(root, '.noosphere.json');
-  if (!(await exists(configPath))) {
+  // Ensure the project has a Noosphere config (init if absent).
+  if (!(await projectConfigExists(root))) {
     await initializeProject(root);
   }
   const config = await loadConfig(root);
@@ -229,6 +241,23 @@ export async function registerCurrentProject(start) {
 
   console.log(`Project registered: ${config.project_id}`);
   console.log(`Path: ${root}`);
+}
+
+export async function configureProjectAdapters(root, adapters) {
+  const config = await loadConfig(root);
+  const normalized = adapters || [];
+  const next = { ...config, adapters: normalized };
+  await writeProjectConfig(root, next);
+  await writeUniversalProtocol(root, config.project_id);
+  await writeAgentAdapters(root, config.project_id, normalized);
+  await writeMcpConfigs(root, config.project_id, normalized);
+  await ensureLocalExcludes(root);
+  await removeLegacyProjectFiles(root);
+  console.log(
+    normalized.length > 0
+      ? `Noosphere adapters enabled: ${normalized.join(', ')}`
+      : 'Noosphere adapters disabled. Core memory remains in .noosphere/.',
+  );
 }
 
 async function printProjects() {
@@ -498,7 +527,7 @@ async function printStatus(root) {
   );
 }
 
-async function writeMcpConfigs(root, projectId) {
+async function writeMcpConfigs(root, projectId, adapters) {
   const namespace = `noosphere-${sanitizeProjectId(projectId)}`;
   const server = {
     command: 'npx',
@@ -510,16 +539,26 @@ async function writeMcpConfigs(root, projectId) {
       namespace,
     ],
   };
-  await writeJson(path.join(root, '.mcp.json'), {
-    mcpServers: { noosphere: server },
-  });
-  await mkdir(path.join(root, '.cursor'), { recursive: true });
-  await writeJson(path.join(root, '.cursor', 'mcp.json'), {
-    mcpServers: { noosphere: server },
-  });
+  const selected = new Set(adapters);
+  const genericMcp = path.join(root, '.mcp.json');
+  if (selected.has('mcp')) {
+    await upsertMcpServer(genericMcp, server);
+  } else {
+    await removeMcpServer(genericMcp);
+  }
+
+  const cursorDirectory = path.join(root, '.cursor');
+  const cursorMcp = path.join(cursorDirectory, 'mcp.json');
+  if (selected.has('cursor')) {
+    await mkdir(cursorDirectory, { recursive: true });
+    await upsertMcpServer(cursorMcp, server);
+  } else {
+    await removeMcpServer(cursorMcp);
+  }
+  await removeEmptyDirectory(cursorDirectory);
 }
 
-async function writeAgentAdapters(root, projectId) {
+async function writeAgentAdapters(root, projectId, adapters) {
   const shared = `${MANAGED_START}
 ## Noosphere continuity adapter
 
@@ -536,46 +575,69 @@ for tools that recognize this filename.
 
 Project namespace: \`noosphere-${sanitizeProjectId(projectId)}\`.
 ${MANAGED_END}`;
-  await upsertManagedBlock(path.join(root, 'AGENTS.md'), shared);
-  await upsertManagedBlock(path.join(root, 'CLAUDE.md'), shared);
-  await upsertManagedBlock(path.join(root, 'GEMINI.md'), shared);
+  const selected = new Set(adapters);
+  const files = {
+    codex: path.join(root, 'AGENTS.md'),
+    claude: path.join(root, 'CLAUDE.md'),
+    gemini: path.join(root, 'GEMINI.md'),
+  };
+  for (const [adapter, file] of Object.entries(files)) {
+    if (selected.has(adapter)) {
+      await upsertManagedBlock(file, shared);
+    } else {
+      await removeManagedBlock(file);
+    }
+  }
 
-  await mkdir(path.join(root, '.cursor', 'rules'), { recursive: true });
-  await writeFile(
-    path.join(root, '.cursor', 'rules', 'noosphere.mdc'),
-    `---
+  const cursorDirectory = path.join(root, '.cursor');
+  const cursorRules = path.join(cursorDirectory, 'rules');
+  const cursorRule = path.join(cursorRules, 'noosphere.mdc');
+  if (selected.has('cursor')) {
+    await mkdir(cursorRules, { recursive: true });
+    await writeFile(
+      cursorRule,
+      `---
 description: Load the universal Noosphere continuity protocol
 alwaysApply: true
 ---
 
-Read \`NOOSPHERE.md\`, \`.noosphere/context.md\`, and
+Read \`.noosphere/instructions.md\`, \`.noosphere/context.md\`, and
 \`.noosphere/journal.md\` before working. Append concise, verifiable findings
 and handoffs to the journal. Do not write hidden chain-of-thought.
 `,
-    'utf8',
-  );
+      'utf8',
+    );
+  } else {
+    await rm(cursorRule, { force: true });
+    await removeEmptyDirectory(cursorRules);
+  }
+  await removeEmptyDirectory(cursorDirectory);
 }
 
-async function ensureGitignore(root) {
-  const gitignore = path.join(root, '.gitignore');
+async function ensureLocalExcludes(root) {
+  const exclude = path.join(root, '.git', 'info', 'exclude');
   let current = '';
   try {
-    current = await readFile(gitignore, 'utf8');
+    current = await readFile(exclude, 'utf8');
   } catch {
-    // A missing .gitignore is fine.
+    // git init normally creates this file, but creating it is harmless.
   }
   const entries = [
     '.noosphere/context.md',
     '.noosphere/journal.md',
     '.noosphere/state.json',
     '.noosphere/*.tmp',
+    '._*',
+    '**/._*',
+    '.DS_Store',
   ];
   const missing = entries.filter(
     (entry) => !current.split(/\r?\n/).includes(entry),
   );
   if (missing.length > 0) {
+    await mkdir(path.dirname(exclude), { recursive: true });
     await appendFile(
-      gitignore,
+      exclude,
       `${current && !current.endsWith('\n') ? '\n' : ''}${missing.join('\n')}\n`,
       'utf8',
     );
@@ -598,8 +660,57 @@ async function upsertManagedBlock(file, block) {
   await writeFile(file, next, 'utf8');
 }
 
+async function removeManagedBlock(file) {
+  let current;
+  try {
+    current = await readFile(file, 'utf8');
+  } catch {
+    return;
+  }
+  const pattern = new RegExp(
+    `${escapeRegExp(MANAGED_START)}[\\s\\S]*?${escapeRegExp(MANAGED_END)}\\n?`,
+  );
+  if (!pattern.test(current)) return;
+  const next = current.replace(pattern, '').trim();
+  if (next) {
+    await writeFile(file, `${next}\n`, 'utf8');
+  } else {
+    await rm(file, { force: true });
+  }
+}
+
+async function upsertMcpServer(file, server) {
+  const current = (await readJson(file)) || {};
+  await writeJson(file, {
+    ...current,
+    mcpServers: {
+      ...(current.mcpServers || {}),
+      noosphere: server,
+    },
+  });
+}
+
+async function removeMcpServer(file) {
+  const current = await readJson(file);
+  if (!current?.mcpServers?.noosphere) return;
+  const mcpServers = { ...current.mcpServers };
+  delete mcpServers.noosphere;
+  const next = { ...current, mcpServers };
+  if (Object.keys(mcpServers).length === 0 && Object.keys(next).length === 1) {
+    await rm(file, { force: true });
+  } else {
+    await writeJson(file, next);
+  }
+}
+
+async function removeEmptyDirectory(directory) {
+  await rmdir(directory).catch((error) => {
+    if (!['ENOENT', 'ENOTEMPTY'].includes(error.code)) throw error;
+  });
+}
+
 async function loadConfig(root) {
-  const config = await readJson(path.join(root, '.noosphere.json'));
+  const config = await readProjectConfig(root);
   if (!config?.project_id) {
     throw new Error('Run `node continuity/index.js init` in this project first.');
   }
@@ -610,6 +721,9 @@ async function loadConfig(root) {
       config.checkpoint_debounce_ms || DEFAULT_DEBOUNCE_MS,
     context_refresh_ms:
       normalizeRefreshMs(config.context_refresh_ms),
+    adapters: Array.isArray(config.adapters)
+      ? config.adapters
+      : [],
     privacy: {
       checkpoint_content:
         config.privacy?.checkpoint_content || 'metadata-only',
@@ -737,7 +851,7 @@ async function journalFromCli(root) {
 }
 
 async function printProtocol(root) {
-  const file = path.join(root, 'NOOSPHERE.md');
+  const file = path.join(root, '.noosphere', 'instructions.md');
   process.stdout.write(await readFile(file, 'utf8'));
 }
 
@@ -850,7 +964,11 @@ next recommended action.
 - HTTP recall: \`POST /v1/projects/${slug}/recall\`
 - MCP namespace: \`noosphere-${slug}\`
 `;
-  await writeFile(path.join(root, 'NOOSPHERE.md'), content, 'utf8');
+  await writeFile(
+    path.join(root, '.noosphere', 'instructions.md'),
+    content,
+    'utf8',
+  );
   await writeJson(path.join(root, '.noosphere', 'protocol.json'), {
     protocol: 'noosphere-continuity',
     version: '1.0',
@@ -859,10 +977,55 @@ next recommended action.
     files: {
       context: '.noosphere/context.md',
       journal: '.noosphere/journal.md',
-      instructions: 'NOOSPHERE.md',
+      instructions: '.noosphere/instructions.md',
     },
     interfaces: ['filesystem', 'cli', 'http', 'mcp'],
   });
+}
+
+async function readProjectConfig(root) {
+  return (
+    (await readJson(path.join(root, '.noosphere', 'config.json'))) ||
+    (await readJson(path.join(root, '.noosphere.json')))
+  );
+}
+
+async function writeProjectConfig(root, config) {
+  await mkdir(path.join(root, '.noosphere'), { recursive: true });
+  await writeJson(path.join(root, '.noosphere', 'config.json'), config);
+  await rm(path.join(root, '.noosphere.json'), { force: true });
+}
+
+async function projectConfigExists(root) {
+  return Boolean(await readProjectConfig(root));
+}
+
+async function removeLegacyProjectFiles(root) {
+  const legacyProtocol = path.join(root, 'NOOSPHERE.md');
+  const content = await readFile(legacyProtocol, 'utf8').catch(() => '');
+  if (content.startsWith('# Noosphere universal agent protocol')) {
+    await rm(legacyProtocol, { force: true });
+  }
+
+  const gitignore = path.join(root, '.gitignore');
+  const current = await readFile(gitignore, 'utf8').catch(() => null);
+  if (current === null) return;
+  const legacyEntries = new Set([
+    '.noosphere/context.md',
+    '.noosphere/journal.md',
+    '.noosphere/state.json',
+    '.noosphere/*.tmp',
+  ]);
+  const remaining = current
+    .split(/\r?\n/)
+    .filter((line) => !legacyEntries.has(line))
+    .join('\n')
+    .replace(/^\n+|\n+$/g, '');
+  if (remaining) {
+    await writeFile(gitignore, `${remaining}\n`, 'utf8');
+  } else {
+    await rm(gitignore, { force: true });
+  }
 }
 
 async function formatLocalJournal(root) {
@@ -1039,6 +1202,30 @@ function readOption(name) {
   return value;
 }
 
+function parseAdapters(value) {
+  if (!value) {
+    throw new Error(
+      `Choose adapters with --only. Options: ${ALL_ADAPTERS.join(', ')}, all, none.`,
+    );
+  }
+  const requested = value
+    .split(',')
+    .map((adapter) => adapter.trim().toLowerCase())
+    .filter(Boolean);
+  if (requested.includes('all')) return [...ALL_ADAPTERS];
+  if (requested.includes('none')) return [];
+  const unknown = requested.filter(
+    (adapter) => !ALL_ADAPTERS.includes(adapter),
+  );
+  if (unknown.length > 0) {
+    throw new Error(
+      `Unknown adapter(s): ${unknown.join(', ')}. ` +
+      `Options: ${ALL_ADAPTERS.join(', ')}.`,
+    );
+  }
+  return [...new Set(requested)];
+}
+
 function printHelp() {
   console.log(`Noosphere continuity
 
@@ -1049,6 +1236,7 @@ Commands:
   activate    Auto-initialize and register the current Git project
   deactivate  Stop automatically watching the current project
   register    Register a project now (supports --path /absolute/repository)
+  adapters    Keep only selected adapters (example: adapters --only claude)
   projects    List registered projects
   init        Add project config and agent instructions
   watch       Checkpoint settled working-tree changes and refresh context

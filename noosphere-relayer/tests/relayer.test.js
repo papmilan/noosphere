@@ -14,7 +14,6 @@ const {
   isRateLimited,
   parseTrustProxy,
   prioritizePendingJobs,
-  resolveActionScore,
   retryDelayFor,
   runtimeStore,
 } =
@@ -283,14 +282,13 @@ describe('Noosphere memory API', () => {
     assert.equal(attempts, 2);
   });
 
-  it('reports demo memory and scorer status', async () => {
+  it('reports demo memory readiness', async () => {
     const response = await fetch(`${baseUrl}/ready`);
     const body = await response.json();
 
     assert.equal(response.status, 200);
     assert.equal(body.memory.mode, 'demo');
     assert.equal(body.memory.ready, true);
-    assert.equal(body.scorer_configured, false);
   });
 
   it('keeps liveness independent from Walrus readiness', async () => {
@@ -341,60 +339,16 @@ describe('Noosphere memory API', () => {
     assert.equal(body.success, true);
     assert.match(body.blob_id, /^demo-/);
     assert.equal(body.storage, 'demo');
-    assert.equal(body.score_delta, 0);
-    assert.equal(body.score_status, 'private');
-    assert.equal(body.privacy.remote_evaluation, false);
+    assert.deepEqual(Object.keys(body).sort(), [
+      'action_id',
+      'blob_id',
+      'memory_id',
+      'namespace',
+      'storage',
+      'success',
+    ]);
     assert.equal('tx_digest' in body, false);
     assert.equal('genome_object_id' in body, false);
-  });
-
-  it('ignores caller score input and always runs automatic evaluation', async () => {
-    const result = await resolveActionScore(
-      {
-        project_id: 'test-project',
-        agent_id: 'untrusted-agent',
-        action_type: 'code',
-        content: 'Caller cannot choose this score.',
-        score_delta: 10,
-      },
-      {
-        contextLoader: async () => 'Relevant memory',
-        scorer: async (action, context) => {
-          assert.equal('score_delta' in action, false);
-          assert.equal(context, 'Relevant memory');
-          return {
-            score_delta: -2,
-            reasoning: 'Independent evaluation.',
-            dimensions: {},
-          };
-        },
-      },
-    );
-
-    assert.equal(result.score_delta, -2);
-  });
-
-  it('defaults to privacy-safe scoring without calling a remote model', async () => {
-    let contextLoads = 0;
-    const result = await resolveActionScore(
-      {
-        project_id: 'private-project',
-        agent_id: 'codex',
-        action_type: 'code',
-        content: 'Private source code.',
-      },
-      {
-        contextLoader: async () => {
-          contextLoads += 1;
-          return 'Should not be loaded';
-        },
-      },
-    );
-
-    assert.equal(result.score_status, 'private');
-    assert.equal(result.score_delta, 0);
-    assert.equal(contextLoads, 0);
-    assert.match(result.reasoning, /private project content/);
   });
 
   it('recalls stored records by project namespace', async () => {
@@ -416,6 +370,36 @@ describe('Noosphere memory API', () => {
     assert.equal(body.total, 1);
     assert.equal(body.memories[0].agent_id, 'codex');
     assert.match(body.memories[0].content, /official Walrus Memory SDK/);
+  });
+
+  it('returns only the portable memory fields from older records', async () => {
+    await memoryStore.remember(
+      'older-project',
+      serializeMemory({
+        schema: 'noosphere.agent-memory.v2',
+        action_id: 'older-action',
+        project_id: 'older-project',
+        agent_id: 'older-agent',
+        action_type: 'decision',
+        content: 'Keep the shared memory format focused.',
+        timestamp: '2026-06-12T00:00:00.000Z',
+        obsolete_annotation: { value: 10 },
+      }),
+    );
+
+    const response = await fetch(
+      `${baseUrl}/v1/projects/older-project/recall`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ query: 'shared memory format', limit: 5 }),
+      },
+    );
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(body.total, 1);
+    assert.equal('obsolete_annotation' in body.memories[0], false);
   });
 
   it('returns prompt-ready semantic context', async () => {
@@ -512,13 +496,17 @@ describe('Noosphere memory API', () => {
   });
 
   it('publishes the simplified discovery and OpenAPI documents', async () => {
-    const [discoveryResponse, openApiResponse] = await Promise.all([
+    const [homeResponse, discoveryResponse, openApiResponse] = await Promise.all([
+      fetch(`${baseUrl}/`),
       fetch(`${baseUrl}/.well-known/noosphere.json`),
       fetch(`${baseUrl}/openapi.json`),
     ]);
+    const home = await homeResponse.text();
     const discovery = await discoveryResponse.json();
     const openApi = await openApiResponse.json();
 
+    assert.equal(homeResponse.status, 200);
+    assert.doesNotMatch(home, /Connect wallet|auth-overlay|data-auth-gate/);
     assert.equal(discovery.version, '2.0.0');
     assert.equal(discovery.architecture.custom_smart_contract, false);
     assert.equal(

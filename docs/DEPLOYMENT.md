@@ -69,7 +69,7 @@ managed-relayer, and durable-state readiness.
 Back up:
 
 - `~/.noosphere/projects.json`
-- each project's `.noosphere.json` and `.noosphere/` directory
+- each project's `.noosphere/` directory
 - the relayer runtime state volume containing `.noosphere-runtime/state.json`
 
 Walrus memories are remote and are not recreated from these files. Protect the

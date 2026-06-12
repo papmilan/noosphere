@@ -115,7 +115,7 @@ describe('credential storage', () => {
         `MEMWAL_PRIVATE_KEY=${'a'.repeat(64)}`,
         `MEMWAL_ACCOUNT_ID=0x${'b'.repeat(64)}`,
         'MEMWAL_NETWORK=testnet',
-        'SCORING_MODE=private',
+        'NOOSPHERE_API_TOKEN=keep-this-setting',
         '',
       ].join('\n'),
       { mode: 0o600 },
@@ -128,7 +128,7 @@ describe('credential storage', () => {
 
     const scrubbed = await readFile(envPath, 'utf8');
     assert.match(scrubbed, /PORT=3001/);
-    assert.match(scrubbed, /SCORING_MODE=private/);
+    assert.match(scrubbed, /NOOSPHERE_API_TOKEN=keep-this-setting/);
     assert.doesNotMatch(scrubbed, /MEMWAL_PRIVATE_KEY/);
     assert.doesNotMatch(scrubbed, /MEMWAL_ACCOUNT_ID/);
     assert.equal(JSON.parse(store.getPassword()).MEMWAL_NETWORK, 'testnet');

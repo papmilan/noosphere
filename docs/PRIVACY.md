@@ -15,7 +15,7 @@ memory text is stored directly on Sui.
 Automatic checkpoints are metadata-only by default. They contain changed file
 paths, branch and commit information, diff statistics, and a timestamp. Raw
 source diffs are uploaded only when `privacy.include_diff` is explicitly set to
-`true` in `.noosphere.json`.
+`true` in `.noosphere/config.json`.
 
 ## Temporary local plaintext
 
@@ -42,9 +42,3 @@ Use `noosphere setup` for initial configuration and
 Noosphere cannot recover the controlling Sui wallet or a lost delegate key.
 Linux systems without Secret Service explicitly fall back to an owner-only
 `0600` file; that fallback is not encrypted at rest.
-
-## Evaluation
-
-Remote scoring is optional and disabled by default. When enabled, action content
-and relevant context are sent to the configured model provider. A model score is
-a centralized opinion, not trustless consensus or immutable reputation.
