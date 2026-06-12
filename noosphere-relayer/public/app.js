@@ -15,7 +15,177 @@ const projectResult = document.querySelector('#project-result');
 const projectList = document.querySelector('#project-list');
 const credentialStatus = document.querySelector('#credential-status');
 
+// ── Wallet auth ──────────────────────────────────────────────────────────────
+
+const authOverlay = document.querySelector('#auth-overlay');
+const walletListEl = document.querySelector('#wallet-list');
+const authSkip = document.querySelector('#auth-skip');
+const walletBadge = document.querySelector('#wallet-badge');
+const walletAddressDisplay = document.querySelector('#wallet-address-display');
+const walletDisconnect = document.querySelector('#wallet-disconnect');
+
+const SESSION_KEY = 'noosphere:wallet';
+
+const registeredWallets = new Map();
+
+// Wallet Standard — collect wallets that register themselves
+function onWalletRegister(wallet) {
+  if (wallet?.name) registeredWallets.set(wallet.name, wallet);
+}
+
+window.addEventListener('wallet-standard:register-wallet', (event) => {
+  onWalletRegister(event.detail?.wallet);
+});
+
+// Announce the app is ready so wallets can register
+window.dispatchEvent(
+  new CustomEvent('wallet-standard:app-ready', {
+    detail: { register: onWalletRegister },
+  }),
+);
+
+function getSession() {
+  try {
+    return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
+  } catch {
+    return null;
+  }
+}
+
+function saveSession(address, walletName) {
+  sessionStorage.setItem(SESSION_KEY, JSON.stringify({ address, walletName }));
+}
+
+function clearSession() {
+  sessionStorage.removeItem(SESSION_KEY);
+}
+
+function shortenAddress(addr) {
+  if (!addr || addr.length < 12) return addr;
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+}
+
+function applyAuthState(authenticated) {
+  authOverlay.classList.toggle('hidden', authenticated);
+  walletBadge.classList.toggle('hidden', !authenticated);
+
+  const lockable = document.querySelectorAll('[data-auth-required]');
+  lockable.forEach((el) => el.classList.toggle('write-locked', !authenticated));
+  document.querySelectorAll('[data-auth-gate]').forEach((btn) => {
+    btn.disabled = !authenticated;
+    btn.title = authenticated ? '' : 'Connect wallet to write memory';
+  });
+}
+
+function setConnected(address, walletName) {
+  saveSession(address, walletName);
+  walletAddressDisplay.textContent = shortenAddress(address);
+  applyAuthState(true);
+}
+
+function disconnect() {
+  clearSession();
+  walletAddressDisplay.textContent = '';
+  applyAuthState(false);
+  renderWalletList();
+}
+
+walletDisconnect.addEventListener('click', disconnect);
+
+authSkip.addEventListener('click', () => {
+  authOverlay.classList.add('hidden');
+  // write operations remain locked — clicking them re-shows overlay
+  document.querySelectorAll('[data-auth-required]').forEach((el) => {
+    el.addEventListener('click', () => {
+      if (!getSession()) authOverlay.classList.remove('hidden');
+    }, { once: false });
+  });
+});
+
+async function connectWallet(wallet) {
+  const feature = wallet.features?.['standard:connect'];
+  if (!feature) throw new Error(`${wallet.name} does not support standard:connect`);
+  const result = await feature.connect();
+  const account = result?.accounts?.[0];
+  if (!account?.address) throw new Error('No account returned from wallet');
+  return account.address;
+}
+
+function renderWalletList() {
+  walletListEl.replaceChildren();
+
+  // Give wallets 150 ms to register on first render
+  setTimeout(() => {
+    const wallets = [...registeredWallets.values()];
+
+    if (wallets.length === 0) {
+      const msg = document.createElement('p');
+      msg.className = 'wallet-no-wallets';
+      msg.innerHTML =
+        'No Sui wallet detected. Install ' +
+        '<a href="https://slush.app" target="_blank" rel="noreferrer">Slush</a> ' +
+        'or another Sui wallet extension and refresh.';
+      walletListEl.append(msg);
+      return;
+    }
+
+    wallets.forEach((wallet) => {
+      const btn = document.createElement('button');
+      btn.className = 'wallet-btn';
+      btn.type = 'button';
+
+      const icon = document.createElement('span');
+      icon.className = 'wallet-btn-icon';
+      if (wallet.icon) {
+        const img = document.createElement('img');
+        img.src = wallet.icon;
+        img.width = 20;
+        img.height = 20;
+        img.alt = '';
+        icon.append(img);
+      } else {
+        icon.textContent = '◆';
+      }
+
+      const name = document.createElement('span');
+      name.textContent = wallet.name;
+
+      btn.append(icon, name);
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        btn.querySelector('span:last-child').textContent = 'Connecting…';
+        try {
+          const address = await connectWallet(wallet);
+          setConnected(address, wallet.name);
+        } catch (error) {
+          btn.disabled = false;
+          btn.querySelector('span:last-child').textContent = wallet.name;
+          const err = document.createElement('p');
+          err.className = 'error';
+          err.style.marginTop = '10px';
+          err.textContent = error.message;
+          walletListEl.append(err);
+        }
+      });
+
+      walletListEl.append(btn);
+    });
+  }, 150);
+}
+
+function initAuth() {
+  const session = getSession();
+  if (session?.address) {
+    walletAddressDisplay.textContent = shortenAddress(session.address);
+    applyAuthState(true);
+  } else {
+    applyAuthState(false);
+    renderWalletList();
+  }
+}
+
 void initialize();
+initAuth();
 
 rememberTab.addEventListener('click', () => showMode('remember'));
 recallTab.addEventListener('click', () => showMode('recall'));
