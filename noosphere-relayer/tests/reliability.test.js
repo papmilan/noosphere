@@ -63,4 +63,43 @@ describe('relayer reliability', () => {
     assert.equal(result, 'stored');
     assert.deepEqual(delays, [25, 50]);
   });
+
+  it('stops immediate retries when an upstream rate limit is detected', async () => {
+    let attempts = 0;
+    await assert.rejects(
+      retryOperation(
+        async () => {
+          attempts += 1;
+          throw new Error('Walrus server error (429): rate limit exceeded');
+        },
+        {
+          attempts: 3,
+          shouldRetry: (error) => !/429/.test(error.message),
+          sleep: async () => {
+            throw new Error('sleep should not run');
+          },
+        },
+      ),
+      /429/,
+    );
+    assert.equal(attempts, 1);
+  });
+
+  it('persists the next eligible retry time with a failed job', async () => {
+    const filePath = path.join(temporaryRoot, 'retry-state.json');
+    const store = new DurableStore({ filePath });
+    await store.enqueue('project:delayed', {
+      projectId: 'project',
+      serializedRecord: 'pending',
+      responseTemplate: { success: true },
+    });
+    await store.markAttempt('project:delayed', new Error('rate limited'), {
+      nextAttemptAt: 123_456,
+    });
+
+    const restarted = new DurableStore({ filePath });
+    const pending = await restarted.getPending('project:delayed');
+    assert.equal(pending.attempts, 1);
+    assert.equal(pending.nextAttemptAt, 123_456);
+  });
 });

@@ -9,7 +9,15 @@ import express from 'express';
 process.env.DEMO_MODE = 'true';
 process.env.NODE_ENV = 'test';
 
-const { app, parseTrustProxy, resolveActionScore } =
+const {
+  app,
+  isRateLimited,
+  parseTrustProxy,
+  prioritizePendingJobs,
+  resolveActionScore,
+  retryDelayFor,
+  runtimeStore,
+} =
   await import('../index.js');
 const { MemoryStore, memoryStore, parseMemory, serializeMemory } =
   await import('../memory.js');
@@ -202,6 +210,41 @@ describe('Noosphere memory API', () => {
     assert.equal(await secondRestart.getPending('project:action'), null);
   });
 
+  it('prioritizes explicit memories before the newest automatic checkpoints', () => {
+    const jobs = [
+      {
+        key: 'project:checkpoint-old',
+        actionType: 'checkpoint',
+        createdAt: 1,
+      },
+      {
+        key: 'project:decision-old',
+        actionType: 'decision',
+        createdAt: 2,
+      },
+      {
+        key: 'project:checkpoint-new',
+        actionType: 'checkpoint',
+        createdAt: 4,
+      },
+      {
+        key: 'project:review-new',
+        actionType: 'review',
+        createdAt: 3,
+      },
+    ];
+
+    assert.deepEqual(
+      prioritizePendingJobs(jobs).map((job) => job.key),
+      [
+        'project:decision-old',
+        'project:review-new',
+        'project:checkpoint-new',
+        'project:checkpoint-old',
+      ],
+    );
+  });
+
   it('retries temporary upload failures with exponential backoff', async () => {
     let calls = 0;
     const delays = [];
@@ -257,6 +300,14 @@ describe('Noosphere memory API', () => {
       status: 'ok',
       service: 'Noosphere',
     });
+  });
+
+  it('recognizes Walrus cooldown hints without retrying immediately', () => {
+    const error = new Error(
+      'Walrus Memory server error (429): {"retry_after_seconds":300}',
+    );
+    assert.equal(isRateLimited(error), true);
+    assert.equal(retryDelayFor(error, 1), 300_000);
   });
 
   it('ignores forwarded protocol headers unless trust proxy is enabled', async () => {
@@ -324,15 +375,25 @@ describe('Noosphere memory API', () => {
   });
 
   it('defaults to privacy-safe scoring without calling a remote model', async () => {
-    const result = await resolveActionScore({
-      project_id: 'private-project',
-      agent_id: 'codex',
-      action_type: 'code',
-      content: 'Private source code.',
-    });
+    let contextLoads = 0;
+    const result = await resolveActionScore(
+      {
+        project_id: 'private-project',
+        agent_id: 'codex',
+        action_type: 'code',
+        content: 'Private source code.',
+      },
+      {
+        contextLoader: async () => {
+          contextLoads += 1;
+          return 'Should not be loaded';
+        },
+      },
+    );
 
     assert.equal(result.score_status, 'private');
     assert.equal(result.score_delta, 0);
+    assert.equal(contextLoads, 0);
     assert.match(result.reasoning, /private project content/);
   });
 
@@ -467,5 +528,52 @@ describe('Noosphere memory API', () => {
     assert.equal(openApi.info.version, '2.0.0');
     assert.ok(openApi.paths['/v1/projects/{project_id}/recall']);
     assert.ok(openApi.paths['/v1/projects/{project_id}/bootstrap']);
+  });
+
+  it('accepts a rate-limited write into the durable queue without duplication', async () => {
+    const originalRemember = memoryStore.remember;
+    let calls = 0;
+    memoryStore.remember = async () => {
+      calls += 1;
+      throw new Error(
+        'Walrus Memory server error (429): {"retry_after_seconds":300}',
+      );
+    };
+
+    try {
+      const request = {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': 'rate-limited-action',
+        },
+        body: JSON.stringify({
+          project_id: 'queued-project',
+          agent_id: 'codex',
+          action_type: 'checkpoint',
+          content: 'Queue this exactly once.',
+          session_id: 'queue-test',
+        }),
+      };
+      const first = await fetch(`${baseUrl}/v1/actions`, request);
+      const firstBody = await first.json();
+      assert.equal(first.status, 202);
+      assert.equal(firstBody.pending, true);
+
+      const second = await fetch(`${baseUrl}/v1/actions`, request);
+      const secondBody = await second.json();
+      assert.equal(second.status, 202);
+      assert.equal(secondBody.pending, true);
+      assert.equal(secondBody.deduplicated, true);
+      assert.equal(calls, 1);
+      assert.ok(
+        await runtimeStore.getPending(
+          'queued-project:rate-limited-action',
+        ),
+      );
+    } finally {
+      memoryStore.remember = originalRemember;
+      await runtimeStore.clear();
+    }
   });
 });

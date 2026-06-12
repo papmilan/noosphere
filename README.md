@@ -91,7 +91,19 @@ memory content remains in Walrus; the local pending entry is removed.
 
 ## Enable continuity
 
-Install the user lifecycle once on macOS, Linux, or Windows:
+Install the user lifecycle once on macOS, Linux, or Windows.
+
+**Option A — download the install script from the running webapp:**
+
+Open [http://127.0.0.1:3001/#install](http://127.0.0.1:3001/#install) and click
+**Download install.sh**, or fetch it directly:
+
+```sh
+curl -fsSL http://127.0.0.1:3001/install.sh -o install.sh
+sh install.sh
+```
+
+**Option B — run from the repository root:**
 
 ```sh
 npm --prefix noosphere-mcp run install:user

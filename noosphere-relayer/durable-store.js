@@ -76,20 +76,32 @@ export class DurableStore {
         attempts: 0,
         createdAt: this.now(),
         lastError: null,
+        nextAttemptAt: null,
       };
       await this.save();
     }
     return this.state.pending[key];
   }
 
-  async markAttempt(key, error) {
+  async markAttempt(key, error, { nextAttemptAt = null } = {}) {
     await this.initialize();
     const pending = this.state.pending[key];
     if (!pending) return;
     pending.attempts += 1;
     pending.lastAttemptAt = this.now();
     pending.lastError = error?.message || String(error);
+    pending.nextAttemptAt = nextAttemptAt;
     await this.save();
+    return pending;
+  }
+
+  async reschedule(key, nextAttemptAt = null) {
+    await this.initialize();
+    const pending = this.state.pending[key];
+    if (!pending) return null;
+    pending.nextAttemptAt = nextAttemptAt;
+    await this.save();
+    return pending;
   }
 
   async complete(key, value) {
@@ -165,6 +177,8 @@ export async function retryOperation(
     attempts = 3,
     baseDelayMs = 1_000,
     onFailure = async () => {},
+    shouldRetry = () => true,
+    delayFor = (_error, attempt) => baseDelayMs * 2 ** (attempt - 1),
     sleep = (delay) =>
       new Promise((resolve) => setTimeout(resolve, delay)),
   } = {},
@@ -176,8 +190,10 @@ export async function retryOperation(
     } catch (error) {
       lastError = error;
       await onFailure(error, attempt);
-      if (attempt < attempts) {
-        await sleep(baseDelayMs * 2 ** (attempt - 1));
+      if (attempt < attempts && shouldRetry(error, attempt)) {
+        await sleep(delayFor(error, attempt));
+      } else {
+        break;
       }
     }
   }

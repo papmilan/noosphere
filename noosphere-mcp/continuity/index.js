@@ -30,7 +30,9 @@ const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_RELAYER_URL = 'http://127.0.0.1:3001';
 const DEFAULT_DEBOUNCE_MS = 8_000;
-const DEFAULT_REFRESH_MS = 20_000;
+const DEFAULT_REFRESH_MS = 5 * 60_000;
+const DEFAULT_CHECKPOINT_RETRY_MS = 30_000;
+const MAX_CHECKPOINT_RETRY_MS = 5 * 60_000;
 const DEFAULT_WRITE_TIMEOUT_MS = 130_000;
 const DEFAULT_READ_TIMEOUT_MS = 30_000;
 const MANAGED_START = '<!-- noosphere:continuity:start -->';
@@ -134,7 +136,7 @@ export async function initializeProject(root) {
     checkpoint_debounce_ms:
       existing?.checkpoint_debounce_ms || DEFAULT_DEBOUNCE_MS,
     context_refresh_ms:
-      existing?.context_refresh_ms || DEFAULT_REFRESH_MS,
+      normalizeRefreshMs(existing?.context_refresh_ms),
     privacy: {
       checkpoint_content:
         existing?.privacy?.checkpoint_content || 'metadata-only',
@@ -260,8 +262,23 @@ export async function watchProject(root, options = {}) {
     options.debounceMs || config.checkpoint_debounce_ms;
   const refreshMs =
     options.refreshMs || config.context_refresh_ms;
-  let lastFingerprint = await workspaceFingerprint(root);
-  let pendingSince = null;
+  let lastFingerprint = await workspaceFingerprint(
+    root,
+    config.privacy.share_journal,
+  );
+  const previousState =
+    (await readJson(path.join(root, '.noosphere', 'state.json'))) || {};
+  let pendingSince =
+    previousState.last_workspace_fingerprint === lastFingerprint
+      ? null
+      : Date.now();
+  let checkpointDelayMs = debounceMs;
+  let retryDelayMs =
+    Number(process.env.NOOSPHERE_CHECKPOINT_RETRY_BASE_MS) ||
+    DEFAULT_CHECKPOINT_RETRY_MS;
+  const maxRetryDelayMs =
+    Number(process.env.NOOSPHERE_CHECKPOINT_RETRY_MAX_MS) ||
+    MAX_CHECKPOINT_RETRY_MS;
   let checkpointRunning = false;
   let refreshRunning = false;
 
@@ -272,22 +289,32 @@ export async function watchProject(root, options = {}) {
 
   const pollTimer = setInterval(async () => {
     try {
-      const fingerprint = await workspaceFingerprint(root);
+      const fingerprint = await workspaceFingerprint(
+        root,
+        config.privacy.share_journal,
+      );
       if (fingerprint !== lastFingerprint) {
         lastFingerprint = fingerprint;
         pendingSince = Date.now();
+        checkpointDelayMs = debounceMs;
       }
       if (
         pendingSince &&
-        Date.now() - pendingSince >= debounceMs &&
+        Date.now() - pendingSince >= checkpointDelayMs &&
         !checkpointRunning
       ) {
         checkpointRunning = true;
         pendingSince = null;
         try {
           await checkpointProject(root);
+          retryDelayMs =
+            Number(process.env.NOOSPHERE_CHECKPOINT_RETRY_BASE_MS) ||
+            DEFAULT_CHECKPOINT_RETRY_MS;
+          checkpointDelayMs = debounceMs;
         } catch (error) {
           pendingSince = Date.now();
+          checkpointDelayMs = retryDelayMs;
+          retryDelayMs = Math.min(retryDelayMs * 2, maxRetryDelayMs);
           logBackgroundError(error);
         } finally {
           checkpointRunning = false;
@@ -326,7 +353,7 @@ export async function checkpointProject(root, { force = false } = {}) {
   const snapshot = await buildWorkspaceSnapshot(root, config);
   const statePath = path.join(root, '.noosphere', 'state.json');
   const state = (await readJson(statePath)) || {};
-  const fingerprint = hash(JSON.stringify(snapshot));
+  const fingerprint = checkpointFingerprint(snapshot);
 
   if (!force && state.last_checkpoint_fingerprint === fingerprint) {
     return { skipped: true };
@@ -349,6 +376,7 @@ export async function checkpointProject(root, { force = false } = {}) {
       privacy: config.privacy,
     },
   };
+  const acceptedWorkspaceFingerprint = snapshot.workspace_fingerprint;
   const response = await requestJson(
     `${config.relayer_url}/v1/actions`,
     {
@@ -365,12 +393,21 @@ export async function checkpointProject(root, { force = false } = {}) {
     ...state,
     last_checkpoint_fingerprint: fingerprint,
     last_checkpoint_at: new Date().toISOString(),
-    last_blob_id: response.blob_id,
+    last_blob_id: response.blob_id || state.last_blob_id || null,
+    last_checkpoint_pending: response.pending === true,
+    last_workspace_fingerprint: acceptedWorkspaceFingerprint,
   });
+  const disposition = response.pending ? 'queued' : 'stored';
   console.log(
-    `Noosphere checkpoint stored: ${snapshot.changed_files.length} changed files.`,
+    `Noosphere checkpoint ${disposition} for ${config.project_id}: ` +
+      `${snapshot.changed_files.length} changed files.`,
   );
   return response;
+}
+
+export function checkpointFingerprint(snapshot) {
+  const { captured_at: _capturedAt, ...stableSnapshot } = snapshot;
+  return hash(JSON.stringify(stableSnapshot));
 }
 
 export async function refreshContext(root) {
@@ -419,6 +456,10 @@ export async function buildWorkspaceSnapshot(root, config) {
     head,
     changed_files: changedFiles,
     diff_stat: diffStat || 'No tracked diff statistics available.',
+    workspace_fingerprint: await workspaceFingerprint(
+      root,
+      config.privacy.share_journal,
+    ),
     captured_at: new Date().toISOString(),
     raw_diff_included: config.privacy.include_diff,
     journal_present: await fileHasJournalEntries(root),
@@ -568,7 +609,7 @@ async function loadConfig(root) {
     checkpoint_debounce_ms:
       config.checkpoint_debounce_ms || DEFAULT_DEBOUNCE_MS,
     context_refresh_ms:
-      config.context_refresh_ms || DEFAULT_REFRESH_MS,
+      normalizeRefreshMs(config.context_refresh_ms),
     privacy: {
       checkpoint_content:
         config.privacy?.checkpoint_content || 'metadata-only',
@@ -578,7 +619,7 @@ async function loadConfig(root) {
   };
 }
 
-async function workspaceFingerprint(root) {
+async function workspaceFingerprint(root, includeJournal = false) {
   const [status, diff, journal] = await Promise.all([
     git(root, ['status', '--porcelain=v1']),
     git(root, ['diff', '--no-ext-diff', '--binary', '--', '.']),
@@ -610,7 +651,7 @@ async function workspaceFingerprint(root) {
       status: lines,
       diff,
       untracked: untrackedState,
-      journal,
+      journal: includeJournal ? journal : '',
     }),
   );
 }
@@ -756,6 +797,13 @@ async function readCliContent() {
 function readFlag(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : null;
+}
+
+function normalizeRefreshMs(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed)
+    ? Math.max(parsed, DEFAULT_REFRESH_MS)
+    : DEFAULT_REFRESH_MS;
 }
 
 async function writeUniversalProtocol(root, projectId) {

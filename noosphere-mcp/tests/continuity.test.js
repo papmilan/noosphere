@@ -29,9 +29,11 @@ let projectDir;
 let secondProjectDir;
 let lifecycleHome;
 let storedActions;
+let idempotencyKeys;
 
 before(async () => {
   storedActions = [];
+  idempotencyKeys = [];
   server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     if (req.method === 'POST' && url.pathname === '/v1/actions') {
@@ -39,6 +41,7 @@ before(async () => {
       for await (const chunk of req) chunks.push(chunk);
       const action = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       storedActions.push(action);
+      idempotencyKeys.push(req.headers['idempotency-key']);
       respondJson(res, 201, {
         success: true,
         blob_id: `blob-${storedActions.length}`,
@@ -173,6 +176,51 @@ describe('Noosphere continuity CLI', () => {
     assert.equal('diff' in action.metadata.checkpoint, false);
   });
 
+  it('uses a stable checkpoint identity when workspace content is unchanged', async () => {
+    const startingCount = idempotencyKeys.length;
+    await runCli(['checkpoint']);
+    await runCli(['checkpoint']);
+
+    const keys = idempotencyKeys.slice(startingCount);
+    assert.equal(keys.length, 2);
+    assert.equal(keys[0], keys[1]);
+  });
+
+  it('keeps local-only journal edits out of automatic Walrus checkpoints', async () => {
+    const child = spawn(process.execPath, [cli, 'watch'], {
+      cwd: projectDir,
+      env: {
+        ...process.env,
+        NOOSPHERE_HOME: lifecycleHome,
+        NOOSPHERE_PROJECT_DIR: projectDir,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    child.stdout.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+    const startingCount = storedActions.length;
+
+    try {
+      await waitFor(
+        () => output.includes('Noosphere continuity watching continuity-test'),
+        3_000,
+      );
+      await runCli([
+        'journal',
+        '--agent',
+        'local-only',
+        'This note must remain local.',
+      ]);
+      await delay(1_000);
+      assert.equal(storedActions.length, startingCount);
+    } finally {
+      child.kill('SIGTERM');
+      await new Promise((resolve) => child.once('close', resolve));
+    }
+  });
+
   it('auto-initializes and registers separate Git projects', async () => {
     const nested = path.join(secondProjectDir, 'src', 'nested');
     await mkdir(nested, { recursive: true });
@@ -218,9 +266,27 @@ describe('Noosphere continuity CLI', () => {
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    let managerOutput = '';
+    child.stdout.on('data', (chunk) => {
+      managerOutput += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      managerOutput += chunk.toString();
+    });
     const startingCount = storedActions.length;
     try {
-      await delay(250);
+      await waitFor(
+        () =>
+          managerOutput.includes(`Watching continuity-test`) &&
+          managerOutput.includes(`Watching second-project`) &&
+          managerOutput.includes(
+            'Noosphere continuity watching continuity-test',
+          ) &&
+          managerOutput.includes(
+            'Noosphere continuity watching second-project',
+          ),
+        5_000,
+      );
       await writeFile(
         path.join(projectDir, 'app.js'),
         'export const value = 4;\n',
@@ -229,20 +295,40 @@ describe('Noosphere continuity CLI', () => {
         path.join(secondProjectDir, 'second.js'),
         'export const second = 2;\n',
       );
-      await waitFor(
-        () => {
-          const recent = storedActions.slice(startingCount);
-          return (
-            recent.some(
-              (action) => action.project_id === 'continuity-test',
-            ) &&
-            recent.some(
-              (action) => action.project_id === 'second-project',
-            )
-          );
-        },
-        10_000,
-      );
+      try {
+        await waitFor(
+          () => {
+            const recent = storedActions.slice(startingCount);
+            return (
+              recent.some(
+                (action) => action.project_id === 'continuity-test',
+              ) &&
+              recent.some(
+                (action) => action.project_id === 'second-project',
+              )
+            );
+          },
+          10_000,
+        );
+      } catch (error) {
+        const firstState = await readFile(
+          path.join(projectDir, '.noosphere', 'state.json'),
+          'utf8',
+        ).catch(() => 'missing');
+        const firstDiff = await execFileAsync(
+          'git',
+          ['diff', '--', 'app.js'],
+          { cwd: projectDir },
+        ).then(({ stdout }) => stdout).catch(() => 'git diff failed');
+        const recentProjects = storedActions
+          .slice(startingCount)
+          .map((action) => action.project_id);
+        throw new Error(
+          `${error.message}\nManager output:\n${managerOutput}` +
+          `\nRecent projects: ${JSON.stringify(recentProjects)}` +
+          `\nFirst state: ${firstState}\nFirst diff:\n${firstDiff}`,
+        );
+      }
     } finally {
       child.kill('SIGTERM');
       await new Promise((resolve) => child.once('close', resolve));
@@ -305,6 +391,8 @@ describe('Noosphere continuity CLI', () => {
       env: {
         ...process.env,
         NOOSPHERE_PROJECT_DIR: projectDir,
+        NOOSPHERE_CHECKPOINT_RETRY_BASE_MS: '200',
+        NOOSPHERE_CHECKPOINT_RETRY_MAX_MS: '1_000',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
