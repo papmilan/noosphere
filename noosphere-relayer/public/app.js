@@ -122,6 +122,10 @@ async function initialize() {
     const mode =
       health.memory?.mode === 'demo'
         ? 'Demo memory'
+        : health.queue?.paused_until
+          ? `Walrus queue cooling down until ${new Date(
+              health.queue.paused_until,
+            ).toLocaleTimeString()}`
         : health.memory?.ready
           ? 'Walrus Memory ready'
           : 'Walrus Memory needs credentials';
@@ -430,3 +434,55 @@ function formatScore(value) {
   const number = Number(value);
   return number > 0 ? `+${number}` : String(number);
 }
+
+// Install section — OS detection, tab switching, copy buttons
+(function initInstall() {
+  const osTabs = document.querySelectorAll('.install-os-tab');
+  const panels = document.querySelectorAll('.install-panel');
+
+  function detectOs() {
+    const ua = navigator.userAgent.toLowerCase();
+    if (ua.includes('win')) return 'windows';
+    if (ua.includes('linux')) return 'linux';
+    return 'mac';
+  }
+
+  function switchOs(os) {
+    osTabs.forEach((tab) => {
+      const on = tab.dataset.os === os;
+      tab.classList.toggle('active', on);
+      tab.setAttribute('aria-selected', String(on));
+    });
+    panels.forEach((panel) => {
+      panel.classList.toggle('hidden', panel.dataset.os !== os);
+    });
+  }
+
+  osTabs.forEach((tab) => tab.addEventListener('click', () => switchOs(tab.dataset.os)));
+  switchOs(detectOs());
+
+  document.querySelectorAll('.copy-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const text = btn.dataset.copy;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.append(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+      }
+      const original = btn.textContent;
+      btn.textContent = 'Copied';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.textContent = original;
+        btn.classList.remove('copied');
+      }, 2000);
+    });
+  });
+}());

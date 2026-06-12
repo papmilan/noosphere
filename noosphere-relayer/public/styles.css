@@ -614,6 +614,135 @@ pre {
   font-weight: 700;
 }
 
+.install {
+  padding: 48px 0 60px;
+  border-bottom: 1px solid #101010;
+}
+
+.install .section-heading code {
+  font-family: "Courier New", Courier, monospace;
+  font-size: 0.9em;
+}
+
+.install-os-tabs {
+  display: flex;
+  border-top: 1px solid #101010;
+  border-left: 1px solid #101010;
+}
+
+.install-os-tab {
+  padding: 14px 28px;
+  border: 0;
+  border-right: 1px solid #101010;
+  border-bottom: 1px solid #101010;
+  background: #ffffff;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.install-os-tab.active {
+  color: #ffffff;
+  background: var(--blue);
+}
+
+.install-panels {
+  border-left: 1px solid #101010;
+  border-right: 1px solid #101010;
+  border-bottom: 1px solid #101010;
+}
+
+.install-panel {
+  padding: 0 40px;
+}
+
+.install-panel.hidden {
+  display: none;
+}
+
+.install-step {
+  display: grid;
+  grid-template-columns: 36px 1fr;
+  gap: 28px;
+  padding: 30px 0;
+  border-bottom: 1px solid var(--line);
+  align-items: start;
+}
+
+.install-step:last-child {
+  border-bottom: 0;
+}
+
+.step-num {
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 700;
+  padding-top: 2px;
+}
+
+.step-body {
+  display: grid;
+  gap: 10px;
+}
+
+.step-label {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.step-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.step-note a {
+  color: var(--blue);
+}
+
+.copy-btn {
+  justify-self: start;
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  background: #ffffff;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: color 0.1s, background 0.1s, border-color 0.1s;
+}
+
+.copy-btn:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+.copy-btn.copied {
+  color: #ffffff;
+  background: var(--blue);
+  border-color: var(--blue);
+}
+
+.install-footer {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+  margin-top: 28px;
+  flex-wrap: wrap;
+}
+
+.install-note {
+  margin: 0;
+  max-width: 560px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 @media (max-width: 850px) {
   .masthead {
     grid-template-columns: 1fr auto;

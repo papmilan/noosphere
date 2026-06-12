@@ -65,6 +65,28 @@ const uploadRetryBaseMs = parsePositiveInteger(
   1_000,
   'UPLOAD_RETRY_BASE_MS',
 );
+const queueRecoveryIntervalMs = parsePositiveInteger(
+  process.env.QUEUE_RECOVERY_INTERVAL_MS,
+  30_000,
+  'QUEUE_RECOVERY_INTERVAL_MS',
+);
+const queueRetryMaxMs = parsePositiveInteger(
+  process.env.QUEUE_RETRY_MAX_MS,
+  5 * 60_000,
+  'QUEUE_RETRY_MAX_MS',
+);
+const uploadMinIntervalMs =
+  process.env.NODE_ENV === 'test'
+    ? 0
+    : parsePositiveInteger(
+        process.env.UPLOAD_MIN_INTERVAL_MS,
+        30_000,
+        'UPLOAD_MIN_INTERVAL_MS',
+      );
+let queueRecoveryTimer = null;
+let queuePausedUntil = 0;
+let uploadInProgress = false;
+let lastUploadAttemptMonotonic = 0;
 
 app.use(securityHeaders);
 app.use(corsMiddleware(securityConfig));
@@ -105,6 +127,7 @@ app.get('/ready', async (_req, res) => {
     runtimeStore.listPending(),
     runtimeStore.health(),
   ]);
+  const uploadDelayMs = uploadDelayRemaining();
   const ready = memory.ready && state.ready;
   const status = ready ? 200 : 503;
   res.status(status).json({
@@ -115,6 +138,15 @@ app.get('/ready', async (_req, res) => {
       pending: pending.length,
       durable: state.durable,
       writable: state.ready,
+      paused_until:
+        queuePausedUntil > Date.now()
+          ? new Date(queuePausedUntil).toISOString()
+          : null,
+      upload_in_progress: uploadInProgress,
+      next_upload_at:
+        uploadDelayMs > 0
+          ? new Date(Date.now() + uploadDelayMs).toISOString()
+          : null,
     },
     security: {
       host: securityConfig.host,
@@ -182,6 +214,48 @@ app.get('/openapi.json', (req, res) => {
 
 app.get('/scoring-policy', (_req, res) => {
   res.json(getScoringPolicy());
+});
+
+app.get('/install.sh', (_req, res) => {
+  const lines = [
+    '#!/bin/sh',
+    '# Noosphere installer',
+    '# Run from the repository root, or set NOOSPHERE_REPO=/path/to/repo',
+    'set -e',
+    '',
+    'REPO="${NOOSPHERE_REPO:-}"',
+    '',
+    'if [ -z "$REPO" ]; then',
+    '  if [ -f "$(pwd)/noosphere-mcp/package.json" ]; then',
+    '    REPO="$(pwd)"',
+    '  else',
+    '    printf "Error: run this script from inside the Noosphere repository, or:\\n" >&2',
+    '    printf "  NOOSPHERE_REPO=/path/to/noosphere sh install.sh\\n" >&2',
+    '    exit 1',
+    '  fi',
+    'fi',
+    '',
+    'if ! command -v node >/dev/null 2>&1; then',
+    '  printf "Error: Node.js 22+ is required.\\n  Download from https://nodejs.org\\n" >&2',
+    '  exit 1',
+    'fi',
+    '',
+    'MAJOR=$(node -e "process.stdout.write(String(process.versions.node.split(\'.\')[0]))")',
+    'if [ "$MAJOR" -lt 22 ]; then',
+    '  printf "Error: Node.js 22+ required (found v%s)\\n" "$MAJOR" >&2',
+    '  exit 1',
+    'fi',
+    '',
+    'printf "Installing Noosphere from %s ...\\n" "$REPO"',
+    'npm --prefix "$REPO/noosphere-mcp" install',
+    'npm --prefix "$REPO/noosphere-mcp" run install:user',
+    '',
+    'printf "\\nDone. Complete setup by connecting your Walrus Memory account:\\n\\n"',
+    'printf "  ~/.noosphere/bin/noosphere setup\\n\\n"',
+  ];
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="noosphere-install.sh"');
+  res.send(lines.join('\n') + '\n');
 });
 
 app.use('/v1', authenticationMiddleware(securityConfig));
@@ -279,6 +353,12 @@ app.post(
         res.status(409).json({ success: false, error: 'Job is already active' });
         return;
       }
+      await runtimeStore.reschedule(job.key);
+      if (!canAttemptUpload()) {
+        scheduleQueueRecovery(uploadDelayRemaining());
+        res.status(202).json(queuedResponse(job));
+        return;
+      }
       void processPendingJob(job).catch((error) => {
         console.error(
           JSON.stringify({
@@ -350,12 +430,22 @@ app.get(
   localProjectControl(securityConfig),
   (_req, res) => {
     const status = new CredentialStore('default').status();
+    const environmentConfigured = Boolean(
+      process.env.MEMWAL_ACCOUNT_ID && process.env.MEMWAL_PRIVATE_KEY,
+    );
+    const secureStoreConfigured = status.present && !status.invalid;
     res.json({
       success: true,
-      configured: status.present && !status.invalid,
-      backend: status.backend,
-      account_id: status.account_id || null,
-      network: status.network || null,
+      configured: secureStoreConfigured || environmentConfigured,
+      backend: secureStoreConfigured
+        ? status.backend
+        : environmentConfigured
+          ? 'environment-file'
+          : status.backend,
+      account_id:
+        status.account_id || process.env.MEMWAL_ACCOUNT_ID || null,
+      network:
+        status.network || process.env.MEMWAL_NETWORK || 'mainnet',
     });
   },
 );
@@ -375,8 +465,27 @@ app.post('/v1/actions', async (req, res, next) => {
 
     const pending = await runtimeStore.getPending(receiptKey);
     if (pending) {
-      const recovered = await processPendingJob(pending);
-      res.json({ ...recovered, deduplicated: true, recovered: true });
+      if (
+        activeJobs.has(pending.key) ||
+        !canAttemptUpload() ||
+        (pending.nextAttemptAt && pending.nextAttemptAt > Date.now())
+      ) {
+        res.status(202).json({
+          ...queuedResponse(pending),
+          deduplicated: true,
+        });
+        return;
+      }
+      try {
+        const recovered = await processPendingJob(pending);
+        res.json({ ...recovered, deduplicated: true, recovered: true });
+      } catch {
+        scheduleQueueRecovery();
+        res.status(202).json({
+          ...queuedResponse(pending),
+          deduplicated: true,
+        });
+      }
       return;
     }
 
@@ -423,6 +532,7 @@ app.post('/v1/actions', async (req, res, next) => {
     };
     const job = await runtimeStore.enqueue(receiptKey, {
       projectId: record.project_id,
+      actionType: record.action_type,
       serializedRecord: serializeMemory(record),
       responseTemplate,
     });
@@ -430,8 +540,18 @@ app.post('/v1/actions', async (req, res, next) => {
     console.log(
       `[memory] Remembering ${record.agent_id}/${record.action_type} in ${record.project_id}`,
     );
-    const response = await processPendingJob(job);
-    res.status(201).json(response);
+    if (!canAttemptUpload()) {
+      scheduleQueueRecovery(uploadDelayRemaining());
+      res.status(202).json(queuedResponse(job));
+      return;
+    }
+    try {
+      const response = await processPendingJob(job);
+      res.status(201).json(response);
+    } catch {
+      scheduleQueueRecovery();
+      res.status(202).json(queuedResponse(job));
+    }
   } catch (error) {
     next(error);
   }
@@ -551,7 +671,7 @@ if (process.env.NODE_ENV !== 'test') {
       `Noosphere is live on ${securityConfig.host}:${port}`,
     );
     console.log(`Memory backend: ${memoryStore.mode}`);
-    void recoverPendingJobs();
+    scheduleQueueRecovery(0);
   });
   installShutdownHandlers();
 }
@@ -565,7 +685,11 @@ export async function resolveActionScore(
 ) {
   try {
     const { score_delta: _ignoredScore, ...scorableAction } = action;
-    const projectContext = await contextLoader(scorableAction);
+    const needsProjectContext =
+      process.env.SCORING_MODE === 'remote' || scorer !== scoreAction;
+    const projectContext = needsProjectContext
+      ? await contextLoader(scorableAction)
+      : '';
     return await scorer(scorableAction, projectContext);
   } catch (error) {
     console.warn('Scorer unavailable, using neutral score');
@@ -614,6 +738,13 @@ async function recallProject(projectId, query, limit) {
 
 async function processPendingJob(job) {
   if (activeJobs.has(job.key)) return activeJobs.get(job.key);
+  if (!canAttemptUpload()) {
+    const error = new Error('Walrus upload lane is cooling down');
+    error.status = 429;
+    throw error;
+  }
+  uploadInProgress = true;
+  lastUploadAttemptMonotonic = performance.now();
 
   const operation = retryOperation(
     async () => {
@@ -633,7 +764,17 @@ async function processPendingJob(job) {
     {
       attempts: uploadAttempts,
       baseDelayMs: uploadRetryBaseMs,
-      onFailure: (error) => runtimeStore.markAttempt(job.key, error),
+      shouldRetry: (error) => !isRateLimited(error),
+      onFailure: async (error) => {
+        const current = await runtimeStore.getPending(job.key);
+        const delay = retryDelayFor(error, (current?.attempts || 0) + 1);
+        await runtimeStore.markAttempt(job.key, error, {
+          nextAttemptAt: Date.now() + delay,
+        });
+        if (isRateLimited(error)) {
+          queuePausedUntil = Math.max(queuePausedUntil, Date.now() + delay);
+        }
+      },
     },
   )
     .catch((error) => {
@@ -642,23 +783,118 @@ async function processPendingJob(job) {
     })
     .finally(() => {
       activeJobs.delete(job.key);
+      uploadInProgress = false;
+      scheduleQueueRecovery(uploadDelayRemaining());
     });
   activeJobs.set(job.key, operation);
   return operation;
 }
 
 async function recoverPendingJobs() {
-  const pending = await runtimeStore.listPending();
-  if (pending.length === 0) return;
-  console.log(`[queue] Recovering ${pending.length} pending upload(s)`);
-  for (const job of pending) {
-    try {
-      await processPendingJob(job);
-      console.log(`[queue] Recovered ${job.key}`);
-    } catch (error) {
-      console.error(`[queue] Recovery failed for ${job.key}: ${error.message}`);
-    }
+  if (!canAttemptUpload()) {
+    scheduleQueueRecovery(uploadDelayRemaining());
+    return;
   }
+  const pending = prioritizePendingJobs(await runtimeStore.listPending());
+  const job = pending.find(
+    (candidate) =>
+      !activeJobs.has(candidate.key) &&
+      (!candidate.nextAttemptAt || candidate.nextAttemptAt <= Date.now()),
+  );
+  if (!job) {
+    const nextAttempt = pending
+      .map((candidate) => candidate.nextAttemptAt)
+      .filter((value) => value && value > Date.now())
+      .sort((a, b) => a - b)[0];
+    if (pending.length > 0) {
+      scheduleQueueRecovery(
+        nextAttempt
+          ? Math.max(queueRecoveryIntervalMs, nextAttempt - Date.now())
+          : queueRecoveryIntervalMs,
+      );
+    }
+    return;
+  }
+
+  console.log(`[queue] Recovering 1 of ${pending.length} pending upload(s)`);
+  try {
+    await processPendingJob(job);
+    console.log(`[queue] Recovered ${job.key}`);
+  } catch (error) {
+    console.error(`[queue] Recovery failed for ${job.key}: ${error.message}`);
+  }
+  scheduleQueueRecovery();
+}
+
+export function prioritizePendingJobs(jobs) {
+  return [...jobs].sort((a, b) => {
+    const priorityDifference =
+      pendingJobPriority(a) - pendingJobPriority(b);
+    if (priorityDifference !== 0) return priorityDifference;
+
+    const aCreated = a.createdAt || 0;
+    const bCreated = b.createdAt || 0;
+    if (isCheckpointJob(a)) return bCreated - aCreated;
+    return aCreated - bCreated;
+  });
+}
+
+function pendingJobPriority(job) {
+  return isCheckpointJob(job) ? 1 : 0;
+}
+
+function isCheckpointJob(job) {
+  return (
+    job.actionType === 'checkpoint' ||
+    String(job.key || '').includes(':checkpoint-')
+  );
+}
+
+function scheduleQueueRecovery(delay = queueRecoveryIntervalMs) {
+  if (process.env.NODE_ENV === 'test') return;
+  if (queueRecoveryTimer) clearTimeout(queueRecoveryTimer);
+  queueRecoveryTimer = setTimeout(() => {
+    queueRecoveryTimer = null;
+    void recoverPendingJobs();
+  }, Math.max(0, delay));
+  queueRecoveryTimer.unref();
+}
+
+function canAttemptUpload() {
+  return !uploadInProgress && uploadDelayRemaining() === 0;
+}
+
+function uploadDelayRemaining() {
+  return Math.max(
+    0,
+    queuePausedUntil - Date.now(),
+    lastUploadAttemptMonotonic + uploadMinIntervalMs - performance.now(),
+  );
+}
+
+function queuedResponse(job) {
+  return {
+    ...job.responseTemplate,
+    success: true,
+    pending: true,
+    action_id: job.responseTemplate?.action_id || job.key.split(':').at(-1),
+    message: 'Accepted into the durable Walrus upload queue',
+  };
+}
+
+export function retryDelayFor(error, attempt) {
+  const retryAfter = String(error?.message || '').match(
+    /retry_after_seconds["']?\s*[:=]\s*(\d+)/i,
+  );
+  if (retryAfter) return Number(retryAfter[1]) * 1_000;
+  return Math.min(
+    uploadRetryBaseMs * 2 ** Math.min(Math.max(attempt - 1, 0), 8),
+    queueRetryMaxMs,
+  );
+}
+
+export function isRateLimited(error) {
+  return /\b429\b|rate limit/i.test(String(error?.message || ''));
 }
 
 function installShutdownHandlers() {
@@ -667,6 +903,7 @@ function installShutdownHandlers() {
     if (stopping) return;
     stopping = true;
     console.log(`[shutdown] ${signal} received`);
+    if (queueRecoveryTimer) clearTimeout(queueRecoveryTimer);
     const forceExit = setTimeout(() => process.exit(1), 10_000);
     forceExit.unref();
     server.close(async () => {

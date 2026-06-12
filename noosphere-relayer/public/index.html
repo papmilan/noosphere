@@ -18,6 +18,7 @@
         <a href="#recall">Recall</a>
         <a href="#projects">Projects</a>
         <a href="#connect">Connect</a>
+        <a href="#install">Install</a>
       </nav>
       <div class="status" id="status">Connecting</div>
     </header>
@@ -262,6 +263,121 @@ noosphere credentials status</code></pre>
       </section>
     </main>
 
-    <script type="module" src="/app.js?v=20260611-9"></script>
+      <section class="install" id="install">
+        <div class="section-heading">
+          <span>06</span>
+          <div>
+            <h2>Install</h2>
+            <p>
+              One-time setup. Adds the <code>noosphere</code> CLI, a background
+              relayer, and a project watcher that starts at login. Requires
+              Node.js 22 or newer.
+            </p>
+          </div>
+        </div>
+
+        <div class="install-os-tabs" role="tablist" aria-label="Operating system">
+          <button class="install-os-tab active" data-os="mac" role="tab" aria-selected="true" type="button">macOS</button>
+          <button class="install-os-tab" data-os="linux" role="tab" aria-selected="false" type="button">Linux</button>
+          <button class="install-os-tab" data-os="windows" role="tab" aria-selected="false" type="button">Windows</button>
+        </div>
+
+        <div class="install-panels">
+          <div class="install-panel" data-os="mac">
+            <div class="install-step">
+              <span class="step-num">1</span>
+              <div class="step-body">
+                <p class="step-label">Verify Node.js 22 or newer</p>
+                <pre><code>node --version</code></pre>
+                <button class="copy-btn" type="button" data-copy="node --version">Copy</button>
+                <p class="step-note">Not installed? <a href="https://nodejs.org" target="_blank" rel="noreferrer">Download from nodejs.org</a></p>
+              </div>
+            </div>
+            <div class="install-step">
+              <span class="step-num">2</span>
+              <div class="step-body">
+                <p class="step-label">Install from the repository root</p>
+                <pre><code>npm --prefix noosphere-mcp run install:user</code></pre>
+                <button class="copy-btn" type="button" data-copy="npm --prefix noosphere-mcp run install:user">Copy</button>
+              </div>
+            </div>
+            <div class="install-step">
+              <span class="step-num">3</span>
+              <div class="step-body">
+                <p class="step-label">Connect your Walrus Memory account</p>
+                <pre><code>~/.noosphere/bin/noosphere setup</code></pre>
+                <button class="copy-btn" type="button" data-copy="~/.noosphere/bin/noosphere setup">Copy</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="install-panel hidden" data-os="linux">
+            <div class="install-step">
+              <span class="step-num">1</span>
+              <div class="step-body">
+                <p class="step-label">Verify Node.js 22 or newer</p>
+                <pre><code>node --version</code></pre>
+                <button class="copy-btn" type="button" data-copy="node --version">Copy</button>
+                <p class="step-note">Not installed? <a href="https://nodejs.org" target="_blank" rel="noreferrer">Download from nodejs.org</a></p>
+              </div>
+            </div>
+            <div class="install-step">
+              <span class="step-num">2</span>
+              <div class="step-body">
+                <p class="step-label">Install from the repository root</p>
+                <pre><code>npm --prefix noosphere-mcp run install:user</code></pre>
+                <button class="copy-btn" type="button" data-copy="npm --prefix noosphere-mcp run install:user">Copy</button>
+              </div>
+            </div>
+            <div class="install-step">
+              <span class="step-num">3</span>
+              <div class="step-body">
+                <p class="step-label">Connect your Walrus Memory account</p>
+                <pre><code>~/.noosphere/bin/noosphere setup</code></pre>
+                <button class="copy-btn" type="button" data-copy="~/.noosphere/bin/noosphere setup">Copy</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="install-panel hidden" data-os="windows">
+            <div class="install-step">
+              <span class="step-num">1</span>
+              <div class="step-body">
+                <p class="step-label">Verify Node.js 22 or newer</p>
+                <pre><code>node --version</code></pre>
+                <button class="copy-btn" type="button" data-copy="node --version">Copy</button>
+                <p class="step-note">Not installed? <a href="https://nodejs.org" target="_blank" rel="noreferrer">Download from nodejs.org</a></p>
+              </div>
+            </div>
+            <div class="install-step">
+              <span class="step-num">2</span>
+              <div class="step-body">
+                <p class="step-label">Install from the repository root (PowerShell)</p>
+                <pre><code>npm --prefix noosphere-mcp run install:user</code></pre>
+                <button class="copy-btn" type="button" data-copy="npm --prefix noosphere-mcp run install:user">Copy</button>
+              </div>
+            </div>
+            <div class="install-step">
+              <span class="step-num">3</span>
+              <div class="step-body">
+                <p class="step-label">Connect your Walrus Memory account</p>
+                <pre><code>noosphere setup</code></pre>
+                <button class="copy-btn" type="button" data-copy="noosphere setup">Copy</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="install-footer">
+          <a class="primary" href="/install.sh" download="noosphere-install.sh">Download install.sh</a>
+          <p class="install-note">
+            Credentials are stored in the OS keychain — not sent to any server.
+            The relayer and watcher start automatically at login after install.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/app.js?v=20260612-1"></script>
   </body>
 </html>
