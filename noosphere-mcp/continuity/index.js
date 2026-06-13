@@ -38,6 +38,10 @@ const DEFAULT_CHECKPOINT_RETRY_MS = 30_000;
 const MAX_CHECKPOINT_RETRY_MS = 5 * 60_000;
 const DEFAULT_WRITE_TIMEOUT_MS = 130_000;
 const DEFAULT_READ_TIMEOUT_MS = 30_000;
+const DEFAULT_BASELINE_HISTORY_COMMITS = 50;
+const MAX_BASELINE_HISTORY_COMMITS = 200;
+const DEFAULT_MATURE_PROJECT_COMMITS = 10;
+const DEFAULT_MATURE_PROJECT_AGE_DAYS = 30;
 const MANAGED_START = '<!-- noosphere:continuity:start -->';
 const MANAGED_END = '<!-- noosphere:continuity:end -->';
 const ALL_ADAPTERS = ['codex', 'claude', 'gemini', 'cursor', 'mcp'];
@@ -77,6 +81,9 @@ try {
       break;
     case 'checkpoint':
       await checkpointProject(projectDir, { force: true });
+      break;
+    case 'baseline':
+      await baselineFromCli(projectDir);
       break;
     case 'refresh':
       await refreshContext(projectDir);
@@ -153,6 +160,7 @@ export async function initializeProject(root, options = {}) {
   await assertGitRepository(root);
   await mkdir(path.join(root, '.noosphere'), { recursive: true });
   const existing = await readProjectConfig(root);
+  const isFirstInitialization = !existing;
   const projectId =
     existing?.project_id || sanitizeProjectId(path.basename(root));
   const adapters =
@@ -173,6 +181,13 @@ export async function initializeProject(root, options = {}) {
       share_journal: existing?.privacy?.share_journal === true,
       capture_master_prompt:
         existing?.privacy?.capture_master_prompt !== false,
+    },
+    onboarding: {
+      auto_baseline:
+        existing?.onboarding?.auto_baseline !== false,
+      history_commits: normalizeBaselineHistoryLimit(
+        existing?.onboarding?.history_commits,
+      ),
     },
     adapters,
   };
@@ -199,6 +214,9 @@ export async function initializeProject(root, options = {}) {
   await writeMcpConfigs(root, projectId, adapters);
   await ensureLocalExcludes(root);
   await removeLegacyProjectFiles(root);
+  if (isFirstInitialization && config.onboarding.auto_baseline) {
+    await prepareAutomaticBaseline(root, config);
+  }
 
   console.log(`Noosphere continuity initialized for ${projectId}.`);
   console.log('The Noosphere project manager will start its watcher.');
@@ -323,7 +341,12 @@ export async function watchProject(root, options = {}) {
   );
   const previousState =
     (await readJson(path.join(root, '.noosphere', 'state.json'))) || {};
+  let baselinePending =
+    previousState.baseline?.status === 'pending';
+  let baselineRunning = false;
+  let baselineRetryAt = Date.now();
   let pendingSince =
+    baselinePending ||
     previousState.last_workspace_fingerprint === lastFingerprint
       ? null
       : Date.now();
@@ -353,6 +376,31 @@ export async function watchProject(root, options = {}) {
         pendingSince = Date.now();
         checkpointDelayMs = debounceMs;
       }
+      if (
+        baselinePending &&
+        !baselineRunning &&
+        Date.now() >= baselineRetryAt
+      ) {
+        baselineRunning = true;
+        try {
+          const stored = await storePreparedBaseline(root);
+          baselinePending = false;
+          retryDelayMs =
+            Number(process.env.NOOSPHERE_CHECKPOINT_RETRY_BASE_MS) ||
+            DEFAULT_CHECKPOINT_RETRY_MS;
+          pendingSince =
+            fingerprint === stored.workspaceFingerprint
+              ? null
+              : Date.now();
+        } catch (error) {
+          baselineRetryAt = Date.now() + retryDelayMs;
+          retryDelayMs = Math.min(retryDelayMs * 2, maxRetryDelayMs);
+          logBackgroundError(error);
+        } finally {
+          baselineRunning = false;
+        }
+      }
+      if (baselinePending) return;
       if (
         pendingSince &&
         Date.now() - pendingSince >= checkpointDelayMs &&
@@ -401,6 +449,172 @@ export async function watchProject(root, options = {}) {
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
   });
+}
+
+async function prepareAutomaticBaseline(root, config) {
+  const profile = await inspectRepositoryHistory(
+    root,
+    config.onboarding.history_commits,
+  );
+  if (!isMatureRepository(profile)) return null;
+
+  const prepared = await prepareProjectBaseline(root, {
+    config,
+    profile,
+  });
+  console.log(
+    `Established repository detected: prepared one baseline from ` +
+      `${profile.total_commits} commits.`,
+  );
+  return prepared;
+}
+
+export async function prepareProjectBaseline(root, options = {}) {
+  const config = options.config || await loadConfig(root);
+  const statePath = path.join(root, '.noosphere', 'state.json');
+  const state = (await readJson(statePath)) || {};
+  if (state.baseline && !options.force) {
+    return {
+      skipped: true,
+      status: state.baseline.status,
+      workspaceFingerprint: state.baseline.workspace_fingerprint,
+    };
+  }
+
+  const historyLimit = normalizeBaselineHistoryLimit(
+    options.historyLimit || config.onboarding.history_commits,
+  );
+  const profile =
+    options.profile ||
+    await inspectRepositoryHistory(root, historyLimit);
+  const snapshot = await buildWorkspaceSnapshot(root, config);
+  const baseline = buildProjectBaseline(config.project_id, profile, snapshot);
+  const fingerprint = hash(baseline);
+  const generatedAt = new Date().toISOString();
+
+  await writeFile(
+    path.join(root, '.noosphere', 'baseline.md'),
+    baseline,
+    'utf8',
+  );
+  await writeJson(statePath, {
+    ...state,
+    baseline: {
+      status: 'pending',
+      fingerprint,
+      generated_at: generatedAt,
+      workspace_fingerprint: snapshot.workspace_fingerprint,
+      history_commits: profile.recent_commits.length,
+      total_commits: profile.total_commits,
+      oldest_commit_at: profile.oldest_commit_at,
+      newest_commit_at: profile.newest_commit_at,
+    },
+  });
+
+  return {
+    prepared: true,
+    fingerprint,
+    profile,
+    workspaceFingerprint: snapshot.workspace_fingerprint,
+  };
+}
+
+export async function storePreparedBaseline(root) {
+  const config = await loadConfig(root);
+  const statePath = path.join(root, '.noosphere', 'state.json');
+  const state = (await readJson(statePath)) || {};
+  const baselineState = state.baseline;
+  if (!baselineState) {
+    throw new Error('No project baseline is prepared.');
+  }
+  if (baselineState.status === 'stored') {
+    return {
+      skipped: true,
+      blob_id: baselineState.blob_id || null,
+      workspaceFingerprint: baselineState.workspace_fingerprint,
+    };
+  }
+
+  const content = await readFile(
+    path.join(root, '.noosphere', 'baseline.md'),
+    'utf8',
+  );
+  const response = await requestJson(
+    `${config.relayer_url}/v1/actions`,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': `baseline-${baselineState.fingerprint}`,
+      },
+      body: JSON.stringify({
+        project_id: config.project_id,
+        agent_id: 'project-onboarding',
+        action_type: 'project-baseline',
+        content,
+        session_id: `baseline-${baselineState.fingerprint.slice(0, 16)}`,
+        provider: null,
+        model: null,
+        client: 'noosphere-baseline',
+        metadata: {
+          baseline: {
+            fingerprint: baselineState.fingerprint,
+            generated_at: baselineState.generated_at,
+            total_commits: baselineState.total_commits,
+            history_commits: baselineState.history_commits,
+            oldest_commit_at: baselineState.oldest_commit_at,
+            newest_commit_at: baselineState.newest_commit_at,
+            source_content_included: false,
+            source_diffs_included: false,
+          },
+        },
+      }),
+    },
+  );
+  const storedAt = new Date().toISOString();
+  await writeJson(statePath, {
+    ...state,
+    baseline: {
+      ...baselineState,
+      status: response.pending ? 'queued' : 'stored',
+      stored_at: storedAt,
+      blob_id: response.blob_id || baselineState.blob_id || null,
+    },
+    last_blob_id: response.blob_id || state.last_blob_id || null,
+    last_workspace_fingerprint:
+      baselineState.workspace_fingerprint,
+  });
+
+  const disposition = response.pending ? 'queued' : 'stored';
+  console.log(
+    `Noosphere project baseline ${disposition} for ${config.project_id}.`,
+  );
+  return {
+    ...response,
+    workspaceFingerprint: baselineState.workspace_fingerprint,
+  };
+}
+
+async function baselineFromCli(root) {
+  await assertGitRepository(root);
+  if (!(await projectConfigExists(root))) {
+    await initializeProject(root);
+  }
+  const historyLimit = normalizeBaselineHistoryLimit(
+    readFlag('--commits'),
+  );
+  const force = process.argv.includes('--force');
+  const prepared = await prepareProjectBaseline(root, {
+    force,
+    historyLimit,
+  });
+  if (prepared.skipped && prepared.status === 'stored') {
+    console.log(
+      'A project baseline is already stored. Use --force to replace it.',
+    );
+    return prepared;
+  }
+  return storePreparedBaseline(root);
 }
 
 export async function checkpointProject(root, { force = false } = {}) {
@@ -476,6 +690,10 @@ export async function refreshContext(root, options = {}) {
       config.project_id,
     )}/context?format=text&limit=50&q=${query}`,
   );
+  const baseline = await readFile(
+    path.join(root, '.noosphere', 'baseline.md'),
+    'utf8',
+  ).catch(() => '');
   const masterPrompt = await readMasterPrompt(root);
   const followups = await readFollowupPrompts(root);
   const output = [
@@ -485,6 +703,16 @@ export async function refreshContext(root, options = {}) {
     `Refreshed: ${new Date().toISOString()}`,
     '',
     'Read this before changing the project. It may contain work from another AI tool.',
+    '',
+    baseline
+      ? [
+          '## Established-project baseline',
+          '',
+          baseline
+            .replace(/^# Noosphere project baseline\s*/i, '')
+            .trim(),
+        ].join('\n')
+      : '## Established-project baseline\n\nNo mature-project baseline has been created.',
     '',
     masterPrompt
       ? [
@@ -558,6 +786,136 @@ export async function buildWorkspaceSnapshot(root, config) {
   return snapshot;
 }
 
+export async function inspectRepositoryHistory(
+  root,
+  historyLimit = DEFAULT_BASELINE_HISTORY_COMMITS,
+) {
+  const limit = normalizeBaselineHistoryLimit(historyLimit);
+  const [
+    countText,
+    oldestText,
+    newestText,
+    recentText,
+    trackedText,
+  ] = await Promise.all([
+    git(root, ['rev-list', '--count', 'HEAD']).catch(() => '0'),
+    git(root, [
+      'log',
+      '--max-parents=0',
+      '--format=%cI',
+      'HEAD',
+    ]).catch(() => ''),
+    git(root, ['log', '-1', '--format=%cI', 'HEAD']).catch(() => ''),
+    git(root, [
+      'log',
+      `-${limit}`,
+      '--date=short',
+      '--format=%h%x09%ad%x09%s',
+      'HEAD',
+    ]).catch(() => ''),
+    git(root, ['ls-files']).catch(() => ''),
+  ]);
+  const trackedFiles = trackedText.split('\n').filter(Boolean);
+  const topLevel = new Map();
+  for (const file of trackedFiles) {
+    const area = file.includes('/') ? file.split('/')[0] : '(root)';
+    topLevel.set(area, (topLevel.get(area) || 0) + 1);
+  }
+  const recentCommits = recentText
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const [hashValue, date, ...subject] = line.split('\t');
+      return {
+        hash: hashValue,
+        date,
+        subject: subject.join('\t'),
+      };
+    });
+  return {
+    total_commits: Number(countText) || 0,
+    oldest_commit_at: oldestText.split('\n').filter(Boolean)[0] || null,
+    newest_commit_at: newestText || null,
+    tracked_files: trackedFiles.length,
+    top_level_areas: [...topLevel.entries()]
+      .map(([name, files]) => ({ name, files }))
+      .sort((a, b) => b.files - a.files || a.name.localeCompare(b.name))
+      .slice(0, 30),
+    recent_commits: recentCommits,
+  };
+}
+
+export function isMatureRepository(profile, now = Date.now()) {
+  if (profile.total_commits >= DEFAULT_MATURE_PROJECT_COMMITS) {
+    return true;
+  }
+  if (!profile.oldest_commit_at) return false;
+  const oldest = Date.parse(profile.oldest_commit_at);
+  if (!Number.isFinite(oldest)) return false;
+  const ageDays = (now - oldest) / (24 * 60 * 60 * 1_000);
+  return ageDays >= DEFAULT_MATURE_PROJECT_AGE_DAYS;
+}
+
+export function buildProjectBaseline(projectId, profile, snapshot) {
+  const changedFiles =
+    snapshot.changed_files.length > 0
+      ? snapshot.changed_files.join(', ')
+      : 'None';
+  const areas =
+    profile.top_level_areas.length > 0
+      ? profile.top_level_areas
+          .map((area) => `- ${area.name}: ${area.files} tracked files`)
+          .join('\n')
+      : '- No tracked files';
+  const history =
+    profile.recent_commits.length > 0
+      ? profile.recent_commits
+          .map(
+            (commit) =>
+              `- ${commit.date} ${commit.hash}: ${commit.subject}`,
+          )
+          .join('\n')
+      : '- No commits available';
+
+  return `# Noosphere project baseline
+
+Project: ${projectId}
+Generated: ${snapshot.captured_at}
+
+This is a machine-generated onboarding snapshot for an established repository.
+It is evidence, not a substitute for the current files, tests, or maintainer
+knowledge. Future agents must verify historical claims before relying on them.
+
+## Repository history
+
+- Total commits: ${profile.total_commits}
+- Oldest commit: ${profile.oldest_commit_at || 'Unknown'}
+- Newest commit: ${profile.newest_commit_at || 'Unknown'}
+- Recent commits included: ${profile.recent_commits.length}
+
+## Current state
+
+- Branch: ${snapshot.branch}
+- Head: ${snapshot.head}
+- Changed files at onboarding: ${changedFiles}
+- Tracked files: ${profile.tracked_files}
+- Workspace fingerprint: ${snapshot.workspace_fingerprint}
+
+## Project structure
+
+${areas}
+
+## Recent Git history
+
+${history}
+
+## Privacy boundary
+
+No source file contents or historical diffs are included. This baseline contains
+repository metadata, file-area counts, changed paths, and recent commit subjects.
+`;
+}
+
 async function printStatus(root) {
   const config = await loadConfig(root);
   const state = await readJson(
@@ -569,6 +927,8 @@ async function printStatus(root) {
         project: config.project_id,
         relayer: config.relayer_url,
         privacy: config.privacy,
+        onboarding: config.onboarding,
+        baseline: state?.baseline || null,
         last_checkpoint_at: state?.last_checkpoint_at || null,
         last_blob_id: state?.last_blob_id || null,
       },
@@ -616,9 +976,9 @@ async function writeAgentAdapters(root, projectId, adapters) {
 Noosphere's core protocol is vendor-neutral. This file is an auto-load adapter
 for tools that recognize this filename.
 
-1. Before working, read \`.noosphere/master-prompt.md\`,
-   \`.noosphere/followups.jsonl\`, \`.noosphere/context.md\`, and
-   \`.noosphere/journal.md\`.
+1. Before working, read \`.noosphere/baseline.md\` if present,
+   \`.noosphere/master-prompt.md\`, \`.noosphere/followups.jsonl\`,
+   \`.noosphere/context.md\`, and \`.noosphere/journal.md\`.
 2. Treat the master prompt as pinned project intent. Preserve unfinished
    phases and constraints unless the user explicitly changes them.
 3. Inspect the working tree because another tool may have changed it.
@@ -655,12 +1015,12 @@ description: Load the universal Noosphere continuity protocol
 alwaysApply: true
 ---
 
-Read \`.noosphere/instructions.md\`, \`.noosphere/master-prompt.md\`,
-\`.noosphere/followups.jsonl\`, \`.noosphere/context.md\`, and
-\`.noosphere/journal.md\` before working. Treat the master prompt plus ordered
-follow-ups as current project intent and preserve unfinished phases. Append
-concise, verifiable findings and handoffs to the journal. Do not write hidden
-chain-of-thought.
+Read \`.noosphere/instructions.md\`, \`.noosphere/baseline.md\` if present,
+\`.noosphere/master-prompt.md\`, \`.noosphere/followups.jsonl\`,
+\`.noosphere/context.md\`, and \`.noosphere/journal.md\` before working. Treat
+the master prompt plus ordered follow-ups as current project intent and
+preserve unfinished phases. Append concise, verifiable findings and handoffs
+to the journal. Do not write hidden chain-of-thought.
 `,
       'utf8',
     );
@@ -680,6 +1040,7 @@ async function ensureLocalExcludes(root) {
     // git init normally creates this file, but creating it is harmless.
   }
   const entries = [
+    '.noosphere/baseline.md',
     '.noosphere/context.md',
     '.noosphere/journal.md',
     '.noosphere/master-prompt.md',
@@ -790,6 +1151,13 @@ async function loadConfig(root) {
       share_journal: config.privacy?.share_journal === true,
       capture_master_prompt:
         config.privacy?.capture_master_prompt !== false,
+    },
+    onboarding: {
+      auto_baseline:
+        config.onboarding?.auto_baseline !== false,
+      history_commits: normalizeBaselineHistoryLimit(
+        config.onboarding?.history_commits,
+      ),
     },
   };
 }
@@ -1335,6 +1703,7 @@ function contentPositionals() {
     '--content',
     '--source',
     '--path',
+    '--commits',
   ]);
   return process.argv
     .slice(3)
@@ -1356,6 +1725,17 @@ function normalizeRefreshMs(value) {
     : DEFAULT_REFRESH_MS;
 }
 
+function normalizeBaselineHistoryLimit(value) {
+  if (value === undefined || value === null || value === '') {
+    return DEFAULT_BASELINE_HISTORY_COMMITS;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error('--commits must be a positive integer.');
+  }
+  return Math.min(parsed, MAX_BASELINE_HISTORY_COMMITS);
+}
+
 async function writeUniversalProtocol(root, projectId) {
   const slug = sanitizeProjectId(projectId);
   const content = `# Noosphere universal agent protocol
@@ -1365,13 +1745,16 @@ MCP. An agent does not need a Noosphere-specific SDK.
 
 ## Start
 
-1. Read \`.noosphere/master-prompt.md\` if it is non-empty. It contains the
+1. Read \`.noosphere/baseline.md\` if it exists. It is a bounded,
+   machine-generated snapshot of the repository state and selected Git
+   history when Noosphere joined an established project.
+2. Read \`.noosphere/master-prompt.md\` if it is non-empty. It contains the
    exact original project instruction and is pinned above later summaries.
-2. Read \`.noosphere/followups.jsonl\` in order. Later user instructions refine
+3. Read \`.noosphere/followups.jsonl\` in order. Later user instructions refine
    the master prompt without erasing it.
-3. Read \`.noosphere/context.md\`.
-4. Read \`.noosphere/journal.md\`.
-5. Inspect the current working tree.
+4. Read \`.noosphere/context.md\`.
+5. Read \`.noosphere/journal.md\`.
+6. Inspect the current working tree.
 
 When the user asks to continue a later phase, recover that phase from the
 master prompt instead of guessing from completed work.
@@ -1397,6 +1780,7 @@ next recommended action.
 ## Universal interfaces
 
 - File context: \`.noosphere/context.md\`
+- Established-project baseline: \`.noosphere/baseline.md\`
 - Master prompt: \`.noosphere/master-prompt.md\`
 - Ordered follow-ups: \`.noosphere/followups.jsonl\`
 - Work journal: \`.noosphere/journal.md\`
@@ -1421,6 +1805,7 @@ next recommended action.
     project_id: projectId,
     namespace: `noosphere-${slug}`,
     files: {
+      baseline: '.noosphere/baseline.md',
       context: '.noosphere/context.md',
       journal: '.noosphere/journal.md',
       master_prompt: '.noosphere/master-prompt.md',
@@ -1730,6 +2115,7 @@ Commands:
   init        Add project config and agent instructions
   watch       Checkpoint settled working-tree changes and refresh context
   checkpoint  Store the current workspace state now
+  baseline    Create one established-project baseline from current Git history
   refresh     Refresh .noosphere/context.md now
   status      Show continuity status
   context     Print the current shared context
@@ -1749,5 +2135,9 @@ Ollama examples:
 Master prompt examples:
   cat plan.md | noosphere master-prompt
   noosphere master-prompt --replace --content "Updated project plan..."
+
+Established-project baseline examples:
+  noosphere baseline
+  noosphere baseline --commits 100 --force
 `);
 }

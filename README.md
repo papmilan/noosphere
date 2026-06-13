@@ -52,12 +52,13 @@ In one sentence:
 
 1. You install Noosphere once for your user account.
 2. Entering or registering a Git repository gives it a stable project ID.
-3. A background watcher observes settled working-tree changes.
-4. Noosphere stores metadata-only checkpoints after the workspace is quiet.
-5. Agents store explicit decisions, findings, and handoffs when they matter.
-6. Walrus Memory indexes those records for semantic recall.
-7. `.noosphere/context.md` is refreshed with relevant shared memory.
-8. The next tool reads the file, calls the CLI, uses HTTP, or connects through
+3. An established repository receives one bounded Git-history baseline.
+4. A background watcher observes settled working-tree changes.
+5. Noosphere stores metadata-only checkpoints after the workspace is quiet.
+6. Agents store explicit decisions, findings, and handoffs when they matter.
+7. Walrus Memory indexes those records for semantic recall.
+8. `.noosphere/context.md` is refreshed with relevant shared memory.
+9. The next tool reads the file, calls the CLI, uses HTTP, or connects through
    MCP.
 
 Noosphere does not capture hidden chain-of-thought. It records concise,
@@ -95,6 +96,75 @@ Agents and developers can store:
 
 Automatic checkpoints preserve observable workspace state. Explicit memories
 preserve intent and conclusions that cannot be inferred from files alone.
+
+## Use Noosphere with an older project
+
+Noosphere does not require a new or empty repository. You can add it to a
+project that has been running for months:
+
+```sh
+cd /path/to/existing-project
+noosphere activate
+```
+
+On the first activation, Noosphere recognizes an established repository when
+it has at least 10 commits or its oldest commit is at least 30 days old. Before
+the normal watcher begins recording new changes, Noosphere prepares and stores
+one project baseline.
+
+The baseline gives a new agent an initial map of the existing work:
+
+- repository age and total commit count;
+- current branch, HEAD, changed paths, and workspace fingerprint;
+- tracked-file counts grouped by top-level directory;
+- up to 50 recent commit dates, hashes, and subjects.
+
+The local version is written to:
+
+```text
+.noosphere/baseline.md
+```
+
+The same summary is stored once in Walrus Memory as a `project-baseline`
+record. Agents read it before the current master prompt, follow-ups, semantic
+context, and journal. The watcher then treats that exact workspace state as
+the starting point, so it records changes made after onboarding instead of
+pretending the entire historical repository was created in one new session.
+
+You can create or replace the baseline manually:
+
+```sh
+noosphere baseline
+noosphere baseline --commits 100 --force
+```
+
+The selected history is capped at 200 commits. Configure automatic behavior in
+`.noosphere/config.json`:
+
+```json
+{
+  "onboarding": {
+    "auto_baseline": true,
+    "history_commits": 50
+  }
+}
+```
+
+### What the import cannot recover
+
+Git can show code history, but it cannot reconstruct old AI chats, abandoned
+ideas, verbal decisions, or requirements that were never committed. For a
+long-running project, add the important missing knowledge explicitly:
+
+```sh
+noosphere remember --agent maintainer --type decision \
+  "Production uses PostgreSQL. SQLite is supported only in local development."
+
+cat existing-roadmap.md | noosphere master-prompt
+```
+
+From that point onward, automatic checkpoints and explicit memories preserve
+new work normally across agents and machines.
 
 ## Why it works with any agent
 
@@ -321,6 +391,10 @@ For projects opened only through a GUI IDE, use the Projects section at
 Noosphere does not scan the entire computer. Repositories are registered
 explicitly or through the shell hook. Add `.noosphere-ignore` to opt out.
 
+This command is the same for a new repository and an older one. Established
+projects automatically receive the bounded baseline described in
+[Use Noosphere with an older project](#use-noosphere-with-an-older-project).
+
 ## Everyday workflow
 
 ### Start work
@@ -389,6 +463,7 @@ noosphere activate
 noosphere deactivate
 noosphere register --path /absolute/repository
 noosphere projects
+noosphere baseline
 noosphere checkpoint
 noosphere refresh
 noosphere status
@@ -482,6 +557,7 @@ Default initialization creates:
 
 ```text
 .noosphere/
+├── baseline.md            Optional established-project onboarding snapshot
 ├── config.json             Project identity, privacy, and adapter settings
 ├── context.md              Refreshed context for file-reading agents
 ├── journal.md              Local public work notes and handoffs
@@ -509,6 +585,12 @@ project's Walrus namespace.
 Automatic checkpoints are metadata-only. Raw source diffs are uploaded only
 when `privacy.include_diff` is explicitly enabled in
 `.noosphere/config.json`.
+
+The established-project baseline is metadata-only too. It includes recent
+commit subjects, changed paths, file-area counts, and repository timing
+metadata, but no source contents or historical diffs. Disable
+`onboarding.auto_baseline` before first activation when commit subjects are
+sensitive.
 
 ### Managed relayer boundary
 
@@ -559,6 +641,8 @@ require bearer authentication and explicit CORS origins.
   chronological audit log.
 - Automatic checkpoints preserve observable Git state, not every unspoken
   decision made inside an agent session.
+- Established-project onboarding cannot reconstruct old chats or undocumented
+  decisions. It creates a bounded Git-derived starting point.
 - Forgetting a project removes local registration but does not delete its
   existing Walrus memories.
 - Memory retention follows Walrus Memory account and service behavior.

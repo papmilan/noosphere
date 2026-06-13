@@ -16,6 +16,42 @@ or whether an agent remembers to call an MCP tool.
 The next agent sees the current files locally and receives the cross-session
 history through the shared context file.
 
+## Bringing Noosphere to an established project
+
+Noosphere can join a repository that has been running for months or years:
+
+```sh
+cd /path/to/existing-project
+noosphere activate
+```
+
+On first activation, Noosphere detects an established repository when it has
+at least 10 commits or its oldest commit is at least 30 days old. It prepares
+one bounded baseline before normal automatic checkpoints begin. The baseline
+contains:
+
+- total repository age and commit count;
+- the current branch, commit, changed paths, and workspace fingerprint;
+- tracked-file counts grouped by top-level project area;
+- up to 50 recent commit dates, hashes, and subjects.
+
+It does not upload source contents or historical diffs. The local copy is
+`.noosphere/baseline.md`; the remote record is stored once as a
+`project-baseline` memory. Future agents read that baseline before current
+intent, semantic recall, and handoffs.
+
+Create or replace the baseline explicitly when needed:
+
+```sh
+noosphere baseline
+noosphere baseline --commits 100 --force
+```
+
+The history window is capped at 200 commits. Noosphere cannot reconstruct old
+chat sessions or undocumented decisions from Git. Add important historical
+context with `noosphere remember`, or pin an existing project plan with
+`noosphere master-prompt`.
+
 ## Pinned project intent
 
 Noosphere distinguishes the original plan from later summaries. A substantial
@@ -105,6 +141,7 @@ Initialization creates one project folder:
 
 ```text
 .noosphere/
+├── baseline.md          Optional established-project onboarding snapshot
 ├── config.json
 ├── context.md
 ├── followups.jsonl
@@ -145,6 +182,11 @@ Raw source diffs are not uploaded. Set `privacy.include_diff` to `true` in
 `.noosphere/config.json` only when the project is safe to send through the
 configured Walrus Memory relayer.
 
+The established-project baseline is also metadata-only, but it includes recent
+Git commit subjects because those summaries help later agents understand the
+project's trajectory. Set `onboarding.auto_baseline` to `false` before first
+activation if commit subjects are sensitive.
+
 Automatic master-prompt capture is separate from metadata-only checkpoints.
 The complete master prompt and later follow-up prompts are intentionally stored
 so future agents retain all phases, constraints, corrections, and additions.
@@ -167,6 +209,7 @@ noosphere activate
 noosphere deactivate
 noosphere register --path /absolute/path/to/repository
 noosphere projects
+noosphere baseline
 noosphere checkpoint
 noosphere refresh
 noosphere status

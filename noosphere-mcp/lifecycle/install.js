@@ -450,12 +450,13 @@ async function installCodexGlobalAdapter() {
 
 When the current Git project contains a \`.noosphere/\` directory:
 
-1. Read \`.noosphere/master-prompt.md\` first when it is non-empty.
-2. Read \`.noosphere/followups.jsonl\` in order.
-3. Treat the master prompt plus follow-ups as current project intent.
-4. Read \`.noosphere/context.md\` and \`.noosphere/journal.md\`.
-5. Inspect the working tree before changing files.
-6. Append concise findings and handoffs to \`.noosphere/journal.md\`.
+1. Read \`.noosphere/baseline.md\` first when it exists.
+2. Read \`.noosphere/master-prompt.md\` when it is non-empty.
+3. Read \`.noosphere/followups.jsonl\` in order.
+4. Treat the master prompt plus follow-ups as current project intent.
+5. Read \`.noosphere/context.md\` and \`.noosphere/journal.md\`.
+6. Inspect the working tree before changing files.
+7. Append concise findings and handoffs to \`.noosphere/journal.md\`.
 
 Never record hidden chain-of-thought, credentials, or secrets.
 ${CODEX_GUARD_END}`;

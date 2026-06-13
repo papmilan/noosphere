@@ -27,6 +27,7 @@ let server;
 let serverUrl;
 let projectDir;
 let secondProjectDir;
+let matureProjectDir;
 let lifecycleHome;
 let storedActions;
 let idempotencyKeys;
@@ -67,6 +68,9 @@ before(async () => {
   secondProjectDir = await mkdtemp(
     path.join(os.tmpdir(), 'noosphere-second-project-'),
   );
+  matureProjectDir = await mkdtemp(
+    path.join(os.tmpdir(), 'noosphere-mature-project-'),
+  );
   lifecycleHome = await mkdtemp(
     path.join(os.tmpdir(), 'noosphere-user-home-'),
   );
@@ -99,6 +103,28 @@ before(async () => {
   await execFileAsync('git', ['commit', '-m', 'initial'], {
     cwd: secondProjectDir,
   });
+  await execFileAsync('git', ['init'], { cwd: matureProjectDir });
+  await execFileAsync('git', ['config', 'user.email', 'test@example.com'], {
+    cwd: matureProjectDir,
+  });
+  await execFileAsync('git', ['config', 'user.name', 'Noosphere Test'], {
+    cwd: matureProjectDir,
+  });
+  await writeFile(
+    path.join(matureProjectDir, 'legacy.js'),
+    'export const legacy = true;\n',
+  );
+  await execFileAsync('git', ['add', 'legacy.js'], {
+    cwd: matureProjectDir,
+  });
+  await execFileAsync('git', ['commit', '-m', 'initial mature project'], {
+    cwd: matureProjectDir,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_DATE: '2025-01-10T12:00:00Z',
+      GIT_COMMITTER_DATE: '2025-01-10T12:00:00Z',
+    },
+  });
 });
 
 after(async () => {
@@ -107,6 +133,7 @@ after(async () => {
   server.close();
   await rm(projectDir, { recursive: true, force: true });
   await rm(secondProjectDir, { recursive: true, force: true });
+  await rm(matureProjectDir, { recursive: true, force: true });
   await rm(lifecycleHome, { recursive: true, force: true });
 });
 
@@ -151,11 +178,15 @@ describe('Noosphere continuity CLI', () => {
     assert.match(protocol, /Do not reveal or request hidden chain-of-thought/);
     assert.match(protocolJson, /"filesystem"/);
     assert.match(protocolJson, /"http"/);
+    assert.match(protocolJson, /baseline\.md/);
     assert.match(protocolJson, /master-prompt\.md/);
     assert.match(protocolJson, /followups\.jsonl/);
     assert.match(journal, /public work journal/i);
     assert.equal(masterPrompt, '');
     assert.equal(followups, '');
+    await assert.rejects(
+      readFile(path.join(projectDir, '.noosphere', 'baseline.md'), 'utf8'),
+    );
     for (const adapterPath of [
       '.mcp.json',
       '.noosphere.json',
@@ -201,12 +232,69 @@ describe('Noosphere continuity CLI', () => {
     );
   });
 
+  it('onboards an established repository with one bounded baseline', async () => {
+    const before = storedActions.length;
+    await runCli(['init'], matureProjectDir);
+    const configPath = path.join(
+      matureProjectDir,
+      '.noosphere',
+      'config.json',
+    );
+    const config = JSON.parse(await readFile(configPath, 'utf8'));
+    config.project_id = 'mature-project';
+    config.relayer_url = serverUrl;
+    config.onboarding.history_commits = 25;
+    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+
+    const baseline = await readFile(
+      path.join(matureProjectDir, '.noosphere', 'baseline.md'),
+      'utf8',
+    );
+    const pendingState = JSON.parse(
+      await readFile(
+        path.join(matureProjectDir, '.noosphere', 'state.json'),
+        'utf8',
+      ),
+    );
+    assert.match(baseline, /machine-generated onboarding snapshot/i);
+    assert.match(baseline, /initial mature project/);
+    assert.match(baseline, /No source file contents or historical diffs/);
+    assert.equal(pendingState.baseline.status, 'pending');
+    assert.equal(storedActions.length, before);
+
+    await runCli(['baseline'], matureProjectDir);
+    assert.equal(storedActions.length, before + 1);
+    assert.equal(storedActions.at(-1).action_type, 'project-baseline');
+    assert.equal(storedActions.at(-1).project_id, 'mature-project');
+    assert.equal(
+      storedActions.at(-1).metadata.baseline.source_content_included,
+      false,
+    );
+
+    await runCli(['baseline'], matureProjectDir);
+    assert.equal(storedActions.length, before + 1);
+    const storedState = JSON.parse(
+      await readFile(
+        path.join(matureProjectDir, '.noosphere', 'state.json'),
+        'utf8',
+      ),
+    );
+    assert.equal(storedState.baseline.status, 'stored');
+    assert.equal(
+      storedState.last_workspace_fingerprint,
+      storedState.baseline.workspace_fingerprint,
+    );
+  });
+
   it('stores metadata-only checkpoints after workspace edits', async () => {
     await writeFile(path.join(projectDir, 'app.js'), 'export const value = 2;\n');
     await runCli(['checkpoint']);
 
-    assert.equal(storedActions.length, 1);
-    const action = storedActions[0];
+    const checkpoints = storedActions.filter(
+      (action) => action.action_type === 'checkpoint',
+    );
+    assert.equal(checkpoints.length, 1);
+    const action = checkpoints[0];
     assert.equal(action.project_id, 'continuity-test');
     assert.equal(action.action_type, 'checkpoint');
     assert.match(action.content, /app\.js/);
