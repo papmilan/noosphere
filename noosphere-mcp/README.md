@@ -16,6 +16,34 @@ or whether an agent remembers to call an MCP tool.
 The next agent sees the current files locally and receives the cross-session
 history through the shared context file.
 
+## Pinned project intent
+
+Noosphere distinguishes the original plan from later summaries. A substantial
+structured or multi-phase prompt is stored exactly in
+`.noosphere/master-prompt.md`, uploaded as a `master-prompt` memory, and pinned
+above recalled history. Every later visible prompt, including short messages
+such as `continue phase 2` and another full master prompt, is appended exactly
+to `.noosphere/followups.jsonl` and uploaded as `user-followup`. Follow-ups
+refine intent without rewriting the original.
+
+Claude Code captures the prompt through `UserPromptSubmit`. The
+`noosphere ollama` wrapper captures it before calling the local model. The user
+installer also adds a managed global Codex instruction, so Codex reads the
+master prompt automatically without adding `AGENTS.md` to every project. It
+also registers `~/.codex/hooks.json` prompt capture. Review and trust that
+user hook once through Codex's `/hooks` screen after installation.
+
+For any other CLI, IDE, HTTP client, or agent host:
+
+```sh
+cat master-prompt.md | noosphere master-prompt
+noosphere master-prompt
+```
+
+Use `--replace` only when the project plan changes intentionally. Set
+`privacy.capture_master_prompt` to `false` in `.noosphere/config.json` to
+disable automatic capture.
+
 ## Install once
 
 From this repository:
@@ -61,14 +89,28 @@ noosphere credentials rotate
 Setup validates the account and registered delegate on Sui before storage.
 Its optional smoke test performs a real Walrus store and semantic recall.
 
+Run any locally installed Ollama model with automatic shared memory:
+
+```sh
+noosphere ollama qwen3-coder
+noosphere ollama run minimax-m2 "Continue phase 2"
+```
+
+The command injects current project memory before the first response and
+stores a concise local-model handoff on exit. Handoffs are marked unverified
+until corroborated by project files or a correction record. Use `--no-store`
+when the session should remain private.
+
 Initialization creates one project folder:
 
 ```text
 .noosphere/
 ├── config.json
 ├── context.md
+├── followups.jsonl
 ├── instructions.md
 ├── journal.md
+├── master-prompt.md
 └── protocol.json
 ```
 
@@ -102,6 +144,13 @@ Automatic checkpoints contain:
 Raw source diffs are not uploaded. Set `privacy.include_diff` to `true` in
 `.noosphere/config.json` only when the project is safe to send through the
 configured Walrus Memory relayer.
+
+Automatic master-prompt capture is separate from metadata-only checkpoints.
+The complete master prompt and later follow-up prompts are intentionally stored
+so future agents retain all phases, constraints, corrections, and additions.
+Do not place secrets in agent prompts. The managed Walrus Memory relayer
+processes this plaintext before Seal encryption. Disable automatic capture
+with `privacy.capture_master_prompt: false` when needed.
 
 Walrus Memory encrypts blobs for storage, but its managed relayer processes
 plaintext for embedding and encryption. Use its manual or self-hosted flow

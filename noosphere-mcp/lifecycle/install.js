@@ -41,6 +41,8 @@ const node = process.execPath;
 // Shell block guard markers — must be declared before the entry-point await.
 const GUARD_START = '# >>> noosphere >>>';
 const GUARD_END = '# <<< noosphere <<<';
+const CODEX_GUARD_START = '<!-- noosphere:global-codex:start -->';
+const CODEX_GUARD_END = '<!-- noosphere:global-codex:end -->';
 
 // ---------------------------------------------------------------------------
 // Platform selection
@@ -158,6 +160,8 @@ async function install() {
 
   await writeWrapper();
   await writeShellIntegration();
+  await installCodexGlobalAdapter();
+  await installCodexPromptHook();
 
   const platform = await getPlatformModule();
   await platform.installServices(platformOpts);
@@ -180,6 +184,8 @@ async function uninstall() {
   const platform = await getPlatformModule();
   await platform.uninstallServices(platformOpts);
   await removeAllShellBlocks();
+  await removeCodexGlobalAdapter();
+  await removeCodexPromptHook();
   await rm(home, { recursive: true, force: true });
   console.log('Noosphere user installation removed.');
 }
@@ -429,6 +435,140 @@ async function injectShellBlock(rcFile, innerBlock) {
     ? current.replace(pattern, block)
     : `${current.trimEnd()}${current.trim() ? '\n\n' : ''}${block}\n`;
   await writeFile(rcFile, current, 'utf8');
+}
+
+async function installCodexGlobalAdapter() {
+  const codexHome =
+    process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  await mkdir(codexHome, { recursive: true, mode: 0o700 });
+  const override = path.join(codexHome, 'AGENTS.override.md');
+  const file = (await exists(override))
+    ? override
+    : path.join(codexHome, 'AGENTS.md');
+  const block = `${CODEX_GUARD_START}
+## Noosphere automatic continuity
+
+When the current Git project contains a \`.noosphere/\` directory:
+
+1. Read \`.noosphere/master-prompt.md\` first when it is non-empty.
+2. Read \`.noosphere/followups.jsonl\` in order.
+3. Treat the master prompt plus follow-ups as current project intent.
+4. Read \`.noosphere/context.md\` and \`.noosphere/journal.md\`.
+5. Inspect the working tree before changing files.
+6. Append concise findings and handoffs to \`.noosphere/journal.md\`.
+
+Never record hidden chain-of-thought, credentials, or secrets.
+${CODEX_GUARD_END}`;
+  await upsertManagedTextBlock(
+    file,
+    CODEX_GUARD_START,
+    CODEX_GUARD_END,
+    block,
+  );
+}
+
+async function installCodexPromptHook() {
+  const codexHome =
+    process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  await mkdir(codexHome, { recursive: true, mode: 0o700 });
+  const file = path.join(codexHome, 'hooks.json');
+  const current = await readJsonFile(file);
+  current.hooks ||= {};
+  current.hooks.UserPromptSubmit ||= [];
+
+  const hookScript = path.join(
+    installedMcp,
+    'hooks',
+    'capture-prompt.js',
+  );
+  const command = `"${node}" "${hookScript}"`;
+  const groups = current.hooks.UserPromptSubmit.filter(
+    (group) =>
+      !group?.hooks?.some((hook) => isNoospherePromptHook(hook)),
+  );
+  groups.push({
+    hooks: [
+      {
+        type: 'command',
+        command,
+        timeout: 15,
+        statusMessage: 'Checking Noosphere project intent...',
+      },
+    ],
+  });
+  current.hooks.UserPromptSubmit = groups;
+  await writeFile(file, `${JSON.stringify(current, null, 2)}\n`, {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
+}
+
+async function removeCodexGlobalAdapter() {
+  const codexHome =
+    process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  for (const name of ['AGENTS.md', 'AGENTS.override.md']) {
+    const file = path.join(codexHome, name);
+    if (!(await exists(file))) continue;
+    const current = await readFile(file, 'utf8').catch(() => '');
+    const pattern = new RegExp(
+      `${escapeRegExp(CODEX_GUARD_START)}[\\s\\S]*?${escapeRegExp(CODEX_GUARD_END)}\\n?`,
+    );
+    const remaining = current.replace(pattern, '').trim();
+    if (remaining) {
+      await writeFile(file, `${remaining}\n`, 'utf8');
+    } else {
+      await rm(file, { force: true });
+    }
+  }
+}
+
+async function removeCodexPromptHook() {
+  const codexHome =
+    process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  const file = path.join(codexHome, 'hooks.json');
+  if (!(await exists(file))) return;
+  const current = await readJsonFile(file);
+  const groups = (current.hooks?.UserPromptSubmit || []).filter(
+    (group) =>
+      !group?.hooks?.some((hook) => isNoospherePromptHook(hook)),
+  );
+  if (current.hooks) {
+    if (groups.length > 0) {
+      current.hooks.UserPromptSubmit = groups;
+    } else {
+      delete current.hooks.UserPromptSubmit;
+    }
+    if (Object.keys(current.hooks).length === 0) delete current.hooks;
+  }
+  if (Object.keys(current).length === 0) {
+    await rm(file, { force: true });
+  } else {
+    await writeFile(file, `${JSON.stringify(current, null, 2)}\n`, 'utf8');
+  }
+}
+
+async function upsertManagedTextBlock(file, start, end, block) {
+  const current = await readFile(file, 'utf8').catch(() => '');
+  const pattern = new RegExp(
+    `${escapeRegExp(start)}[\\s\\S]*?${escapeRegExp(end)}`,
+  );
+  const updated = pattern.test(current)
+    ? current.replace(pattern, block)
+    : `${current.trimEnd()}${current.trim() ? '\n\n' : ''}${block}\n`;
+  await writeFile(file, updated, 'utf8');
+}
+
+async function readJsonFile(file) {
+  try {
+    return JSON.parse(await readFile(file, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function isNoospherePromptHook(hook) {
+  const command = String(hook?.command || '').replaceAll('\\', '/');
+  return command.includes('noosphere-mcp/hooks/capture-prompt.js');
 }
 
 // ---------------------------------------------------------------------------

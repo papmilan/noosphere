@@ -8,6 +8,8 @@ interface that the tool already supports: files, CLI, HTTP, or MCP.
 Agents that can read the repository should start with:
 
 - `.noosphere/context.md` for recalled shared context;
+- `.noosphere/master-prompt.md` for exact pinned project intent;
+- `.noosphere/followups.jsonl` for exact ordered user follow-ups;
 - `.noosphere/journal.md` for concise local handoffs;
 - `.noosphere/instructions.md` for the universal working protocol.
 
@@ -18,7 +20,22 @@ noosphere context
 noosphere recall "What changed in authentication?"
 noosphere remember --agent codex --type decision "Use rotating refresh tokens."
 noosphere journal --agent codex "Verified login; logout remains untested."
+cat project-plan.md | noosphere master-prompt
 ```
+
+## Ollama
+
+```sh
+noosphere ollama qwen3-coder
+noosphere ollama run minimax-m2 "Continue from the latest shared handoff"
+```
+
+Noosphere injects recalled project memory through Ollama's local chat API and
+stores a concise, explicitly unverified session handoff when the model exits.
+Substantial multi-phase prompts are pinned separately so later local models can
+resolve instructions such as `continue phase 2` against the original plan.
+Every subsequent visible prompt is appended as a follow-up without replacing
+the original plan.
 
 ## HTTP
 

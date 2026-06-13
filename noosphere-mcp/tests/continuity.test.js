@@ -102,7 +102,9 @@ before(async () => {
 });
 
 after(async () => {
-  await new Promise((resolve) => server.close(resolve));
+  server.closeAllConnections?.();
+  server.closeIdleConnections?.();
+  server.close();
   await rm(projectDir, { recursive: true, force: true });
   await rm(secondProjectDir, { recursive: true, force: true });
   await rm(lifecycleHome, { recursive: true, force: true });
@@ -123,7 +125,8 @@ describe('Noosphere continuity CLI', () => {
     config.context_refresh_ms = 60_000;
     await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 
-    const [protocol, protocolJson, journal] = await Promise.all([
+    const [protocol, protocolJson, journal, masterPrompt, followups] =
+      await Promise.all([
       readFile(
         path.join(projectDir, '.noosphere', 'instructions.md'),
         'utf8',
@@ -133,6 +136,14 @@ describe('Noosphere continuity CLI', () => {
         'utf8',
       ),
       readFile(path.join(projectDir, '.noosphere', 'journal.md'), 'utf8'),
+      readFile(
+        path.join(projectDir, '.noosphere', 'master-prompt.md'),
+        'utf8',
+      ),
+      readFile(
+        path.join(projectDir, '.noosphere', 'followups.jsonl'),
+        'utf8',
+      ),
     ]);
 
     assert.deepEqual(config.adapters, []);
@@ -140,7 +151,11 @@ describe('Noosphere continuity CLI', () => {
     assert.match(protocol, /Do not reveal or request hidden chain-of-thought/);
     assert.match(protocolJson, /"filesystem"/);
     assert.match(protocolJson, /"http"/);
+    assert.match(protocolJson, /master-prompt\.md/);
+    assert.match(protocolJson, /followups\.jsonl/);
     assert.match(journal, /public work journal/i);
+    assert.equal(masterPrompt, '');
+    assert.equal(followups, '');
     for (const adapterPath of [
       '.mcp.json',
       '.noosphere.json',
@@ -447,6 +462,124 @@ describe('Noosphere continuity CLI', () => {
       child.kill('SIGTERM');
       await new Promise((resolve) => child.once('close', resolve));
     }
+  });
+
+  it('pins the master prompt and appends later prompts as ordered intent', async () => {
+    const masterPrompt = [
+      '# Build the outreach engine',
+      '',
+      'Phase 1: Create the contact importer.',
+      'Phase 2: Add campaign scheduling and retries.',
+      'Phase 3: Add reporting and export.',
+      '',
+      'Only implement Phase 1 in this session.',
+      'Keep the remaining phases unchanged so another agent can continue later.',
+    ].join('\n');
+    const replacement = [
+      '# Different plan',
+      '',
+      'Phase 1: Replace the importer.',
+      'Phase 2: Remove campaign scheduling.',
+      'Phase 3: Replace reporting with a dashboard.',
+      '',
+      'This is deliberately long enough to qualify as a second structured plan,',
+      'but automatic capture must not replace the already pinned project intent.',
+    ].join('\n');
+    const before = storedActions.length;
+
+    const captureOutput = await runCli([
+      'capture-prompt',
+      '--local-only',
+      '--content',
+      masterPrompt,
+    ]);
+    assert.match(captureOutput, /saved locally/i);
+    assert.equal(
+      await readFile(
+        path.join(projectDir, '.noosphere', 'master-prompt.md'),
+        'utf8',
+      ),
+      masterPrompt,
+    );
+    assert.equal(storedActions.length, before);
+
+    await runCli(['share-master-prompt', '--agent', 'claude-code']);
+    assert.equal(storedActions.length, before + 1);
+    assert.equal(storedActions.at(-1).action_type, 'master-prompt');
+    assert.equal(storedActions.at(-1).content, masterPrompt);
+
+    const followupOutput = await runCli([
+      'capture-prompt',
+      '--content',
+      replacement,
+    ]);
+    assert.match(followupOutput, /Follow-up prompt captured exactly/i);
+    assert.equal(
+      await readFile(
+        path.join(projectDir, '.noosphere', 'master-prompt.md'),
+        'utf8',
+      ),
+      masterPrompt,
+    );
+    assert.equal(storedActions.length, before + 2);
+    assert.equal(storedActions.at(-1).action_type, 'user-followup');
+    assert.equal(storedActions.at(-1).content, replacement);
+
+    const shortFollowup = 'Continue with phase 2, but use a 30 second timeout.';
+    await runCli([
+      'capture-prompt',
+      '--content',
+      shortFollowup,
+    ]);
+    const followups = (
+      await readFile(
+        path.join(projectDir, '.noosphere', 'followups.jsonl'),
+        'utf8',
+      )
+    )
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(
+      followups.map((entry) => entry.content),
+      [replacement, shortFollowup],
+    );
+    assert.equal(storedActions.at(-1).action_type, 'user-followup');
+    assert.equal(storedActions.at(-1).content, shortFollowup);
+
+    await runCli(['refresh']);
+    const context = await readFile(
+      path.join(projectDir, '.noosphere', 'context.md'),
+      'utf8',
+    );
+    assert.match(context, /## Pinned master prompt/);
+    assert.match(context, /Phase 2: Add campaign scheduling and retries/);
+    assert.match(context, /## Follow-up user instructions/);
+    assert.match(context, /Continue with phase 2, but use a 30 second timeout/);
+    assert.match(context, /## Completion evidence/);
+    assert.ok(
+      context.indexOf('## Pinned master prompt') <
+        context.indexOf('## Follow-up user instructions'),
+    );
+    assert.ok(
+      context.indexOf('## Follow-up user instructions') <
+        context.indexOf('## Completion evidence'),
+    );
+
+    const explicitReplacement = 'Use the revised project plan in plan-v2.md.';
+    await runCli([
+      'master-prompt',
+      '--replace',
+      '--content',
+      explicitReplacement,
+    ]);
+    assert.equal(
+      await readFile(
+        path.join(projectDir, '.noosphere', 'master-prompt.md'),
+        'utf8',
+      ),
+      explicitReplacement,
+    );
   });
 });
 

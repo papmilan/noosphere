@@ -27,6 +27,7 @@ import {
 } from '../lifecycle/registry.js';
 import { writeHint } from '../lifecycle/ide-bridge.js';
 import { runSetupWizard, runCredentialsCommand } from './credentials-cli.js';
+import { runOllamaSession } from './ollama.js';
 
 const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -95,6 +96,21 @@ try {
     case 'journal':
       await journalFromCli(projectDir);
       break;
+    case 'master-prompt':
+      await masterPromptFromCli(projectDir);
+      break;
+    case 'capture-prompt':
+      await capturePromptFromCli(projectDir);
+      break;
+    case 'share-master-prompt':
+      await shareMasterPromptFromCli(projectDir);
+      break;
+    case 'share-followup-prompt':
+      await shareFollowupPromptFromCli(projectDir);
+      break;
+    case 'ollama':
+      await ollamaFromCli(projectDir);
+      break;
     case 'protocol':
       await printProtocol(projectDir);
       break;
@@ -155,6 +171,8 @@ export async function initializeProject(root, options = {}) {
         existing?.privacy?.checkpoint_content || 'metadata-only',
       include_diff: existing?.privacy?.include_diff === true,
       share_journal: existing?.privacy?.share_journal === true,
+      capture_master_prompt:
+        existing?.privacy?.capture_master_prompt !== false,
     },
     adapters,
   };
@@ -167,6 +185,14 @@ export async function initializeProject(root, options = {}) {
   await writeTextIfMissing(
     path.join(root, '.noosphere', 'journal.md'),
     journalTemplate(projectId),
+  );
+  await writeTextIfMissing(
+    path.join(root, '.noosphere', 'master-prompt.md'),
+    '',
+  );
+  await writeTextIfMissing(
+    path.join(root, '.noosphere', 'followups.jsonl'),
+    '',
   );
   await writeUniversalProtocol(root, projectId);
   await writeAgentAdapters(root, projectId, adapters);
@@ -439,16 +465,19 @@ export function checkpointFingerprint(snapshot) {
   return hash(JSON.stringify(stableSnapshot));
 }
 
-export async function refreshContext(root) {
+export async function refreshContext(root, options = {}) {
   const config = await loadConfig(root);
   const query = encodeURIComponent(
-    'latest project changes failures decisions blockers tests and next steps',
+    options.query ||
+      'latest project changes failures decisions blockers tests and next steps',
   );
   const context = await requestText(
     `${config.relayer_url}/v1/projects/${encodeURIComponent(
       config.project_id,
     )}/context?format=text&limit=50&q=${query}`,
   );
+  const masterPrompt = await readMasterPrompt(root);
+  const followups = await readFollowupPrompts(root);
   const output = [
     '# Noosphere shared context',
     '',
@@ -457,11 +486,33 @@ export async function refreshContext(root) {
     '',
     'Read this before changing the project. It may contain work from another AI tool.',
     '',
+    masterPrompt
+      ? [
+          '## Pinned master prompt',
+          '',
+          'This is the original project instruction. Preserve its phases and constraints.',
+          '',
+          masterPrompt,
+        ].join('\n')
+      : '## Pinned master prompt\n\nNo master prompt has been recorded.',
+    '',
+    '## Follow-up user instructions',
+    '',
+    followups.length > 0
+      ? formatFollowupPrompts(followups)
+      : 'No follow-up prompts have been recorded.',
+    '',
+    '## Completion evidence',
+    '',
+    'Verify completion claims against the current working tree and tests.',
+    '',
+    await formatLocalJournal(root),
+    '',
+    '## Semantically recalled shared history',
+    '',
     '```text',
     context.trim(),
     '```',
-    '',
-    await formatLocalJournal(root),
   ].join('\n');
   await atomicWrite(path.join(root, '.noosphere', 'context.md'), output);
   return output;
@@ -565,12 +616,15 @@ async function writeAgentAdapters(root, projectId, adapters) {
 Noosphere's core protocol is vendor-neutral. This file is an auto-load adapter
 for tools that recognize this filename.
 
-1. Before working, read \`.noosphere/context.md\` and
+1. Before working, read \`.noosphere/master-prompt.md\`,
+   \`.noosphere/followups.jsonl\`, \`.noosphere/context.md\`, and
    \`.noosphere/journal.md\`.
-2. Inspect the working tree because another tool may have changed it.
-3. Append concise findings, evidence, decisions, failed approaches, and
+2. Treat the master prompt as pinned project intent. Preserve unfinished
+   phases and constraints unless the user explicitly changes them.
+3. Inspect the working tree because another tool may have changed it.
+4. Append concise findings, evidence, decisions, failed approaches, and
    handoffs to \`.noosphere/journal.md\`.
-4. Do not record hidden chain-of-thought, secrets, or private internal
+5. Do not record hidden chain-of-thought, secrets, or private internal
    reasoning.
 
 Project namespace: \`noosphere-${sanitizeProjectId(projectId)}\`.
@@ -601,9 +655,12 @@ description: Load the universal Noosphere continuity protocol
 alwaysApply: true
 ---
 
-Read \`.noosphere/instructions.md\`, \`.noosphere/context.md\`, and
-\`.noosphere/journal.md\` before working. Append concise, verifiable findings
-and handoffs to the journal. Do not write hidden chain-of-thought.
+Read \`.noosphere/instructions.md\`, \`.noosphere/master-prompt.md\`,
+\`.noosphere/followups.jsonl\`, \`.noosphere/context.md\`, and
+\`.noosphere/journal.md\` before working. Treat the master prompt plus ordered
+follow-ups as current project intent and preserve unfinished phases. Append
+concise, verifiable findings and handoffs to the journal. Do not write hidden
+chain-of-thought.
 `,
       'utf8',
     );
@@ -625,6 +682,8 @@ async function ensureLocalExcludes(root) {
   const entries = [
     '.noosphere/context.md',
     '.noosphere/journal.md',
+    '.noosphere/master-prompt.md',
+    '.noosphere/followups.jsonl',
     '.noosphere/state.json',
     '.noosphere/*.tmp',
     '._*',
@@ -729,6 +788,8 @@ async function loadConfig(root) {
         config.privacy?.checkpoint_content || 'metadata-only',
       include_diff: config.privacy?.include_diff === true,
       share_journal: config.privacy?.share_journal === true,
+      capture_master_prompt:
+        config.privacy?.capture_master_prompt !== false,
     },
   };
 }
@@ -850,14 +911,357 @@ async function journalFromCli(root) {
   }
 }
 
+async function masterPromptFromCli(root) {
+  const existing = await readMasterPrompt(root);
+  const hasInput =
+    Boolean(readFlag('--content')) ||
+    contentPositionals().length > 0 ||
+    !process.stdin.isTTY;
+
+  if (!hasInput) {
+    if (!existing) {
+      console.log('No master prompt has been captured for this project.');
+      return;
+    }
+    process.stdout.write(existing);
+    if (!existing.endsWith('\n')) process.stdout.write('\n');
+    return;
+  }
+
+  const content = await readExactCliContent();
+  const result = await captureMasterPrompt(root, content, {
+    force: process.argv.includes('--replace'),
+    automatic: false,
+    source: readFlag('--source') || 'explicit-cli',
+    agentId:
+      readFlag('--agent') ||
+      process.env.NOOSPHERE_AGENT_ID ||
+      'project-owner',
+  });
+  printMasterPromptResult(result);
+}
+
+async function capturePromptFromCli(root) {
+  const content = await readExactCliContent();
+  const result = await captureMasterPrompt(root, content, {
+    share: !process.argv.includes('--local-only'),
+    source: readFlag('--source') || 'agent-hook',
+    agentId:
+      readFlag('--agent') ||
+      process.env.NOOSPHERE_AGENT_ID ||
+      'agent-hook',
+  });
+  printMasterPromptResult(result);
+}
+
+export async function captureMasterPrompt(
+  root,
+  content,
+  {
+    force = false,
+    automatic = true,
+    share = true,
+    source = 'unknown',
+    agentId = 'project-owner',
+  } = {},
+) {
+  const prompt = String(content || '');
+  if (!prompt.trim()) {
+    return { captured: false, reason: 'empty' };
+  }
+  const config = await loadConfig(root);
+  if (automatic && config.privacy.capture_master_prompt === false) {
+    return { captured: false, reason: 'disabled' };
+  }
+  const existing = await readMasterPrompt(root);
+  if (existing && !force) {
+    return captureFollowupPrompt(root, prompt, {
+      config,
+      share,
+      source,
+      agentId,
+    });
+  }
+  if (automatic && !force && !isMasterPromptCandidate(prompt)) {
+    return { captured: false, reason: 'not-master-prompt' };
+  }
+  if (existing === prompt) {
+    return { captured: false, reason: 'unchanged', hash: hash(prompt) };
+  }
+
+  await atomicWrite(
+    path.join(root, '.noosphere', 'master-prompt.md'),
+    prompt,
+  );
+  if (!share) {
+    return {
+      captured: true,
+      kind: 'master',
+      hash: hash(prompt),
+      localOnly: true,
+    };
+  }
+  const response = await storeCliMemory(config, {
+    content: prompt,
+    actionType: 'master-prompt',
+    agentId,
+    client: source,
+  });
+  return {
+    captured: true,
+    kind: 'master',
+    hash: hash(prompt),
+    pending: response.pending === true,
+    response,
+  };
+}
+
+async function shareMasterPromptFromCli(root) {
+  const config = await loadConfig(root);
+  const content = await readMasterPrompt(root);
+  if (!content) {
+    throw new Error('No master prompt has been captured for this project.');
+  }
+  const response = await storeCliMemory(config, {
+    content,
+    actionType: 'master-prompt',
+    agentId:
+      readFlag('--agent') ||
+      process.env.NOOSPHERE_AGENT_ID ||
+      'agent-hook',
+    client: readFlag('--source') || 'agent-hook',
+  });
+  process.stdout.write(`${JSON.stringify(response, null, 2)}\n`);
+}
+
+async function shareFollowupPromptFromCli(root) {
+  const config = await loadConfig(root);
+  const requestedHash = readFlag('--hash');
+  const followups = await readFollowupPrompts(root);
+  const followup = requestedHash
+    ? followups.find((entry) => entry.hash === requestedHash)
+    : followups.at(-1);
+  if (!followup) {
+    throw new Error('No matching follow-up prompt has been captured.');
+  }
+  const response = await storeCliMemory(config, {
+    content: followup.content,
+    actionType: 'user-followup',
+    agentId:
+      readFlag('--agent') ||
+      followup.agent_id ||
+      process.env.NOOSPHERE_AGENT_ID ||
+      'agent-hook',
+    client: readFlag('--source') || followup.source || 'agent-hook',
+  });
+  process.stdout.write(`${JSON.stringify(response, null, 2)}\n`);
+}
+
+async function captureFollowupPrompt(
+  root,
+  prompt,
+  { config, share, source, agentId },
+) {
+  const record = {
+    timestamp: new Date().toISOString(),
+    source,
+    agent_id: agentId,
+    hash: hash(prompt),
+    content: prompt,
+  };
+  await appendFile(
+    path.join(root, '.noosphere', 'followups.jsonl'),
+    `${JSON.stringify(record)}\n`,
+    'utf8',
+  );
+  if (!share) {
+    return {
+      captured: true,
+      kind: 'followup',
+      hash: record.hash,
+      localOnly: true,
+    };
+  }
+  const response = await storeCliMemory(config, {
+    content: prompt,
+    actionType: 'user-followup',
+    agentId,
+    client: source,
+  });
+  return {
+    captured: true,
+    kind: 'followup',
+    hash: record.hash,
+    pending: response.pending === true,
+    response,
+  };
+}
+
+export function isMasterPromptCandidate(content) {
+  const text = String(content || '').trim();
+  if (text.length < 200) return false;
+
+  const phases = new Set(
+    [...text.matchAll(/\bphase\s+([a-z0-9]+)\b/gi)].map((match) =>
+      match[1].toLowerCase(),
+    ),
+  );
+  if (phases.size >= 2) return true;
+
+  const structuredLines = text
+    .split(/\r?\n/)
+    .filter((line) =>
+      /^(?:#{1,6}\s+|\s*(?:\d+[.)]|[-*])\s+\S)/.test(line),
+    ).length;
+  return text.length >= 1_000 && structuredLines >= 3;
+}
+
+async function ollamaFromCli(root) {
+  const config = await loadConfig(root);
+  const options = parseOllamaArguments(process.argv.slice(3));
+  const instructions = await readFile(
+    path.join(root, '.noosphere', 'instructions.md'),
+    'utf8',
+  ).catch(() => '');
+  let context;
+  try {
+    context = await refreshContext(root, {
+      query:
+        options.prompt ||
+        'latest project changes decisions blockers tests and next steps',
+    });
+  } catch (error) {
+    console.warn(
+      `[Noosphere] Remote context refresh failed; using local context: ${error.message}`,
+    );
+    context = await readFile(
+      path.join(root, '.noosphere', 'context.md'),
+      'utf8',
+    ).catch(() => emptyContext(config.project_id));
+  }
+  const journal = await readFile(
+    path.join(root, '.noosphere', 'journal.md'),
+    'utf8',
+  ).catch(() => '');
+  const masterPrompt = await readMasterPrompt(root);
+  const followups = formatFollowupPrompts(await readFollowupPrompts(root));
+
+  await runOllamaSession({
+    projectId: config.project_id,
+    model: options.model,
+    prompt: options.prompt,
+    host: options.host,
+    instructions,
+    context,
+    journal,
+    masterPrompt,
+    followups,
+    shouldStore: options.shouldStore,
+    capturePrompt: (prompt) =>
+      captureMasterPrompt(root, prompt, {
+        source: 'noosphere-ollama',
+        agentId: options.agentId,
+      }),
+    storeHandoff: async (summary) => {
+      const entry = [
+        `## ${new Date().toISOString()} - ollama:${options.model} / session`,
+        '',
+        summary,
+        '',
+      ].join('\n');
+      await appendFile(
+        path.join(root, '.noosphere', 'journal.md'),
+        entry,
+        'utf8',
+      );
+      return storeCliMemory(config, {
+        content: summary,
+        actionType: 'session',
+        agentId: options.agentId,
+        client: 'noosphere-ollama',
+        provider: 'Ollama',
+        model: options.model,
+      });
+    },
+  });
+}
+
 async function printProtocol(root) {
   const file = path.join(root, '.noosphere', 'instructions.md');
   process.stdout.write(await readFile(file, 'utf8'));
 }
 
+async function readMasterPrompt(root) {
+  return readFile(
+    path.join(root, '.noosphere', 'master-prompt.md'),
+    'utf8',
+  ).catch(() => '');
+}
+
+async function readFollowupPrompts(root) {
+  const content = await readFile(
+    path.join(root, '.noosphere', 'followups.jsonl'),
+    'utf8',
+  ).catch(() => '');
+  return content
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .flatMap((line) => {
+      try {
+        const entry = JSON.parse(line);
+        return typeof entry.content === 'string' ? [entry] : [];
+      } catch {
+        return [];
+      }
+    });
+}
+
+function formatFollowupPrompts(followups) {
+  return followups
+    .map(
+      (entry, index) =>
+        `### Follow-up ${index + 1} — ${entry.timestamp || 'time unknown'}\n\n` +
+        `${entry.content}`,
+    )
+    .join('\n\n');
+}
+
+function printMasterPromptResult(result) {
+  if (result.captured) {
+    const disposition = result.localOnly
+      ? 'saved locally'
+      : result.pending
+        ? 'queued'
+        : 'stored';
+    const label =
+      result.kind === 'followup' ? 'Follow-up prompt' : 'Master prompt';
+    console.log(
+      `${label} captured exactly and ${disposition}. ` +
+        `Hash: ${result.hash}`,
+    );
+    return;
+  }
+  const messages = {
+    empty: 'Master prompt was empty.',
+    'not-master-prompt':
+      'Prompt was not promoted: it was not a substantial structured or multi-phase instruction.',
+    unchanged: 'Master prompt is unchanged.',
+    disabled:
+      'Automatic master-prompt capture is disabled in .noosphere/config.json.',
+  };
+  console.log(messages[result.reason] || 'Master prompt was not changed.');
+}
+
 async function storeCliMemory(
   config,
-  { content, actionType, agentId, client },
+  {
+    content,
+    actionType,
+    agentId,
+    client,
+    provider = process.env.NOOSPHERE_PROVIDER || null,
+    model = process.env.NOOSPHERE_MODEL || null,
+  },
 ) {
   return requestJson(`${config.relayer_url}/v1/actions`, {
     method: 'POST',
@@ -871,8 +1275,8 @@ async function storeCliMemory(
       action_type: actionType,
       content,
       session_id: process.env.NOOSPHERE_SESSION_ID || `cli-${Date.now()}`,
-      provider: process.env.NOOSPHERE_PROVIDER || null,
-      model: process.env.NOOSPHERE_MODEL || null,
+      provider,
+      model,
       client,
     }),
   });
@@ -908,6 +1312,38 @@ async function readCliContent() {
   throw new Error('Provide content as arguments, --content, or stdin.');
 }
 
+async function readExactCliContent() {
+  const flagValue = readFlag('--content');
+  if (flagValue) return flagValue;
+  const positional = contentPositionals().join(' ');
+  if (positional) return positional;
+  if (!process.stdin.isTTY) {
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    const piped = Buffer.concat(chunks).toString('utf8');
+    if (piped.trim()) return piped;
+  }
+  throw new Error('Provide content as arguments, --content, or stdin.');
+}
+
+function contentPositionals() {
+  const valueFlags = new Set([
+    '--agent',
+    '--type',
+    '--client',
+    '--query',
+    '--content',
+    '--source',
+    '--path',
+  ]);
+  return process.argv
+    .slice(3)
+    .filter((value, index, values) => {
+      const previous = values[index - 1];
+      return !value.startsWith('--') && !valueFlags.has(previous);
+    });
+}
+
 function readFlag(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : null;
@@ -929,9 +1365,16 @@ MCP. An agent does not need a Noosphere-specific SDK.
 
 ## Start
 
-1. Read \`.noosphere/context.md\`.
-2. Read \`.noosphere/journal.md\`.
-3. Inspect the current working tree.
+1. Read \`.noosphere/master-prompt.md\` if it is non-empty. It contains the
+   exact original project instruction and is pinned above later summaries.
+2. Read \`.noosphere/followups.jsonl\` in order. Later user instructions refine
+   the master prompt without erasing it.
+3. Read \`.noosphere/context.md\`.
+4. Read \`.noosphere/journal.md\`.
+5. Inspect the current working tree.
+
+When the user asks to continue a later phase, recover that phase from the
+master prompt instead of guessing from completed work.
 
 ## During work
 
@@ -954,11 +1397,14 @@ next recommended action.
 ## Universal interfaces
 
 - File context: \`.noosphere/context.md\`
+- Master prompt: \`.noosphere/master-prompt.md\`
+- Ordered follow-ups: \`.noosphere/followups.jsonl\`
 - Work journal: \`.noosphere/journal.md\`
 - CLI context: \`noosphere context\`
 - CLI recall: \`noosphere recall "query"\`
 - CLI remember: \`printf '%s' "note" | noosphere remember --agent my-agent\`
 - CLI journal: \`noosphere journal --agent my-agent "finding"\`
+- CLI master prompt: \`noosphere master-prompt\`
 - HTTP bootstrap: \`GET /v1/projects/${slug}/bootstrap\`
 - HTTP remember: \`POST /v1/actions\`
 - HTTP recall: \`POST /v1/projects/${slug}/recall\`
@@ -977,6 +1423,8 @@ next recommended action.
     files: {
       context: '.noosphere/context.md',
       journal: '.noosphere/journal.md',
+      master_prompt: '.noosphere/master-prompt.md',
+      followups: '.noosphere/followups.jsonl',
       instructions: '.noosphere/instructions.md',
     },
     interfaces: ['filesystem', 'cli', 'http', 'mcp'],
@@ -1226,6 +1674,47 @@ function parseAdapters(value) {
   return [...new Set(requested)];
 }
 
+function parseOllamaArguments(args) {
+  const values = [...args];
+  if (values[0] === 'run') values.shift();
+  const options = {
+    host: process.env.OLLAMA_HOST || 'http://127.0.0.1:11434',
+    shouldStore: true,
+  };
+  const positional = [];
+
+  for (let index = 0; index < values.length; index += 1) {
+    const value = values[index];
+    if (value === '--no-store') {
+      options.shouldStore = false;
+      continue;
+    }
+    if (['--host', '--agent', '--prompt'].includes(value)) {
+      const next = values[index + 1];
+      if (!next) throw new Error(`${value} requires a value.`);
+      if (value === '--host') options.host = next;
+      if (value === '--agent') options.agentId = next;
+      if (value === '--prompt') options.prompt = next;
+      index += 1;
+      continue;
+    }
+    if (value.startsWith('--')) {
+      throw new Error(`Unknown Ollama option: ${value}`);
+    }
+    positional.push(value);
+  }
+
+  options.model = positional.shift();
+  if (!options.model) {
+    throw new Error(
+      'Usage: noosphere ollama <model> [prompt] [--host URL] [--no-store]',
+    );
+  }
+  options.prompt = options.prompt || positional.join(' ');
+  options.agentId = options.agentId || `ollama:${options.model}`;
+  return options;
+}
+
 function printHelp() {
   console.log(`Noosphere continuity
 
@@ -1247,6 +1736,18 @@ Commands:
   recall      Recall project memory by semantic query
   remember    Store a memory from arguments or stdin
   journal     Append a concise public work note
+  master-prompt
+              Print or explicitly store the exact pinned project prompt
+  ollama      Run any Ollama model with shared project memory
   protocol    Print the universal agent protocol
+
+Ollama examples:
+  noosphere ollama qwen3-coder
+  noosphere ollama run minimax-m2 "Continue phase 2"
+  noosphere ollama llama3.2 --no-store
+
+Master prompt examples:
+  cat plan.md | noosphere master-prompt
+  noosphere master-prompt --replace --content "Updated project plan..."
 `);
 }

@@ -36,6 +36,11 @@ credential backend, and runtime volume.
 - The built-in rate limiter is process-local.
 - Automatic checkpoints preserve visible workspace state, not private agent
   reasoning.
+- Automatic master-prompt capture stores the complete visible user prompt,
+  because summaries cannot preserve future phases exactly. It never captures
+  hidden reasoning. Later visible prompts are also stored exactly as ordered
+  follow-ups. Disable both per project with
+  `privacy.capture_master_prompt: false`.
 
 Use Walrus Memory's manual or self-hosted client flow when the managed relayer
 trust boundary is not acceptable.

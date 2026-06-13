@@ -126,6 +126,25 @@ describe('Noosphere macOS lifecycle installer', () => {
       const zshrc = await readFile(path.join(fakeHome, '.zshrc'), 'utf8');
       assert.match(zshrc, />>> noosphere >>>/);
 
+      // Global Codex adapter keeps the per-project footprint vendor-neutral.
+      const codexInstructions = await readFile(
+        path.join(fakeHome, '.codex', 'AGENTS.md'),
+        'utf8',
+      );
+      assert.match(codexInstructions, /Noosphere automatic continuity/);
+      assert.match(codexInstructions, /\.noosphere\/master-prompt\.md/);
+      assert.match(codexInstructions, /\.noosphere\/followups\.jsonl/);
+      const codexHooks = JSON.parse(
+        await readFile(
+          path.join(fakeHome, '.codex', 'hooks.json'),
+          'utf8',
+        ),
+      );
+      assert.match(
+        codexHooks.hooks.UserPromptSubmit[0].hooks[0].command,
+        /capture-prompt\.js/,
+      );
+
       // LaunchAgent plists
       const relayerPlist = await readFile(
         path.join(fakeHome, 'Library', 'LaunchAgents', 'xyz.noosphere.relayer.plist'),
@@ -152,6 +171,12 @@ describe('Noosphere macOS lifecycle installer', () => {
       assert.doesNotMatch(
         await readFile(path.join(fakeHome, '.zshrc'), 'utf8'),
         />>> noosphere >>>/,
+      );
+      await assert.rejects(
+        access(path.join(fakeHome, '.codex', 'AGENTS.md')),
+      );
+      await assert.rejects(
+        access(path.join(fakeHome, '.codex', 'hooks.json')),
       );
     } finally {
       await rm(fakeHome, { recursive: true, force: true });
