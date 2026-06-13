@@ -16,7 +16,7 @@ or whether an agent remembers to call an MCP tool.
 The next agent sees the current files locally and receives the cross-session
 history through the shared context file.
 
-## Bringing Noosphere to an established project
+## Bringing Noosphere to an existing project
 
 Noosphere can join a repository that has been running for months or years:
 
@@ -25,10 +25,9 @@ cd /path/to/existing-project
 noosphere activate
 ```
 
-On first activation, Noosphere detects an established repository when it has
-at least 10 commits or its oldest commit is at least 30 days old. It prepares
-one bounded baseline before normal automatic checkpoints begin. The baseline
-contains:
+On first activation, Noosphere prepares one bounded baseline for every Git
+repository before normal automatic checkpoints begin. There is no project-age
+or commit-count threshold. The baseline contains:
 
 - total repository age and commit count;
 - the current branch, commit, changed paths, and workspace fingerprint;

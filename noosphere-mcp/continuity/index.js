@@ -40,8 +40,6 @@ const DEFAULT_WRITE_TIMEOUT_MS = 130_000;
 const DEFAULT_READ_TIMEOUT_MS = 30_000;
 const DEFAULT_BASELINE_HISTORY_COMMITS = 50;
 const MAX_BASELINE_HISTORY_COMMITS = 200;
-const DEFAULT_MATURE_PROJECT_COMMITS = 10;
-const DEFAULT_MATURE_PROJECT_AGE_DAYS = 30;
 const MANAGED_START = '<!-- noosphere:continuity:start -->';
 const MANAGED_END = '<!-- noosphere:continuity:end -->';
 const ALL_ADAPTERS = ['codex', 'claude', 'gemini', 'cursor', 'mcp'];
@@ -456,14 +454,13 @@ async function prepareAutomaticBaseline(root, config) {
     root,
     config.onboarding.history_commits,
   );
-  if (!isMatureRepository(profile)) return null;
 
   const prepared = await prepareProjectBaseline(root, {
     config,
     profile,
   });
   console.log(
-    `Established repository detected: prepared one baseline from ` +
+    `Prepared initial project baseline from ` +
       `${profile.total_commits} commits.`,
   );
   return prepared;
@@ -706,13 +703,13 @@ export async function refreshContext(root, options = {}) {
     '',
     baseline
       ? [
-          '## Established-project baseline',
+          '## Initial project baseline',
           '',
           baseline
             .replace(/^# Noosphere project baseline\s*/i, '')
             .trim(),
         ].join('\n')
-      : '## Established-project baseline\n\nNo mature-project baseline has been created.',
+      : '## Initial project baseline\n\nNo onboarding baseline has been created.',
     '',
     masterPrompt
       ? [
@@ -845,17 +842,6 @@ export async function inspectRepositoryHistory(
   };
 }
 
-export function isMatureRepository(profile, now = Date.now()) {
-  if (profile.total_commits >= DEFAULT_MATURE_PROJECT_COMMITS) {
-    return true;
-  }
-  if (!profile.oldest_commit_at) return false;
-  const oldest = Date.parse(profile.oldest_commit_at);
-  if (!Number.isFinite(oldest)) return false;
-  const ageDays = (now - oldest) / (24 * 60 * 60 * 1_000);
-  return ageDays >= DEFAULT_MATURE_PROJECT_AGE_DAYS;
-}
-
 export function buildProjectBaseline(projectId, profile, snapshot) {
   const changedFiles =
     snapshot.changed_files.length > 0
@@ -882,7 +868,8 @@ export function buildProjectBaseline(projectId, profile, snapshot) {
 Project: ${projectId}
 Generated: ${snapshot.captured_at}
 
-This is a machine-generated onboarding snapshot for an established repository.
+This is a machine-generated onboarding snapshot of the repository at the
+moment Noosphere was first activated.
 It is evidence, not a substitute for the current files, tests, or maintainer
 knowledge. Future agents must verify historical claims before relying on them.
 
@@ -1780,7 +1767,7 @@ next recommended action.
 ## Universal interfaces
 
 - File context: \`.noosphere/context.md\`
-- Established-project baseline: \`.noosphere/baseline.md\`
+- Initial project baseline: \`.noosphere/baseline.md\`
 - Master prompt: \`.noosphere/master-prompt.md\`
 - Ordered follow-ups: \`.noosphere/followups.jsonl\`
 - Work journal: \`.noosphere/journal.md\`
@@ -2136,7 +2123,7 @@ Master prompt examples:
   cat plan.md | noosphere master-prompt
   noosphere master-prompt --replace --content "Updated project plan..."
 
-Established-project baseline examples:
+Project baseline examples:
   noosphere baseline
   noosphere baseline --commits 100 --force
 `);

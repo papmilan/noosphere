@@ -52,7 +52,7 @@ In one sentence:
 
 1. You install Noosphere once for your user account.
 2. Entering or registering a Git repository gives it a stable project ID.
-3. An established repository receives one bounded Git-history baseline.
+3. The repository receives one bounded starting baseline.
 4. A background watcher observes settled working-tree changes.
 5. Noosphere stores metadata-only checkpoints after the workspace is quiet.
 6. Agents store explicit decisions, findings, and handoffs when they matter.
@@ -97,7 +97,7 @@ Agents and developers can store:
 Automatic checkpoints preserve observable workspace state. Explicit memories
 preserve intent and conclusions that cannot be inferred from files alone.
 
-## Use Noosphere with an older project
+## Use Noosphere with an existing project
 
 Noosphere does not require a new or empty repository. You can add it to a
 project that has been running for months:
@@ -107,10 +107,11 @@ cd /path/to/existing-project
 noosphere activate
 ```
 
-On the first activation, Noosphere recognizes an established repository when
-it has at least 10 commits or its oldest commit is at least 30 days old. Before
-the normal watcher begins recording new changes, Noosphere prepares and stores
-one project baseline.
+On the first activation, every Git repository receives one project baseline.
+There is no minimum age or commit count. A repository with one commit, five
+commits, or hundreds of commits follows the same rule. Before the normal
+watcher begins recording new changes, Noosphere prepares and stores this
+starting point.
 
 The baseline gives a new agent an initial map of the existing work:
 
@@ -391,9 +392,9 @@ For projects opened only through a GUI IDE, use the Projects section at
 Noosphere does not scan the entire computer. Repositories are registered
 explicitly or through the shell hook. Add `.noosphere-ignore` to opt out.
 
-This command is the same for a new repository and an older one. Established
-projects automatically receive the bounded baseline described in
-[Use Noosphere with an older project](#use-noosphere-with-an-older-project).
+This command is the same for a new repository and an older one. Every project
+automatically receives the bounded baseline described in
+[Use Noosphere with an existing project](#use-noosphere-with-an-existing-project).
 
 ## Everyday workflow
 
@@ -641,7 +642,7 @@ require bearer authentication and explicit CORS origins.
   chronological audit log.
 - Automatic checkpoints preserve observable Git state, not every unspoken
   decision made inside an agent session.
-- Established-project onboarding cannot reconstruct old chats or undocumented
+- Initial project onboarding cannot reconstruct old chats or undocumented
   decisions. It creates a bounded Git-derived starting point.
 - Forgetting a project removes local registration but does not delete its
   existing Walrus memories.
