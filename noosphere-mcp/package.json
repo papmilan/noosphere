@@ -1,8 +1,7 @@
 {
   "name": "noosphere-continuity",
   "version": "2.1.0",
-  "private": true,
-  "description": "Automatic cross-agent continuity backed by Walrus Memory",
+  "description": "Cross-agent project memory backed by Walrus Memory on Sui",
   "type": "module",
   "bin": {
     "noosphere": "continuity/index.js"
@@ -19,6 +18,31 @@
     "check": "node --check continuity/index.js && node --check continuity/ollama.js && node --check continuity/credentials-cli.js && node --check lifecycle/credentials.js && node --check lifecycle/registry.js && node --check lifecycle/manager.js && node --check lifecycle/install.js && node --test tests/*.test.js",
     "test": "node --test tests/*.test.js"
   },
+  "files": [
+    "continuity/",
+    "hooks/",
+    "lifecycle/",
+    "mcp-server/",
+    "tests/"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "memory",
+    "walrus",
+    "sui",
+    "continuity",
+    "codex",
+    "claude",
+    "cursor",
+    "mcp"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/papmilan/noosphere.git"
+  },
+  "homepage": "https://github.com/papmilan/noosphere#readme",
   "engines": {
     "node": ">=22"
   }

@@ -23,15 +23,75 @@ export async function runSetupWizard({
   validator = validateCredentials,
   smokeTest = runSmokeTest,
 } = {}) {
-  console.log('--- Noosphere Setup ---');
+  console.log('');
+  console.log('╔══════════════════════════════════════════════════════════╗');
+  console.log('║              Noosphere — First-Time Setup                ║');
+  console.log('╚══════════════════════════════════════════════════════════╝');
+  console.log('');
+  console.log('Noosphere stores your project memory in Walrus Memory,');
+  console.log('a decentralized storage network built on Sui blockchain.');
+  console.log('');
+  console.log('You need two things:');
+  console.log('  1. A Walrus Memory account ID   (starts with 0x)');
+  console.log('  2. A delegate private key       (Sui keypair, hex or base64)');
+  console.log('');
+
+  const hasAccount =
+    readFlag('--account-id') ||
+    process.argv.includes('--yes') ||
+    (await prompt('Do you already have a Walrus Memory account? [y/N]: ')).toLowerCase() === 'y';
+
+  if (!hasAccount) {
+    console.log('');
+    console.log('────────────────────────────────────────────────────────────');
+    console.log('  How to create a Walrus Memory account (5–10 min)');
+    console.log('────────────────────────────────────────────────────────────');
+    console.log('');
+    console.log('  Step 1 — Get a Sui wallet');
+    console.log('    Browser extension: https://slush.app  or  https://suiwallet.com');
+    console.log('    CLI:  curl https://install.mystenlabs.com/sui | sh');
+    console.log('');
+    console.log('  Step 2 — Fund it with SUI (for gas fees, ~0.1 SUI is plenty)');
+    console.log('    Mainnet: buy SUI on any exchange (Binance, Coinbase, Kraken…)');
+    console.log('    Testnet: run  sui client faucet  (free test tokens)');
+    console.log('');
+    console.log('  Step 3 — Create your Walrus Memory account');
+    console.log('    Docs: https://docs.wal.app/walrus-memory/getting-started/');
+    console.log('    The docs walk you through creating the account object on Sui');
+    console.log('    and generating + registering your delegate keypair.');
+    console.log('');
+    console.log('  Step 4 — Come back here with:');
+    console.log('    • Your account object ID  (0x followed by 64 hex characters)');
+    console.log('    • Your delegate private key  (hex or base64 Sui keypair)');
+    console.log('');
+    console.log('────────────────────────────────────────────────────────────');
+    console.log('');
+    await prompt('Press Enter when you have your account ID and delegate key…');
+    console.log('');
+  }
 
   const accountId =
     readFlag('--account-id') ||
-    await prompt('Walrus Memory account ID: ');
+    await prompt('Walrus Memory account ID (0x…): ');
+
+  if (!/^0x[0-9a-fA-F]{64}$/.test(accountId.trim())) {
+    console.warn('');
+    console.warn('  Note: account ID should be 0x followed by 64 hex characters.');
+    console.warn('  Continuing anyway — validation will catch any errors.');
+    console.warn('');
+  }
+
   const network =
     (readFlag('--network') ||
       await prompt('Network [mainnet/testnet] (mainnet): ') ||
       'mainnet').toLowerCase();
+
+  if (network !== 'mainnet' && network !== 'testnet') {
+    throw new Error(`Unknown network "${network}". Use mainnet or testnet.`);
+  }
+
+  console.log('');
+  console.log('Enter your delegate private key (input is hidden):');
   const privateKey = await readPrivateKey();
   const credentials = normalizeCredentials({
     MEMWAL_ACCOUNT_ID: accountId,
@@ -39,8 +99,29 @@ export async function runSetupWizard({
     MEMWAL_NETWORK: network,
   });
 
-  console.log(`Validating account and delegate on Sui ${network}...`);
-  await validator(credentials);
+  console.log('');
+  console.log(`Validating account and delegate on Sui ${network}…`);
+  try {
+    await validator(credentials);
+    console.log('  ✓ Account exists on-chain');
+    console.log('  ✓ Delegate key is registered');
+  } catch (error) {
+    console.error('');
+    console.error('  Validation failed:', error.message);
+    console.error('');
+    if (error.message?.includes('not found') || error.message?.includes('does not exist')) {
+      console.error('  The account ID was not found on', network + '.');
+      if (network === 'mainnet') {
+        console.error('  If your account is on testnet, re-run with: noosphere setup --network testnet');
+      } else {
+        console.error('  If your account is on mainnet, re-run with: noosphere setup --network mainnet');
+      }
+    } else if (error.message?.includes('delegate') || error.message?.includes('key')) {
+      console.error('  The delegate key does not match the registered delegate for this account.');
+      console.error('  Check that you copied the correct private key from your Walrus Memory setup.');
+    }
+    throw error;
+  }
 
   const storage = store.setPassword(JSON.stringify(credentials));
   const verified = store.getPassword();
@@ -48,19 +129,33 @@ export async function runSetupWizard({
     throw new Error('Credential verification failed after secure storage');
   }
 
-  console.log(`Credentials stored using ${storage.backend}.`);
+  console.log(`  ✓ Credentials stored (${storage.backend})`);
   if (!storage.encryptedAtRest) {
-    console.warn(
-      `Warning: native keychain unavailable. Credentials are stored in an ` +
-      `owner-only 0600 file at ${store.fallbackPath}.`,
-    );
+    console.warn('');
+    console.warn('  Warning: native keychain unavailable.');
+    console.warn(`  Credentials stored in owner-only 0600 file: ${store.fallbackPath}`);
   }
 
   if (await shouldRunSmokeTest()) {
+    console.log('');
+    console.log('Running live Walrus store/recall test…');
     await smokeTest(credentials);
-    console.log('Store/recall smoke test passed.');
+    console.log('  ✓ Store/recall smoke test passed');
   }
-  console.log('Setup complete. Restart Noosphere services to use new credentials.');
+
+  console.log('');
+  console.log('╔══════════════════════════════════════════════════════════╗');
+  console.log('║  Setup complete!                                         ║');
+  console.log('║                                                          ║');
+  console.log('║  Run  noosphere doctor       to verify your install      ║');
+  console.log('║  Run  noosphere credentials status  to check any time   ║');
+  console.log('╚══════════════════════════════════════════════════════════╝');
+  console.log('');
+  console.log('Restart Noosphere services to use the new credentials:');
+  console.log('  macOS:   launchctl kickstart -k gui/$UID/xyz.noosphere.relayer');
+  console.log('  Linux:   systemctl --user restart xyz.noosphere.relayer');
+  console.log('  Windows: schtasks /End /TN "\\Noosphere\\Relayer" && schtasks /Run /TN "\\Noosphere\\Relayer"');
+  console.log('');
 }
 
 export async function runCredentialsCommand(

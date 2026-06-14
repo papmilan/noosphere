@@ -1,8 +1,7 @@
 {
   "name": "noosphere-relayer",
   "version": "2.0.0",
-  "private": true,
-  "description": "Persistent shared project memory for AI agents built on Walrus Memory",
+  "description": "Walrus Memory relay server for Noosphere cross-agent project memory",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -13,6 +12,33 @@
     "test:live": "node scripts/live-walrus-smoke.js",
     "check": "node --check index.js && node --check memory.js && node --check walrus-memory.js && node --check durable-store.js && node --check security.js && node --check credentials.js && node --check local-projects.js && node --check public/app.js"
   },
+  "files": [
+    "credentials.js",
+    "durable-store.js",
+    "index.js",
+    "local-projects.js",
+    "memory.js",
+    "security.js",
+    "walrus-memory.js",
+    "public/",
+    "scoring-policy/",
+    "scripts/"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "memory",
+    "walrus",
+    "sui",
+    "noosphere",
+    "relay"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/papmilan/noosphere.git"
+  },
+  "homepage": "https://github.com/papmilan/noosphere#readme",
   "engines": {
     "node": ">=22"
   },
