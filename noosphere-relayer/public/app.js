@@ -14,6 +14,9 @@ const projectButton = document.querySelector('#project-button');
 const projectResult = document.querySelector('#project-result');
 const projectList = document.querySelector('#project-list');
 const credentialStatus = document.querySelector('#credential-status');
+const setupForm = document.querySelector('#setup-form');
+const setupButton = document.querySelector('#setup-button');
+const setupResult = document.querySelector('#setup-result');
 
 void initialize();
 
@@ -112,10 +115,63 @@ projectForm.addEventListener('submit', async (event) => {
   }
 });
 
+setupForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  setBusy(setupButton, true, 'Saving...');
+  setupResult.replaceChildren();
+
+  const formData = new FormData(setupForm);
+  const payload = {
+    account_id: String(formData.get('account_id') || '').trim(),
+    private_key: String(formData.get('private_key') || '').trim(),
+    network: String(formData.get('network') || 'mainnet').trim(),
+    smoke_test: formData.get('smoke_test') === 'on',
+  };
+
+  try {
+    const response = await fetch('/v1/local/credentials/setup', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.error || 'Credential setup failed');
+    }
+
+    const summary = document.createElement('p');
+    summary.className = 'success';
+    summary.textContent =
+      `Credentials saved in ${result.backend} for ${result.network}. ` +
+      'The relayer has reloaded the new account.';
+
+    if (result.smoke?.blob_id) {
+      const smoke = document.createElement('small');
+      smoke.textContent =
+        `Smoke test passed: blob ${result.smoke.blob_id} in ${result.smoke.namespace}`;
+      setupResult.replaceChildren(summary, smoke);
+    } else {
+      setupResult.replaceChildren(summary);
+    }
+
+    setupForm.elements.private_key.value = '';
+    await loadCredentialStatus();
+    await initializeStatus();
+  } catch (error) {
+    renderError(setupResult, error);
+  } finally {
+    setBusy(setupButton, false, 'Save credentials');
+  }
+});
+
 async function initialize() {
   updateIntegration();
   void loadLocalProjects();
   void loadCredentialStatus();
+  await initializeStatus();
+}
+
+async function initializeStatus() {
   try {
     const response = await fetch('/ready');
     const health = await response.json();

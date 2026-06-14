@@ -280,6 +280,55 @@ noosphere credentials status</code></pre>
         </div>
 
         <div class="install-panels">
+          <div class="setup-wizard">
+            <div class="setup-copy">
+              <p class="project-kicker">Browser setup wizard</p>
+              <h3>Connect Walrus Memory without leaving the page</h3>
+              <p>
+                This runs only against your local Noosphere service on
+                <code>127.0.0.1</code>. Your delegate key is written into the
+                OS keychain or Noosphere's owner-only fallback file on this
+                machine, then Noosphere immediately reloads the live relayer.
+              </p>
+            </div>
+            <form id="setup-form" class="setup-form">
+              <label>
+                Walrus Memory account ID
+                <input
+                  name="account_id"
+                  placeholder="0x..."
+                  autocomplete="off"
+                  required
+                />
+              </label>
+              <label>
+                Network
+                <select name="network">
+                  <option value="mainnet">Mainnet</option>
+                  <option value="testnet">Testnet</option>
+                </select>
+              </label>
+              <label class="wide">
+                Delegate private key
+                <input
+                  name="private_key"
+                  type="password"
+                  placeholder="64 hexadecimal characters"
+                  autocomplete="off"
+                  required
+                />
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" name="smoke_test" />
+                <span>Run a live store and recall smoke test after saving</span>
+              </label>
+              <button class="primary" id="setup-button" type="submit">
+                Save credentials
+              </button>
+              <output id="setup-result" class="project-result"></output>
+            </form>
+          </div>
+
           <div class="install-panel" data-os="mac">
             <div class="install-step">
               <span class="step-num">1</span>
@@ -368,8 +417,8 @@ noosphere credentials status</code></pre>
         <div class="install-footer">
           <a class="primary" href="/install.sh" download="noosphere-install.sh">Download install.sh</a>
           <p class="install-note">
-            Credentials are stored in the OS keychain — not sent to any server.
-            The relayer and watcher start automatically at login after install.
+            The web wizard talks only to your local Noosphere service. The relayer
+            and watcher start automatically at login after install.
           </p>
         </div>
       </section>

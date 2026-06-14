@@ -618,6 +618,85 @@ pre {
   border-bottom: 1px solid #101010;
 }
 
+.setup-wizard {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 40px;
+  padding: 36px 40px;
+  border-bottom: 1px solid #101010;
+  background: linear-gradient(135deg, #eef3ff 0%, #ffffff 55%);
+}
+
+.setup-copy h3 {
+  max-width: 520px;
+  margin: 0;
+  font-size: clamp(26px, 3vw, 42px);
+  line-height: 0.98;
+  letter-spacing: -0.04em;
+}
+
+.setup-copy p {
+  max-width: 620px;
+  margin: 18px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.setup-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px 28px;
+  align-content: start;
+}
+
+.setup-form .wide {
+  grid-column: 1 / -1;
+}
+
+.checkbox-row {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.checkbox-row input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  box-shadow: none;
+}
+
+.setup-form .primary {
+  margin-top: 0;
+  width: fit-content;
+}
+
+.setup-form .project-result {
+  grid-column: 1 / -1;
+  margin-top: 0;
+}
+
+.setup-form .project-result .success {
+  color: #101010;
+}
+
+.setup-form .project-result .error {
+  color: #e4002b;
+}
+
+.setup-form .project-result small {
+  display: block;
+  margin-top: 10px;
+  color: var(--muted);
+  font-family: "Courier New", Courier, monospace;
+  overflow-wrap: anywhere;
+}
+
 .install-panel {
   padding: 0 40px;
 }
@@ -759,6 +838,11 @@ pre {
     gap: 20px;
   }
 
+  .setup-wizard {
+    grid-template-columns: 1fr;
+    padding: 28px 24px;
+  }
+
   .section-heading > span {
     display: block;
     margin-bottom: 28px;
@@ -767,7 +851,8 @@ pre {
   .memory-list,
   .continuity-flow,
   .connect-grid,
-  .project-control {
+  .project-control,
+  .setup-form {
     grid-template-columns: 1fr;
   }
 }

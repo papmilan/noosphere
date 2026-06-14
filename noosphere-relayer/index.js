@@ -31,6 +31,11 @@ import {
   securityHeaders,
 } from './security.js';
 import { CredentialStore } from './credentials.js';
+import {
+  resolveWalrusConfig,
+  validateOnChainAccount,
+  WalrusMemoryAdapter,
+} from './walrus-memory.js';
 
 export const app = express();
 app.disable('x-powered-by');
@@ -82,6 +87,13 @@ let queueRecoveryTimer = null;
 let queuePausedUntil = 0;
 let uploadInProgress = false;
 let lastUploadAttemptMonotonic = 0;
+
+export const localCredentialService = {
+  createStore: () => new CredentialStore('default'),
+  validateCredentials: validateWalrusCredentials,
+  smokeTest: runCredentialSmokeTest,
+  reloadMemoryStore: () => memoryStore.reloadRemoteConfig(),
+};
 
 app.use(securityHeaders);
 app.use(corsMiddleware(securityConfig));
@@ -405,6 +417,46 @@ app.get(
       network:
         status.network || process.env.MEMWAL_NETWORK || 'mainnet',
     });
+  },
+);
+
+app.post(
+  '/v1/local/credentials/setup',
+  localProjectControl(securityConfig),
+  async (req, res, next) => {
+    try {
+      const credentials = validateCredentialSetupBody(req.body);
+      await localCredentialService.validateCredentials(credentials);
+
+      const store = localCredentialService.createStore();
+      const storage = store.setPassword(JSON.stringify(credentials));
+      const verified = store.getPassword();
+      if (verified !== JSON.stringify(credentials)) {
+        throw new Error('Credential verification failed after secure storage');
+      }
+
+      for (const [key, value] of Object.entries(credentials)) {
+        process.env[key] = value;
+      }
+      localCredentialService.reloadMemoryStore();
+
+      let smoke = null;
+      if (req.body?.smoke_test === true) {
+        smoke = await localCredentialService.smokeTest(credentials);
+      }
+
+      res.status(201).json({
+        success: true,
+        configured: true,
+        backend: storage.backend,
+        encrypted_at_rest: storage.encryptedAtRest,
+        account_id: credentials.MEMWAL_ACCOUNT_ID,
+        network: credentials.MEMWAL_NETWORK,
+        smoke,
+      });
+    } catch (error) {
+      next(error);
+    }
   },
 );
 
@@ -838,6 +890,67 @@ function validateAction(body) {
     model: requireOptionalString(body.model),
     client: requireOptionalString(body.client),
     metadata: requireOptionalObject(body.metadata, 'metadata'),
+  };
+}
+
+function validateCredentialSetupBody(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw badRequest('Request body must be a JSON object');
+  }
+
+  const accountId = requireNonEmptyString(body.account_id, 'account_id');
+  const privateKey = requireNonEmptyString(body.private_key, 'private_key');
+  const network =
+    requireOptionalString(body.network)?.toLowerCase() || 'mainnet';
+  if (!/^0x[0-9a-fA-F]{64}$/.test(accountId)) {
+    throw badRequest(
+      'account_id must be a 32-byte Sui object ID beginning with 0x',
+    );
+  }
+  if (network !== 'mainnet' && network !== 'testnet') {
+    throw badRequest('network must be "mainnet" or "testnet"');
+  }
+
+  return {
+    MEMWAL_ACCOUNT_ID: accountId,
+    MEMWAL_PRIVATE_KEY: normalizePrivateKey(privateKey),
+    MEMWAL_NETWORK: network,
+  };
+}
+
+function normalizePrivateKey(value) {
+  const normalized = value.startsWith('0x') ? value.slice(2) : value;
+  if (!/^[0-9a-fA-F]{64}$/.test(normalized)) {
+    throw badRequest(
+      'private_key must be a 64-character hexadecimal Ed25519 key',
+    );
+  }
+  return normalized.toLowerCase();
+}
+
+export async function validateWalrusCredentials(credentials) {
+  const config = resolveWalrusConfig(credentials);
+  await validateOnChainAccount(config);
+  return {
+    valid: true,
+    network: config.network,
+    relayer_url: config.relayerUrl,
+  };
+}
+
+export async function runCredentialSmokeTest(credentials) {
+  const adapter = new WalrusMemoryAdapter(credentials);
+  const marker = `NOOSPHERE_SETUP_SMOKE_${randomUUID()}`;
+  const namespace = `noosphere-setup-smoke-${randomUUID().slice(0, 8)}`;
+  const stored = await adapter.remember(marker, namespace);
+  const recalled = await adapter.recall(marker, 1, namespace);
+  const matched = recalled.results?.some((result) => result.text.includes(marker));
+  if (!matched) {
+    throw new Error('Smoke test stored a record but could not recall it');
+  }
+  return {
+    namespace,
+    blob_id: stored.blob_id,
   };
 }
 

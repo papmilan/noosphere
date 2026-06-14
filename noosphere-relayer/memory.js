@@ -83,6 +83,11 @@ export class MemoryStore {
     await this.persistDemoMemories();
   }
 
+  reloadRemoteConfig() {
+    if (this.mode === 'demo') return;
+    this.walrus = new WalrusMemoryAdapter();
+  }
+
   async loadDemo() {
     if (this.demoLoaded) return;
     this.demoLoaded = true;

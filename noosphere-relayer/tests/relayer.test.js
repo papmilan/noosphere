@@ -12,10 +12,13 @@ process.env.NODE_ENV = 'test';
 const {
   app,
   isRateLimited,
+  localCredentialService,
   parseTrustProxy,
   prioritizePendingJobs,
   retryDelayFor,
   runtimeStore,
+  runCredentialSmokeTest,
+  validateWalrusCredentials,
 } =
   await import('../index.js');
 const { MemoryStore, memoryStore, parseMemory, serializeMemory } =
@@ -102,6 +105,75 @@ describe('Noosphere memory API', () => {
           MEMWAL_ACCOUNT_ID: '1234',
         }),
       /Sui object ID/,
+    );
+  });
+
+  it('normalizes and securely stores credentials from the local setup wizard', async () => {
+    const originalService = { ...localCredentialService };
+    const storedPayloads = [];
+    let reloaded = false;
+    localCredentialService.createStore = () => ({
+      setPassword(payload) {
+        storedPayloads.push(payload);
+        this.payload = payload;
+        return { backend: 'test-keychain', encryptedAtRest: true };
+      },
+      getPassword() {
+        return this.payload;
+      },
+    });
+    localCredentialService.validateCredentials = async (credentials) => {
+      assert.equal(credentials.MEMWAL_NETWORK, 'testnet');
+    };
+    localCredentialService.smokeTest = async (credentials) => ({
+      blob_id: 'blob-setup',
+      namespace: `noosphere-${credentials.MEMWAL_NETWORK}`,
+    });
+    localCredentialService.reloadMemoryStore = () => {
+      reloaded = true;
+    };
+
+    try {
+      const response = await fetch(`${baseUrl}/v1/local/credentials/setup`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          account_id: `0x${'1'.repeat(64)}`,
+          private_key: `0x${'a'.repeat(64)}`,
+          network: 'testnet',
+          smoke_test: true,
+        }),
+      });
+      const result = await response.json();
+      assert.equal(response.status, 201);
+      assert.equal(result.backend, 'test-keychain');
+      assert.equal(result.network, 'testnet');
+      assert.equal(result.smoke.blob_id, 'blob-setup');
+      assert.deepEqual(JSON.parse(storedPayloads[0]), {
+        MEMWAL_ACCOUNT_ID: `0x${'1'.repeat(64)}`,
+        MEMWAL_PRIVATE_KEY: 'a'.repeat(64),
+        MEMWAL_NETWORK: 'testnet',
+      });
+      assert.equal(reloaded, true);
+    } finally {
+      Object.assign(localCredentialService, originalService);
+    }
+  });
+
+  it('rejects invalid setup-wizard credentials before secure storage', async () => {
+    const response = await fetch(`${baseUrl}/v1/local/credentials/setup`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        account_id: `0x${'1'.repeat(64)}`,
+        private_key: 'bad-key',
+      }),
+    });
+    const result = await response.json();
+    assert.equal(response.status, 400);
+    assert.match(
+      result.error,
+      /private_key must be a 64-character hexadecimal Ed25519 key/,
     );
   });
 
@@ -516,6 +588,36 @@ describe('Noosphere memory API', () => {
     assert.equal(openApi.info.version, '2.0.0');
     assert.ok(openApi.paths['/v1/projects/{project_id}/recall']);
     assert.ok(openApi.paths['/v1/projects/{project_id}/bootstrap']);
+  });
+
+  it('runs the setup smoke test against the Walrus adapter contract', async () => {
+    const credentials = {
+      MEMWAL_ACCOUNT_ID: `0x${'1'.repeat(64)}`,
+      MEMWAL_PRIVATE_KEY: 'a'.repeat(64),
+      MEMWAL_NETWORK: 'testnet',
+    };
+    const originalRemember = memoryStore.walrus.remember;
+    const originalRecall = memoryStore.walrus.recall;
+    const adapterPrototype = Object.getPrototypeOf(memoryStore.walrus);
+    const remembered = [];
+    adapterPrototype.remember = async (text, namespace) => {
+      remembered.push({ text, namespace });
+      return { blob_id: 'blob-1' };
+    };
+    adapterPrototype.recall = async (query, _limit, namespace) => ({
+      results: [{ blob_id: 'blob-1', text: query, namespace }],
+      total: 1,
+    });
+
+    try {
+      const smoke = await runCredentialSmokeTest(credentials);
+      assert.equal(smoke.blob_id, 'blob-1');
+      assert.match(smoke.namespace, /noosphere-setup-smoke-/);
+      assert.match(remembered[0].text, /NOOSPHERE_SETUP_SMOKE_/);
+    } finally {
+      adapterPrototype.remember = originalRemember;
+      adapterPrototype.recall = originalRecall;
+    }
   });
 
   it('accepts a rate-limited write into the durable queue without duplication', async () => {
