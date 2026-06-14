@@ -347,7 +347,7 @@ describe('Noosphere continuity CLI', () => {
     assert.equal(keys[0], keys[1]);
   });
 
-  it('keeps local-only journal edits out of automatic Walrus checkpoints', async () => {
+  it('shares journal entries to Walrus but does not trigger an extra watcher checkpoint', async () => {
     const child = spawn(process.execPath, [cli, 'watch'], {
       cwd: projectDir,
       env: {
@@ -372,10 +372,14 @@ describe('Noosphere continuity CLI', () => {
         'journal',
         '--agent',
         'local-only',
-        'This note must remain local.',
+        'This note is shared to Walrus by default.',
       ]);
       await delay(1_000);
-      assert.equal(storedActions.length, startingCount);
+      // Exactly one action: the journal share itself. The watcher must not
+      // trigger an additional checkpoint because .noosphere/ edits are excluded
+      // from the workspace fingerprint.
+      assert.equal(storedActions.length, startingCount + 1);
+      assert.equal(storedActions.at(-1)?.action_type, 'note');
     } finally {
       child.kill('SIGTERM');
       await new Promise((resolve) => child.once('close', resolve));

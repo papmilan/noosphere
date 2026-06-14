@@ -562,7 +562,10 @@ const recallRouteHandler = async (req, res, next) => {
     const limit = parseLimit(
       req.method === 'GET' ? req.query.limit : req.body?.limit,
     );
-    const recalled = await recallProject(projectId, query, limit);
+    const actionType = requireOptionalString(
+      req.method === 'GET' ? req.query.action_type : req.body?.action_type,
+    );
+    const recalled = await recallProject(projectId, query, limit, actionType);
 
     res.json({
       success: true,
@@ -668,7 +671,7 @@ if (process.env.NODE_ENV !== 'test') {
   installShutdownHandlers();
 }
 
-async function recallProject(projectId, query, limit) {
+async function recallProject(projectId, query, limit, actionType) {
   const result = await memoryStore.recall(projectId, query, limit);
   return result.results
     .map((memory) => {
@@ -688,6 +691,7 @@ async function recallProject(projectId, query, limit) {
         distance: memory.distance,
       };
     })
+    .filter((record) => !actionType || record.action_type === actionType)
     .sort(
       (a, b) =>
         (a.distance ?? 1) - (b.distance ?? 1) ||

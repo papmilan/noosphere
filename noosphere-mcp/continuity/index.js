@@ -140,6 +140,9 @@ try {
       await forgetProject(process.argv[3]);
       console.log(`Forgot project ${process.argv[3]}`);
       break;
+    case 'restore':
+      await restoreFromWalrus(projectDir);
+      break;
     case 'setup':
       await runSetupWizard();
       break;
@@ -176,7 +179,7 @@ export async function initializeProject(root, options = {}) {
       checkpoint_content:
         existing?.privacy?.checkpoint_content || 'metadata-only',
       include_diff: existing?.privacy?.include_diff === true,
-      share_journal: existing?.privacy?.share_journal === true,
+      share_journal: existing?.privacy?.share_journal !== false,
       capture_master_prompt:
         existing?.privacy?.capture_master_prompt !== false,
     },
@@ -231,11 +234,20 @@ export async function activateProject(start, { quiet = false } = {}) {
     return { skipped: true, reason: 'ignored', root };
   }
 
-  if (!(await projectConfigExists(root))) {
+  const isNew = !(await projectConfigExists(root));
+  if (isNew) {
     await initializeProject(root);
   }
   const config = await loadConfig(root);
   await registerProject(root, config.project_id);
+
+  const contextFile = path.join(root, '.noosphere', 'context.md');
+  const contextContent = await readFile(contextFile, 'utf8').catch(() => '');
+  const contextIsEmpty = !contextContent.trim() || contextContent.includes('No onboarding baseline');
+  if (isNew || contextIsEmpty) {
+    await refreshContext(root).catch(() => {});
+  }
+
   if (!quiet) {
     console.log(`Noosphere active: ${config.project_id} (${root})`);
   }
@@ -630,7 +642,9 @@ export async function checkpointProject(root, { force = false } = {}) {
   const state = (await readJson(statePath)) || {};
   const fingerprint = checkpointFingerprint(snapshot);
 
-  if (!force && state.last_checkpoint_fingerprint === fingerprint) {
+  if (!force
+      && state.last_checkpoint_fingerprint === fingerprint
+      && !state.pending_checkpoint_fingerprint) {
     return { skipped: true };
   }
 
@@ -666,7 +680,12 @@ export async function checkpointProject(root, { force = false } = {}) {
 
   await writeJson(statePath, {
     ...state,
-    last_checkpoint_fingerprint: fingerprint,
+    ...(response.pending
+      ? { pending_checkpoint_fingerprint: fingerprint }
+      : {
+          last_checkpoint_fingerprint: fingerprint,
+          pending_checkpoint_fingerprint: null,
+        }),
     last_checkpoint_at: new Date().toISOString(),
     last_blob_id: response.blob_id || state.last_blob_id || null,
     last_checkpoint_pending: response.pending === true,
@@ -696,12 +715,23 @@ export async function refreshContext(root, options = {}) {
       config.project_id,
     )}/context?format=text&limit=50&q=${query}`,
   );
-  const baseline = await readFile(
+  let baseline = await readFile(
     path.join(root, '.noosphere', 'baseline.md'),
     'utf8',
   ).catch(() => '');
-  const masterPrompt = await readMasterPrompt(root);
-  const followups = await readFollowupPrompts(root);
+  let masterPrompt = await readMasterPrompt(root);
+  let followups = await readFollowupPrompts(root);
+
+  if (!baseline || !masterPrompt || followups.length === 0) {
+    const walrusRestore = await recallTypedMemories(config, {
+      baseline: !baseline,
+      masterPrompt: !masterPrompt,
+      followups: followups.length === 0,
+    });
+    if (!baseline && walrusRestore.baseline) baseline = walrusRestore.baseline;
+    if (!masterPrompt && walrusRestore.masterPrompt) masterPrompt = walrusRestore.masterPrompt;
+    if (followups.length === 0 && walrusRestore.followups.length > 0) followups = walrusRestore.followups;
+  }
   const output = [
     '# Noosphere shared context',
     '',
@@ -750,6 +780,49 @@ export async function refreshContext(root, options = {}) {
   ].join('\n');
   await atomicWrite(path.join(root, '.noosphere', 'context.md'), output);
   return output;
+}
+
+async function recallTypedMemories(config, { baseline, masterPrompt, followups }) {
+  const result = { baseline: '', masterPrompt: '', followups: [] };
+  const projectId = encodeURIComponent(config.project_id);
+  const base = `${config.relayer_url}/v1/projects/${projectId}/recall`;
+
+  async function fetchByType(query, actionType, limit = 1) {
+    try {
+      return await requestJson(base, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ query, limit, action_type: actionType }),
+      });
+    } catch {
+      return { memories: [] };
+    }
+  }
+
+  const [baselineRes, masterPromptRes, followupsRes] = await Promise.all([
+    baseline ? fetchByType('project baseline git history', 'project-baseline') : null,
+    masterPrompt ? fetchByType('master prompt original project instruction', 'master-prompt') : null,
+    followups ? fetchByType('follow-up user instructions', 'user-followup', 50) : null,
+  ]);
+
+  if (baselineRes?.memories?.length > 0) {
+    result.baseline = baselineRes.memories[0].content || '';
+  }
+  if (masterPromptRes?.memories?.length > 0) {
+    result.masterPrompt = masterPromptRes.memories[0].content || '';
+  }
+  if (followupsRes?.memories?.length > 0) {
+    result.followups = followupsRes.memories
+      .map((m) => ({
+        timestamp: m.timestamp || new Date().toISOString(),
+        source: m.agent_id || 'walrus-restore',
+        agent_id: m.agent_id || 'walrus-restore',
+        hash: m.action_id || '',
+        content: m.content || '',
+      }))
+      .sort((a, b) => (a.timestamp > b.timestamp ? 1 : -1));
+  }
+  return result;
 }
 
 export async function buildWorkspaceSnapshot(root, config) {
@@ -975,6 +1048,9 @@ for tools that recognize this filename.
 1. Before working, read \`.noosphere/baseline.md\` if present,
    \`.noosphere/master-prompt.md\`, \`.noosphere/followups.jsonl\`,
    \`.noosphere/context.md\`, and \`.noosphere/journal.md\`.
+   If \`.noosphere/context.md\` is absent or empty, run \`noosphere context\`
+   (or \`GET /v1/projects/${sanitizeProjectId(projectId)}/bootstrap\`) to
+   reconstruct it from Walrus before proceeding.
 2. Treat the master prompt as pinned project intent. Preserve unfinished
    phases and constraints unless the user explicitly changes them.
 3. Inspect the working tree because another tool may have changed it.
@@ -1144,7 +1220,7 @@ async function loadConfig(root) {
       checkpoint_content:
         config.privacy?.checkpoint_content || 'metadata-only',
       include_diff: config.privacy?.include_diff === true,
-      share_journal: config.privacy?.share_journal === true,
+      share_journal: config.privacy?.share_journal !== false,
       capture_master_prompt:
         config.privacy?.capture_master_prompt !== false,
     },
@@ -1303,6 +1379,67 @@ async function masterPromptFromCli(root) {
       'project-owner',
   });
   printMasterPromptResult(result);
+}
+
+async function restoreFromWalrus(root) {
+  const config = await loadConfig(root);
+  console.log(`Restoring project state from Walrus for ${config.project_id}...`);
+
+  const recalled = await recallTypedMemories(config, {
+    baseline: true,
+    masterPrompt: true,
+    followups: true,
+  });
+
+  let restored = 0;
+
+  if (recalled.baseline) {
+    const existing = await readFile(
+      path.join(root, '.noosphere', 'baseline.md'), 'utf8',
+    ).catch(() => '');
+    if (!existing.trim()) {
+      await atomicWrite(path.join(root, '.noosphere', 'baseline.md'), recalled.baseline);
+      console.log('  baseline.md restored from Walrus');
+      restored++;
+    } else {
+      console.log('  baseline.md already present, skipped');
+    }
+  }
+
+  if (recalled.masterPrompt) {
+    const existing = await readMasterPrompt(root);
+    if (!existing) {
+      await atomicWrite(
+        path.join(root, '.noosphere', 'master-prompt.md'),
+        recalled.masterPrompt,
+      );
+      console.log('  master-prompt.md restored from Walrus');
+      restored++;
+    } else {
+      console.log('  master-prompt.md already present, skipped');
+    }
+  }
+
+  if (recalled.followups.length > 0) {
+    const existing = await readFollowupPrompts(root);
+    if (existing.length === 0) {
+      const lines = recalled.followups.map((f) => JSON.stringify(f)).join('\n');
+      await atomicWrite(
+        path.join(root, '.noosphere', 'followups.jsonl'),
+        `${lines}\n`,
+      );
+      console.log(`  followups.jsonl restored (${recalled.followups.length} entries) from Walrus`);
+      restored++;
+    } else {
+      console.log('  followups.jsonl already present, skipped');
+    }
+  }
+
+  await refreshContext(root).catch((err) => {
+    console.warn(`  context.md refresh failed: ${err.message}`);
+  });
+  console.log(`  context.md refreshed from Walrus`);
+  console.log(`Restore complete. ${restored} file(s) written.`);
 }
 
 async function capturePromptFromCli(root) {
