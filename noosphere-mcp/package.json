@@ -22,8 +22,7 @@
     "continuity/",
     "hooks/",
     "lifecycle/",
-    "mcp-server/",
-    "tests/"
+    "mcp-server/"
   ],
   "keywords": [
     "ai",
@@ -40,9 +39,17 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/papmilan/noosphere.git"
+    "url": "git+https://github.com/papmilan/noosphere.git"
   },
   "homepage": "https://github.com/papmilan/noosphere#readme",
+  "peerDependencies": {
+    "noosphere-relayer": "2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "noosphere-relayer": {
+      "optional": true
+    }
+  },
   "engines": {
     "node": ">=22"
   }

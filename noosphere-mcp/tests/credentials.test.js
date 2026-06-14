@@ -9,7 +9,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
-import { migrateEnvironmentFile } from '../continuity/credentials-cli.js';
+import {
+  migrateEnvironmentFile,
+  runSetupWizard,
+} from '../continuity/credentials-cli.js';
 import {
   CredentialStore,
   loadCredentialsIntoEnv,
@@ -132,5 +135,92 @@ describe('credential storage', () => {
     assert.doesNotMatch(scrubbed, /MEMWAL_PRIVATE_KEY/);
     assert.doesNotMatch(scrubbed, /MEMWAL_ACCOUNT_ID/);
     assert.equal(JSON.parse(store.getPassword()).MEMWAL_NETWORK, 'testnet');
+  });
+
+  it('runs setup noninteractively with a validated hexadecimal key', async () => {
+    let storedPayload = null;
+    let validatedCredentials = null;
+    let smokeTestCalled = false;
+    const output = [];
+    const originalLog = console.log;
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.log = (...values) => output.push(values.join(' '));
+    console.warn = (...values) => output.push(values.join(' '));
+    console.error = (...values) => output.push(values.join(' '));
+
+    try {
+      await runSetupWizard({
+        args: [
+          'node',
+          'noosphere',
+          '--account-id',
+          `0x${'b'.repeat(64)}`,
+          '--network',
+          'testnet',
+          '--no-smoke-test',
+        ],
+        store: {
+          fallbackPath: '/unused',
+          setPassword(payload) {
+            storedPayload = payload;
+            return { backend: 'test-keychain', encryptedAtRest: true };
+          },
+          getPassword() {
+            return storedPayload;
+          },
+        },
+        promptUser: async () => {
+          assert.fail('Flag-driven setup must not prompt for account details');
+        },
+        privateKeyReader: async () => `0x${'a'.repeat(64)}`,
+        validator: async (credentials) => {
+          validatedCredentials = credentials;
+          return { valid: true };
+        },
+        smokeTest: async () => {
+          smokeTestCalled = true;
+        },
+        smokeTestDecision: async () => false,
+      });
+    } finally {
+      console.log = originalLog;
+      console.warn = originalWarn;
+      console.error = originalError;
+    }
+
+    assert.deepEqual(validatedCredentials, {
+      MEMWAL_ACCOUNT_ID: `0x${'b'.repeat(64)}`,
+      MEMWAL_PRIVATE_KEY: 'a'.repeat(64),
+      MEMWAL_NETWORK: 'testnet',
+    });
+    assert.deepEqual(JSON.parse(storedPayload), validatedCredentials);
+    assert.equal(smokeTestCalled, false);
+    assert.ok(output.some((line) => line.includes('Setup complete')));
+  });
+
+  it('rejects an unsupported network before reading the private key', async () => {
+    let privateKeyRead = false;
+    await assert.rejects(
+      runSetupWizard({
+        args: [
+          'node',
+          'noosphere',
+          '--account-id',
+          `0x${'b'.repeat(64)}`,
+          '--network',
+          'devnet',
+        ],
+        promptUser: async () => {
+          assert.fail('Flag-driven setup must not prompt for account details');
+        },
+        privateKeyReader: async () => {
+          privateKeyRead = true;
+          return 'a'.repeat(64);
+        },
+      }),
+      /Unknown network "devnet"/,
+    );
+    assert.equal(privateKeyRead, false);
   });
 });

@@ -314,16 +314,25 @@ async function runLifecycleCommand(action) {
     'lifecycle',
     'install.js',
   );
-  const { stdout, stderr } = await execFileAsync(
-    process.execPath,
-    [installer, action],
-    {
-      env: process.env,
-      maxBuffer: 2_000_000,
-    },
-  );
-  if (stdout) process.stdout.write(stdout);
-  if (stderr) process.stderr.write(stderr);
+  try {
+    const { stdout, stderr } = await execFileAsync(
+      process.execPath,
+      [installer, action],
+      {
+        env: process.env,
+        maxBuffer: 2_000_000,
+      },
+    );
+    if (stdout) process.stdout.write(stdout);
+    if (stderr) process.stderr.write(stderr);
+  } catch (error) {
+    if (error.stdout) process.stdout.write(error.stdout);
+    if (error.stderr) process.stderr.write(error.stderr);
+    throw new Error(
+      `${action} reported one or more failed checks`,
+      { cause: error },
+    );
+  }
 }
 
 export async function watchProject(root, options = {}) {

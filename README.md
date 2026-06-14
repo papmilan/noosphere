@@ -336,7 +336,7 @@ does not provide cross-machine Walrus memory.
 ### 2. Connect Walrus Memory
 
 ```sh
-cp noosphere-relayer/.env.example noosphere-relayer/.env
+cp noosphere-relayer/env.example noosphere-relayer/.env
 ```
 
 Create or manage credentials in the
@@ -376,6 +376,13 @@ The installer:
 - starts one project manager that supervises registered repositories.
 
 The lifecycle installer supports macOS, Linux, and Windows.
+
+For macOS or Linux, the public installer performs the same setup and falls
+back to the current GitHub source until the npm packages are published:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/papmilan/noosphere/main/noosphere-relayer/public/install.sh | sh
+```
 
 ### 4. Register a project
 

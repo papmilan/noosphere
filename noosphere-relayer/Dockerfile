@@ -7,7 +7,7 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
-COPY --chown=node:node package.json package-lock.json ./
+COPY --chown=node:node package.json npm-shrinkwrap.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 COPY --chown=node:node index.js memory.js walrus-memory.js ./

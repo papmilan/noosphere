@@ -20,8 +20,9 @@
     "memory.js",
     "security.js",
     "walrus-memory.js",
+    "env.example",
+    "npm-shrinkwrap.json",
     "public/",
-    "scoring-policy/",
     "scripts/"
   ],
   "keywords": [
@@ -36,7 +37,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/papmilan/noosphere.git"
+    "url": "git+https://github.com/papmilan/noosphere.git"
   },
   "homepage": "https://github.com/papmilan/noosphere#readme",
   "engines": {

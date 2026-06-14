@@ -26,7 +26,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: ${{ matrix.package }}/package-lock.json
+          cache-dependency-path: ${{ matrix.package == 'noosphere-mcp' && 'noosphere-mcp/package-lock.json' || 'noosphere-relayer/npm-shrinkwrap.json' }}
 
       - run: npm ci
       - run: npm run check

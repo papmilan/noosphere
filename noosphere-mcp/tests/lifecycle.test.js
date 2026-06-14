@@ -18,6 +18,7 @@ const packageRoot = path.resolve(
   '..',
 );
 const installer = path.join(packageRoot, 'lifecycle', 'install.js');
+const continuityCli = path.join(packageRoot, 'continuity', 'index.js');
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -58,6 +59,26 @@ async function runInstallerOk(action, env) {
     `Installer exited ${result.code}\nSTDERR: ${result.stderr}\nSTDOUT: ${result.stdout}`,
   );
   return result;
+}
+
+async function runContinuity(action, env) {
+  const child = spawn(process.execPath, [continuityCli, action], {
+    env: {
+      ...process.env,
+      ...env,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const stdout = [];
+  const stderr = [];
+  child.stdout.on('data', (chunk) => stdout.push(chunk));
+  child.stderr.on('data', (chunk) => stderr.push(chunk));
+  const code = await new Promise((resolve) => child.once('close', resolve));
+  return {
+    code,
+    stdout: Buffer.concat(stdout).toString(),
+    stderr: Buffer.concat(stderr).toString(),
+  };
 }
 
 /** Create a temp fake home directory. */
@@ -373,6 +394,18 @@ describe('Noosphere Linux lifecycle installer', () => {
       assert.ok('relayer_service' in report);
       assert.ok('manager_service' in report);
       assert.ok('credentials' in report);
+
+      const cliResult = await runContinuity('doctor', {
+        ...baseEnv(fakeHome, noosphereHome),
+        NOOSPHERE_TEST_PLATFORM: 'linux',
+        XDG_CONFIG_HOME: xdgConfig,
+      });
+      assert.equal(cliResult.code, 1);
+      assert.match(cliResult.stdout, /"installed_cli": true/);
+      assert.match(
+        cliResult.stderr,
+        /doctor reported one or more failed checks/,
+      );
     } finally {
       await rm(fakeHome, { recursive: true, force: true });
     }

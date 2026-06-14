@@ -216,48 +216,6 @@ app.get('/openapi.json', (req, res) => {
   res.json(buildOpenApiDocument(getBaseUrl(req)));
 });
 
-app.get('/install.sh', (_req, res) => {
-  const lines = [
-    '#!/bin/sh',
-    '# Noosphere installer',
-    '# Run from the repository root, or set NOOSPHERE_REPO=/path/to/repo',
-    'set -e',
-    '',
-    'REPO="${NOOSPHERE_REPO:-}"',
-    '',
-    'if [ -z "$REPO" ]; then',
-    '  if [ -f "$(pwd)/noosphere-mcp/package.json" ]; then',
-    '    REPO="$(pwd)"',
-    '  else',
-    '    printf "Error: run this script from inside the Noosphere repository, or:\\n" >&2',
-    '    printf "  NOOSPHERE_REPO=/path/to/noosphere sh install.sh\\n" >&2',
-    '    exit 1',
-    '  fi',
-    'fi',
-    '',
-    'if ! command -v node >/dev/null 2>&1; then',
-    '  printf "Error: Node.js 22+ is required.\\n  Download from https://nodejs.org\\n" >&2',
-    '  exit 1',
-    'fi',
-    '',
-    'MAJOR=$(node -e "process.stdout.write(String(process.versions.node.split(\'.\')[0]))")',
-    'if [ "$MAJOR" -lt 22 ]; then',
-    '  printf "Error: Node.js 22+ required (found v%s)\\n" "$MAJOR" >&2',
-    '  exit 1',
-    'fi',
-    '',
-    'printf "Installing Noosphere from %s ...\\n" "$REPO"',
-    'npm --prefix "$REPO/noosphere-mcp" install',
-    'npm --prefix "$REPO/noosphere-mcp" run install:user',
-    '',
-    'printf "\\nDone. Complete setup by connecting your Walrus Memory account:\\n\\n"',
-    'printf "  ~/.noosphere/bin/noosphere setup\\n\\n"',
-  ];
-  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="noosphere-install.sh"');
-  res.send(lines.join('\n') + '\n');
-});
-
 app.use('/v1', authenticationMiddleware(securityConfig));
 
 app.get(

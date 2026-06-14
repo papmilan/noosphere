@@ -22,6 +22,10 @@ export async function runSetupWizard({
   store = new CredentialStore('default'),
   validator = validateCredentials,
   smokeTest = runSmokeTest,
+  promptUser = prompt,
+  privateKeyReader = readPrivateKey,
+  smokeTestDecision = shouldRunSmokeTest,
+  args = process.argv,
 } = {}) {
   console.log('');
   console.log('╔══════════════════════════════════════════════════════════╗');
@@ -33,13 +37,15 @@ export async function runSetupWizard({
   console.log('');
   console.log('You need two things:');
   console.log('  1. A Walrus Memory account ID   (starts with 0x)');
-  console.log('  2. A delegate private key       (Sui keypair, hex or base64)');
+  console.log('  2. A delegate private key       (64 hexadecimal characters)');
   console.log('');
 
   const hasAccount =
-    readFlag('--account-id') ||
-    process.argv.includes('--yes') ||
-    (await prompt('Do you already have a Walrus Memory account? [y/N]: ')).toLowerCase() === 'y';
+    readFlag('--account-id', args) ||
+    args.includes('--yes') ||
+    (await promptUser(
+      'Do you already have a Walrus Memory account? [y/N]: ',
+    )).toLowerCase() === 'y';
 
   if (!hasAccount) {
     console.log('');
@@ -62,17 +68,19 @@ export async function runSetupWizard({
     console.log('');
     console.log('  Step 4 — Come back here with:');
     console.log('    • Your account object ID  (0x followed by 64 hex characters)');
-    console.log('    • Your delegate private key  (hex or base64 Sui keypair)');
+    console.log('    • Your delegate private key  (64 hexadecimal characters)');
     console.log('');
     console.log('────────────────────────────────────────────────────────────');
     console.log('');
-    await prompt('Press Enter when you have your account ID and delegate key…');
+    await promptUser(
+      'Press Enter when you have your account ID and delegate key…',
+    );
     console.log('');
   }
 
   const accountId =
-    readFlag('--account-id') ||
-    await prompt('Walrus Memory account ID (0x…): ');
+    readFlag('--account-id', args) ||
+    await promptUser('Walrus Memory account ID (0x…): ');
 
   if (!/^0x[0-9a-fA-F]{64}$/.test(accountId.trim())) {
     console.warn('');
@@ -82,8 +90,8 @@ export async function runSetupWizard({
   }
 
   const network =
-    (readFlag('--network') ||
-      await prompt('Network [mainnet/testnet] (mainnet): ') ||
+    (readFlag('--network', args) ||
+      await promptUser('Network [mainnet/testnet] (mainnet): ') ||
       'mainnet').toLowerCase();
 
   if (network !== 'mainnet' && network !== 'testnet') {
@@ -91,8 +99,9 @@ export async function runSetupWizard({
   }
 
   console.log('');
-  console.log('Enter your delegate private key (input is hidden):');
-  const privateKey = await readPrivateKey();
+  console.log('Enter your 64-character hexadecimal delegate private key');
+  console.log('(a leading 0x is accepted; input is hidden):');
+  const privateKey = await privateKeyReader();
   const credentials = normalizeCredentials({
     MEMWAL_ACCOUNT_ID: accountId,
     MEMWAL_PRIVATE_KEY: privateKey,
@@ -106,17 +115,25 @@ export async function runSetupWizard({
     console.log('  ✓ Account exists on-chain');
     console.log('  ✓ Delegate key is registered');
   } catch (error) {
+    const message = String(error.message || error);
+    const normalizedMessage = message.toLowerCase();
     console.error('');
-    console.error('  Validation failed:', error.message);
+    console.error('  Validation failed:', message);
     console.error('');
-    if (error.message?.includes('not found') || error.message?.includes('does not exist')) {
+    if (
+      normalizedMessage.includes('not found') ||
+      normalizedMessage.includes('does not exist')
+    ) {
       console.error('  The account ID was not found on', network + '.');
       if (network === 'mainnet') {
         console.error('  If your account is on testnet, re-run with: noosphere setup --network testnet');
       } else {
         console.error('  If your account is on mainnet, re-run with: noosphere setup --network mainnet');
       }
-    } else if (error.message?.includes('delegate') || error.message?.includes('key')) {
+    } else if (
+      normalizedMessage.includes('delegate') ||
+      normalizedMessage.includes('key')
+    ) {
       console.error('  The delegate key does not match the registered delegate for this account.');
       console.error('  Check that you copied the correct private key from your Walrus Memory setup.');
     }
@@ -136,7 +153,7 @@ export async function runSetupWizard({
     console.warn(`  Credentials stored in owner-only 0600 file: ${store.fallbackPath}`);
   }
 
-  if (await shouldRunSmokeTest()) {
+  if (await smokeTestDecision(args, promptUser)) {
     console.log('');
     console.log('Running live Walrus store/recall test…');
     await smokeTest(credentials);
@@ -270,12 +287,12 @@ async function readPrivateKey() {
   return promptHidden('Delegate private key: ');
 }
 
-async function shouldRunSmokeTest() {
-  if (process.argv.includes('--smoke-test')) return true;
-  if (process.argv.includes('--no-smoke-test') || !process.stdin.isTTY) {
+async function shouldRunSmokeTest(args = process.argv, promptUser = prompt) {
+  if (args.includes('--smoke-test')) return true;
+  if (args.includes('--no-smoke-test') || !process.stdin.isTTY) {
     return false;
   }
-  const answer = await prompt(
+  const answer = await promptUser(
     'Run a real Walrus store/recall smoke test now? [y/N]: ',
   );
   return answer.toLowerCase() === 'y';
@@ -334,10 +351,10 @@ async function findEnvironmentFile() {
   return null;
 }
 
-function readFlag(name) {
-  const index = process.argv.indexOf(name);
+function readFlag(name, args = process.argv) {
+  const index = args.indexOf(name);
   if (index === -1) return null;
-  const value = process.argv[index + 1];
+  const value = args[index + 1];
   if (!value || value.startsWith('--')) {
     throw new Error(`${name} requires a value`);
   }

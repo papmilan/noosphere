@@ -12,6 +12,7 @@ set -e
 REQUIRED_NODE=22
 PKG_CLI="noosphere-continuity"
 PKG_RELAY="noosphere-relayer"
+REPOSITORY_TARBALL="https://github.com/papmilan/noosphere/archive/refs/heads/main.tar.gz"
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -50,19 +51,54 @@ ok "npm $(npm --version)"
 # ── install npm packages ───────────────────────────────────────────────────────
 
 printf '\n'
-log "Installing Noosphere packages from npm…"
+log "Installing Noosphere packages…"
 log "(this may take 30–60 seconds)"
 printf '\n'
 
-npm install -g "$PKG_CLI" "$PKG_RELAY" --loglevel=warn
+if npm view "$PKG_CLI" version >/dev/null 2>&1 &&
+   npm view "$PKG_RELAY" version >/dev/null 2>&1; then
+  npm install -g "$PKG_RELAY" "$PKG_CLI" --loglevel=warn
+  INSTALL_SOURCE="npm"
+else
+  if ! command -v curl >/dev/null 2>&1; then
+    die "Packages are not published yet and curl is unavailable for the GitHub fallback."
+  fi
+  if ! command -v tar >/dev/null 2>&1; then
+    die "Packages are not published yet and tar is unavailable for the GitHub fallback."
+  fi
 
-ok "noosphere-continuity and noosphere-relayer installed"
+  TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/noosphere-install.XXXXXX")
+  cleanup() { rm -rf "$TMP_DIR"; }
+  trap cleanup EXIT HUP INT TERM
+
+  log "npm release not found; installing the current GitHub source…"
+  curl -fsSL "$REPOSITORY_TARBALL" |
+    tar -xz -C "$TMP_DIR"
+  SOURCE_ROOT=$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+  [ -n "$SOURCE_ROOT" ] || die "Downloaded archive did not contain the Noosphere source."
+
+  npm install -g "$SOURCE_ROOT/noosphere-relayer" --loglevel=warn
+  npm install -g "$SOURCE_ROOT/noosphere-mcp" \
+    --legacy-peer-deps --loglevel=warn
+  INSTALL_SOURCE="GitHub"
+fi
+
+ok "noosphere-continuity and noosphere-relayer installed from $INSTALL_SOURCE"
 
 # ── run user-level installer ───────────────────────────────────────────────────
 
 printf '\n'
 log "Setting up Noosphere for your user account…"
 printf '\n'
+
+if ! command -v noosphere >/dev/null 2>&1; then
+  NPM_BIN=$(npm prefix -g)/bin
+  PATH="$NPM_BIN:$PATH"
+  export PATH
+fi
+
+command -v noosphere >/dev/null 2>&1 ||
+  die "The global npm bin directory is not on PATH. Add $(npm prefix -g)/bin and retry."
 
 noosphere install
 

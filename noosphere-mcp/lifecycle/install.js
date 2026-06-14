@@ -25,7 +25,7 @@ const execFileAsync = promisify(execFile);
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const sourceMcp = path.resolve(directory, '..');
 const sourceRoot = path.resolve(sourceMcp, '..');
-const sourceRelayer = path.join(sourceRoot, 'noosphere-relayer');
+const sourceRelayer = await resolveRelayerSource();
 const action = process.argv[2] || 'install';
 const home = noosphereHome();
 const appRoot = path.join(home, 'app');
@@ -104,7 +104,6 @@ async function install() {
     'hooks',
     'mcp-server',
     'package.json',
-    'package-lock.json',
     'README.md',
   ]);
   // Ensure ide-bridge.js is always present in the installed lifecycle directory.
@@ -126,8 +125,8 @@ async function install() {
     'credentials.js',
     'public',
     'package.json',
-    'package-lock.json',
-    '.env.example',
+    'npm-shrinkwrap.json',
+    'env.example',
   ];
   await copyRuntime(
     sourceRelayer,
@@ -148,7 +147,7 @@ async function install() {
     await cp(sourceEnv, targetEnv, { force: true });
     await chmod(targetEnv, 0o600);
   } else if (!(await exists(targetEnv))) {
-    await cp(path.join(installedRelayer, '.env.example'), targetEnv);
+    await cp(path.join(installedRelayer, 'env.example'), targetEnv);
     await chmod(targetEnv, 0o600);
   }
 
@@ -178,6 +177,28 @@ async function install() {
   console.log(`Command: ${path.join(binDirectory, 'noosphere')}`);
   console.log('Entering a Git project now initializes and watches it automatically.');
   console.log('Create .noosphere-ignore in a repository to opt out.');
+}
+
+async function resolveRelayerSource() {
+  const candidates = [
+    process.env.NOOSPHERE_RELAYER_SOURCE,
+    path.join(sourceRoot, 'noosphere-relayer'),
+    path.join(sourceMcp, 'node_modules', 'noosphere-relayer'),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (
+      await exists(path.join(candidate, 'package.json')) &&
+      await exists(path.join(candidate, 'index.js'))
+    ) {
+      return candidate;
+    }
+  }
+
+  throw new Error(
+    'The noosphere-relayer package is required. Install both packages with ' +
+    '`npm install -g noosphere-continuity noosphere-relayer`, then retry.',
+  );
 }
 
 async function uninstall() {
