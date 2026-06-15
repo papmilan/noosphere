@@ -32,10 +32,12 @@ let emptyProjectDir;
 let lifecycleHome;
 let storedActions;
 let idempotencyKeys;
+let typedRecallMemories;
 
 before(async () => {
   storedActions = [];
   idempotencyKeys = [];
+  typedRecallMemories = [];
   server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     if (req.method === 'POST' && url.pathname === '/v1/actions') {
@@ -47,6 +49,26 @@ before(async () => {
       respondJson(res, 201, {
         success: true,
         blob_id: `blob-${storedActions.length}`,
+      });
+      return;
+    }
+    if (
+      req.method === 'POST' &&
+      url.pathname === '/v1/projects/continuity-test/recall'
+    ) {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const request = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      const memories = typedRecallMemories
+        .filter((memory) => memory.action_type === request.action_type)
+        .slice(0, request.limit || 10);
+      respondJson(res, 200, {
+        success: true,
+        project_id: 'continuity-test',
+        query: request.query,
+        retrieval: 'semantic',
+        total: memories.length,
+        memories,
       });
       return;
     }
@@ -514,6 +536,117 @@ describe('Noosphere continuity CLI', () => {
 
     assert.match(context, /Shared checkpoint/);
     assert.match(context, /Read this before changing the project/);
+  });
+
+  it('replaces a wrong local baseline with the typed Walrus baseline during restore', async () => {
+    const restoreDir = await mkdtemp(
+      path.join(os.tmpdir(), 'noosphere-restore-'),
+    );
+    const walrusBaseline =
+      'PROJECT BASELINE: WALRUS-RESTORE-BASELINE-SENTINEL';
+    const walrusMasterPrompt =
+      'ORIGINAL TASK: WALRUS-RESTORE-MASTER-SENTINEL';
+    const walrusFollowup =
+      'LATEST USER INSTRUCTION: WALRUS-RESTORE-FOLLOWUP-SENTINEL';
+
+    try {
+      await execFileAsync('git', ['init'], { cwd: restoreDir });
+      await runCli(['init'], restoreDir);
+
+      const configPath = path.join(
+        restoreDir,
+        '.noosphere',
+        'config.json',
+      );
+      const config = JSON.parse(await readFile(configPath, 'utf8'));
+      config.project_id = 'continuity-test';
+      config.relayer_url = serverUrl;
+      await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+
+      await writeFile(
+        path.join(restoreDir, '.noosphere', 'baseline.md'),
+        'WRONG LOCAL BASELINE',
+      );
+      await writeFile(
+        path.join(restoreDir, '.noosphere', 'master-prompt.md'),
+        'WRONG LOCAL MASTER PROMPT',
+      );
+      await writeFile(
+        path.join(restoreDir, '.noosphere', 'followups.jsonl'),
+        `${JSON.stringify({ content: 'WRONG LOCAL FOLLOWUP' })}\n`,
+      );
+
+      typedRecallMemories = [
+        {
+          action_id: 'baseline-restore-test',
+          action_type: 'project-baseline',
+          content: walrusBaseline,
+          timestamp: '2026-06-15T00:00:00.000Z',
+          agent_id: 'restore-test',
+        },
+        {
+          action_id: 'master-restore-test',
+          action_type: 'master-prompt',
+          content: walrusMasterPrompt,
+          timestamp: '2026-06-15T00:00:01.000Z',
+          agent_id: 'restore-test',
+        },
+        {
+          action_id: 'followup-restore-test',
+          action_type: 'user-followup',
+          content: walrusFollowup,
+          timestamp: '2026-06-15T00:00:02.000Z',
+          agent_id: 'restore-test',
+        },
+      ];
+
+      const output = await runCli(['restore'], restoreDir);
+      assert.match(output, /baseline\.md restored from Walrus/);
+
+      const [baseline, masterPrompt, followups, context] = await Promise.all([
+        readFile(path.join(restoreDir, '.noosphere', 'baseline.md'), 'utf8'),
+        readFile(
+          path.join(restoreDir, '.noosphere', 'master-prompt.md'),
+          'utf8',
+        ),
+        readFile(
+          path.join(restoreDir, '.noosphere', 'followups.jsonl'),
+          'utf8',
+        ),
+        readFile(path.join(restoreDir, '.noosphere', 'context.md'), 'utf8'),
+      ]);
+
+      assert.equal(baseline, walrusBaseline);
+      assert.equal(masterPrompt, walrusMasterPrompt);
+      assert.match(followups, /WALRUS-RESTORE-FOLLOWUP-SENTINEL/);
+      assert.doesNotMatch(followups, /WRONG LOCAL FOLLOWUP/);
+      assert.match(
+        context,
+        /## Initial project baseline[\s\S]*WALRUS-RESTORE-BASELINE-SENTINEL/,
+      );
+      assert.doesNotMatch(context, /WRONG LOCAL BASELINE/);
+
+      typedRecallMemories = [];
+      await writeFile(
+        path.join(restoreDir, '.noosphere', 'baseline.md'),
+        'LOCAL BASELINE TO KEEP',
+      );
+      const noBaselineOutput = await runCli(['restore'], restoreDir);
+      assert.match(
+        noBaselineOutput,
+        /baseline\.md kept local; no Walrus baseline found/,
+      );
+      assert.equal(
+        await readFile(
+          path.join(restoreDir, '.noosphere', 'baseline.md'),
+          'utf8',
+        ),
+        'LOCAL BASELINE TO KEEP',
+      );
+    } finally {
+      typedRecallMemories = [];
+      await rm(restoreDir, { recursive: true, force: true });
+    }
   });
 
   it('supports generic CLI journaling, remembering, and context output', async () => {

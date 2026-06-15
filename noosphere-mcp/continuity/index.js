@@ -1394,50 +1394,36 @@ async function restoreFromWalrus(root) {
   let restored = 0;
 
   if (recalled.baseline) {
-    const existing = await readFile(
-      path.join(root, '.noosphere', 'baseline.md'), 'utf8',
-    ).catch(() => '');
-    if (!existing.trim()) {
-      await atomicWrite(path.join(root, '.noosphere', 'baseline.md'), recalled.baseline);
-      console.log('  baseline.md restored from Walrus');
-      restored++;
-    } else {
-      console.log('  baseline.md already present, skipped');
-    }
+    await atomicWrite(
+      path.join(root, '.noosphere', 'baseline.md'),
+      recalled.baseline,
+    );
+    console.log('  baseline.md restored from Walrus');
+    restored++;
+  } else {
+    console.log('  baseline.md kept local; no Walrus baseline found');
   }
 
   if (recalled.masterPrompt) {
-    const existing = await readMasterPrompt(root);
-    if (!existing) {
-      await atomicWrite(
-        path.join(root, '.noosphere', 'master-prompt.md'),
-        recalled.masterPrompt,
-      );
-      console.log('  master-prompt.md restored from Walrus');
-      restored++;
-    } else {
-      console.log('  master-prompt.md already present, skipped');
-    }
+    await atomicWrite(
+      path.join(root, '.noosphere', 'master-prompt.md'),
+      recalled.masterPrompt,
+    );
+    console.log('  master-prompt.md restored from Walrus');
+    restored++;
   }
 
   if (recalled.followups.length > 0) {
-    const existing = await readFollowupPrompts(root);
-    if (existing.length === 0) {
-      const lines = recalled.followups.map((f) => JSON.stringify(f)).join('\n');
-      await atomicWrite(
-        path.join(root, '.noosphere', 'followups.jsonl'),
-        `${lines}\n`,
-      );
-      console.log(`  followups.jsonl restored (${recalled.followups.length} entries) from Walrus`);
-      restored++;
-    } else {
-      console.log('  followups.jsonl already present, skipped');
-    }
+    const lines = recalled.followups.map((f) => JSON.stringify(f)).join('\n');
+    await atomicWrite(
+      path.join(root, '.noosphere', 'followups.jsonl'),
+      `${lines}\n`,
+    );
+    console.log(`  followups.jsonl restored (${recalled.followups.length} entries) from Walrus`);
+    restored++;
   }
 
-  await refreshContext(root).catch((err) => {
-    console.warn(`  context.md refresh failed: ${err.message}`);
-  });
+  await refreshContext(root);
   console.log(`  context.md refreshed from Walrus`);
   console.log(`Restore complete. ${restored} file(s) written.`);
 }
