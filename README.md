@@ -167,6 +167,52 @@ cat existing-roadmap.md | noosphere master-prompt
 From that point onward, automatic checkpoints and explicit memories preserve
 new work normally across agents and machines.
 
+## Restore on a fresh machine
+
+Project memory survives losing the local checkout. After cloning the
+repository to a new machine, a different workstation, or any directory where
+`.noosphere/` is missing, run:
+
+```sh
+noosphere restore
+```
+
+The command reads `project_id` from `.noosphere/config.json` (or
+`.noosphere.json` if you have not run `noosphere init` yet), then reconstructs
+the durable shared files from Walrus:
+
+- `.noosphere/baseline.md` — from the project-baseline record;
+- `.noosphere/master-prompt.md` — from the master-prompt record;
+- `.noosphere/followups.jsonl` — from every user-followup record;
+- `.noosphere/context.md` — composed from the records above plus a fresh
+  semantic recall.
+
+Each file is restored only when the local copy is missing or empty. Existing
+local content is never overwritten. The command is safe to run more than once.
+
+### Requirements
+
+- A `.noosphere/config.json` (or legacy `.noosphere.json`) with the same
+  `project_id` used on the previous machine.
+- Walrus Memory credentials provisioned on the new machine
+  (`noosphere setup` and `noosphere credentials status` should both pass).
+- Network access to the configured relayer.
+
+### What does not come back
+
+- `.noosphere/journal.md` — the local journal is only mirrored to Walrus when
+  `privacy.share_journal` is `true`. If the previous machine kept it local,
+  the journal does not survive the move.
+- Hidden chain-of-thought or anything else that was never recorded by an
+  agent.
+- Automatic workspace checkpoints remain queryable through
+  `noosphere recall` and `noosphere context`, but they are not written back
+  into local files by `restore`; they are intentionally consulted through
+  semantic search rather than stored as a static snapshot.
+
+After `noosphere restore` completes, `noosphere activate` re-enables the
+background watcher and the project resumes normal continuity.
+
 ## Why it works with any agent
 
 Noosphere does not require every tool to support the same proprietary plugin.
@@ -474,6 +520,7 @@ noosphere projects
 noosphere baseline
 noosphere checkpoint
 noosphere refresh
+noosphere restore
 noosphere status
 noosphere context
 noosphere recall "query"
