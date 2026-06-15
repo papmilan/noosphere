@@ -2226,6 +2226,8 @@ Commands:
   install     Install Noosphere and automatic user startup
   uninstall   Remove the user installation and background services
   doctor      Check the installed lifecycle and credentials
+  setup       First-time setup wizard (add --demo for local-only mode)
+  credentials Inspect, migrate, or rotate Walrus Memory credentials
   activate    Auto-initialize and register the current Git project
   deactivate  Stop automatically watching the current project
   register    Register a project now (supports --path /absolute/repository)

@@ -45,11 +45,6 @@
   "peerDependencies": {
     "noosphere-relayer": "2.0.0"
   },
-  "peerDependenciesMeta": {
-    "noosphere-relayer": {
-      "optional": true
-    }
-  },
   "engines": {
     "node": ">=22"
   }

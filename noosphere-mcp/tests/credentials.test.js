@@ -199,6 +199,54 @@ describe('credential storage', () => {
     assert.ok(output.some((line) => line.includes('Setup complete')));
   });
 
+  it('--demo enables DEMO_MODE in the relayer env without touching credentials', async () => {
+    const envPath = path.join(temporaryRoot, 'demo.env');
+    await writeFile(
+      envPath,
+      [
+        'PORT=3001',
+        'DEMO_MODE=false',
+        'MEMWAL_NETWORK=mainnet',
+        '',
+      ].join('\n'),
+      { mode: 0o600 },
+    );
+    const originalLog = console.log;
+    console.log = () => {};
+    try {
+      await runSetupWizard({
+        args: ['node', 'noosphere', '--demo'],
+        relayerEnvPath: envPath,
+        promptUser: async () => {
+          assert.fail('Demo mode must not prompt the user');
+        },
+        privateKeyReader: async () => {
+          assert.fail('Demo mode must not read a private key');
+        },
+        validator: async () => {
+          assert.fail('Demo mode must not validate credentials');
+        },
+      });
+    } finally {
+      console.log = originalLog;
+    }
+    const contents = await readFile(envPath, 'utf8');
+    assert.match(contents, /^DEMO_MODE=true$/m);
+    assert.doesNotMatch(contents, /^DEMO_MODE=false$/m);
+    assert.match(contents, /PORT=3001/);
+    assert.match(contents, /MEMWAL_NETWORK=mainnet/);
+  });
+
+  it('--demo reports an actionable error when the relayer env is missing', async () => {
+    await assert.rejects(
+      runSetupWizard({
+        args: ['node', 'noosphere', '--demo'],
+        relayerEnvPath: path.join(temporaryRoot, 'does-not-exist.env'),
+      }),
+      /install:user/,
+    );
+  });
+
   it('rejects an unsupported network before reading the private key', async () => {
     let privateKeyRead = false;
     await assert.rejects(
