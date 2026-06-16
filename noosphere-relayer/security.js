@@ -199,7 +199,7 @@ function parseList(value) {
     .filter(Boolean);
 }
 
-function parsePositiveInteger(value, fallback, name) {
+export function parsePositiveInteger(value, fallback, name) {
   if (value === undefined || value === '') return fallback;
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1) {

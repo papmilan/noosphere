@@ -26,6 +26,7 @@ import {
 import {
   authenticationMiddleware,
   corsMiddleware,
+  parsePositiveInteger,
   rateLimitMiddleware,
   resolveSecurityConfig,
   securityHeaders,
@@ -1000,15 +1001,6 @@ function parseLimit(value, fallback = 10) {
     throw badRequest('limit must be an integer from 1 to 100');
   }
   return limit;
-}
-
-function parsePositiveInteger(value, fallback, name) {
-  if (value === undefined || value === '') return fallback;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1) {
-    throw new Error(`${name} must be a positive integer`);
-  }
-  return parsed;
 }
 
 function requireNonEmptyString(value, fieldName) {

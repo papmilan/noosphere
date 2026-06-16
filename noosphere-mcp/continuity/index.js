@@ -245,7 +245,13 @@ export async function activateProject(start, { quiet = false } = {}) {
   const contextContent = await readFile(contextFile, 'utf8').catch(() => '');
   const contextIsEmpty = !contextContent.trim() || contextContent.includes('No onboarding baseline');
   if (isNew || contextIsEmpty) {
-    await refreshContext(root).catch(() => {});
+    await refreshContext(root).catch((error) => {
+      if (!quiet) {
+        console.warn(
+          `Noosphere: initial context refresh deferred (${error.message}).`,
+        );
+      }
+    });
   }
 
   if (!quiet) {
