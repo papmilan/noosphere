@@ -1,6 +1,6 @@
 {
   "name": "noosphere-continuity",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "Cross-agent project memory backed by Walrus Memory on Sui",
   "type": "module",
   "bin": {
@@ -43,7 +43,7 @@
   },
   "homepage": "https://github.com/papmilan/noosphere#readme",
   "peerDependencies": {
-    "noosphere-relayer": "2.0.1"
+    "noosphere-relayer": "2.0.2"
   },
   "engines": {
     "node": ">=22"

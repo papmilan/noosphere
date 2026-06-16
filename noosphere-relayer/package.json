@@ -1,6 +1,6 @@
 {
   "name": "noosphere-relayer",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Walrus Memory relay server for Noosphere cross-agent project memory",
   "type": "module",
   "main": "index.js",
