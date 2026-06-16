@@ -56,9 +56,23 @@ export async function installServices(opts) {
       '/RL', 'LIMITED',
       '/F',
     );
-    // Start them immediately
-    await schtasks('/Run', '/TN', relayerTn).catch(() => undefined);
-    await schtasks('/Run', '/TN', managerTn).catch(() => undefined);
+    // Start them immediately. Failures here aren't fatal — the tasks
+    // still run on next logon — but surface a warning so the user knows
+    // they need to log out/in or kick them by hand.
+    await schtasks('/Run', '/TN', relayerTn).catch((error) => {
+      console.warn(
+        `Warning: failed to start ${relayerTn} immediately (${error.message}). ` +
+        'It will start on next logon, or run: ' +
+        `schtasks /Run /TN "${relayerTn}"`,
+      );
+    });
+    await schtasks('/Run', '/TN', managerTn).catch((error) => {
+      console.warn(
+        `Warning: failed to start ${managerTn} immediately (${error.message}). ` +
+        'It will start on next logon, or run: ' +
+        `schtasks /Run /TN "${managerTn}"`,
+      );
+    });
   }
 
   // Record the task names so doctor/uninstall can find them

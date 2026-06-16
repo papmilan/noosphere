@@ -788,15 +788,11 @@ async function recallTypedMemories(config, { baseline, masterPrompt, followups }
   const base = `${config.relayer_url}/v1/projects/${projectId}/recall`;
 
   async function fetchByType(query, actionType, limit = 1) {
-    try {
-      return await requestJson(base, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ query, limit, action_type: actionType }),
-      });
-    } catch {
-      return { memories: [] };
-    }
+    return requestJson(base, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query, limit, action_type: actionType }),
+    });
   }
 
   const [baselineRes, masterPromptRes, followupsRes] = await Promise.all([
@@ -1208,7 +1204,10 @@ async function loadConfig(root) {
   }
   return {
     ...config,
-    relayer_url: config.relayer_url || DEFAULT_RELAYER_URL,
+    relayer_url:
+      config.relayer_url ||
+      process.env.NOOSPHERE_RELAYER_URL ||
+      DEFAULT_RELAYER_URL,
     checkpoint_debounce_ms:
       config.checkpoint_debounce_ms || DEFAULT_DEBOUNCE_MS,
     context_refresh_ms:
@@ -1385,11 +1384,30 @@ async function restoreFromWalrus(root) {
   const config = await loadConfig(root);
   console.log(`Restoring project state from Walrus for ${config.project_id}...`);
 
-  const recalled = await recallTypedMemories(config, {
-    baseline: true,
-    masterPrompt: true,
-    followups: true,
-  });
+  if (!(await pingRelayer(config.relayer_url))) {
+    throw relayerDownError(config.relayer_url);
+  }
+
+  let recalled;
+  try {
+    recalled = await recallTypedMemories(config, {
+      baseline: true,
+      masterPrompt: true,
+      followups: true,
+    });
+  } catch (error) {
+    throw new Error(
+      [
+        `Walrus recall failed: ${error.message}`,
+        '',
+        'Confirm credentials are present:',
+        '  noosphere credentials status',
+        '',
+        'Or switch to local-only mode without Walrus:',
+        '  noosphere setup --demo',
+      ].join('\n'),
+    );
+  }
 
   let restored = 0;
 
@@ -2023,6 +2041,36 @@ async function findGitRoot(start) {
   } catch {
     return null;
   }
+}
+
+async function pingRelayer(url) {
+  try {
+    const response = await fetch(`${url}/health`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+function relayerDownError(url) {
+  return new Error(
+    [
+      `Cannot reach the Noosphere relayer at ${url}.`,
+      '',
+      'Start it for your platform:',
+      '  macOS:   launchctl kickstart -k gui/$UID/xyz.noosphere.relayer',
+      '  Linux:   systemctl --user start xyz.noosphere.relayer',
+      '  Windows: schtasks /Run /TN "\\Noosphere\\Relayer"',
+      '',
+      'If the relayer listens on a different host or port, set',
+      'NOOSPHERE_RELAYER_URL or relayer_url in .noosphere/config.json.',
+      '',
+      'To try Noosphere without Walrus credentials, run:',
+      '  noosphere setup --demo',
+    ].join('\n'),
+  );
 }
 
 async function requestJson(url, options) {

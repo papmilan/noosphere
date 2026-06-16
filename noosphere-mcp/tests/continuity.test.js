@@ -40,6 +40,10 @@ before(async () => {
   typedRecallMemories = [];
   server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
+    if (req.method === 'GET' && url.pathname === '/health') {
+      respondJson(res, 200, { status: 'ok' });
+      return;
+    }
     if (req.method === 'POST' && url.pathname === '/v1/actions') {
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
@@ -645,6 +649,43 @@ describe('Noosphere continuity CLI', () => {
       );
     } finally {
       typedRecallMemories = [];
+      await rm(restoreDir, { recursive: true, force: true });
+    }
+  });
+
+  it('restore surfaces an actionable error when the relayer is unreachable', async () => {
+    const restoreDir = await mkdtemp(
+      path.join(os.tmpdir(), 'noosphere-restore-down-'),
+    );
+    try {
+      await execFileAsync('git', ['init'], { cwd: restoreDir });
+      await runCli(['init'], restoreDir);
+
+      const configPath = path.join(restoreDir, '.noosphere', 'config.json');
+      const config = JSON.parse(await readFile(configPath, 'utf8'));
+      config.project_id = 'continuity-test';
+      config.relayer_url = 'http://127.0.0.1:1';
+      await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+
+      const child = spawn(process.execPath, [cli, 'restore'], {
+        cwd: restoreDir,
+        env: {
+          ...process.env,
+          NOOSPHERE_HOME: lifecycleHome,
+          NOOSPHERE_PROJECT_DIR: restoreDir,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const stderrChunks = [];
+      child.stderr.on('data', (chunk) => stderrChunks.push(chunk));
+      const code = await new Promise((resolve) =>
+        child.once('close', resolve),
+      );
+      const stderr = Buffer.concat(stderrChunks).toString();
+      assert.notEqual(code, 0, 'restore must fail when the relayer is down');
+      assert.match(stderr, /Cannot reach the Noosphere relayer/);
+      assert.match(stderr, /noosphere setup --demo/);
+    } finally {
       await rm(restoreDir, { recursive: true, force: true });
     }
   });
