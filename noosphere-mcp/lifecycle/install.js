@@ -655,13 +655,10 @@ async function removeAllShellBlocks() {
 
 async function installClaudeHook() {
   if (process.env.NOOSPHERE_SKIP_CLAUDE_HOOK === '1') return;
-  const script = path.join(installedMcp, 'hooks', 'install-hook.sh');
+  const script = path.join(installedMcp, 'hooks', 'install-hook.js');
   if (await exists(script)) {
-    await execFileAsync('bash', [script], {
-      env: {
-        ...process.env,
-        NOOSPHERE_RELAYER_URL: 'http://127.0.0.1:3001',
-      },
+    await execFileAsync(node, [script], {
+      env: process.env,
     }).catch((error) => {
       console.warn(`Claude hook was not installed: ${error.message}`);
     });
