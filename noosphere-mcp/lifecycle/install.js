@@ -20,6 +20,7 @@ import { promisify } from 'node:util';
 import { noosphereHome } from './registry.js';
 import { resolveRelayerPath } from './relayer-source.js';
 import { CredentialStore } from './credentials.js';
+import { formatServiceInstallError } from './service-errors.js';
 import { escapeRegExp, exists, npmCommand, npmSpawnOptions } from './util.js';
 
 const execFileAsync = promisify(execFile);
@@ -168,7 +169,16 @@ async function install() {
   try {
     await platform.installServices(platformOpts);
   } catch (error) {
-    throw new Error(formatServiceInstallError(error));
+    throw new Error(
+      formatServiceInstallError(error, {
+        platform: effectivePlatform === 'windows' ? 'win32' : effectivePlatform,
+        logDirectory,
+        relayerLabel,
+        managerLabel,
+        installedMcp,
+        installedRelayer,
+      }),
+    );
   }
 
   await installClaudeHook();
@@ -183,50 +193,6 @@ async function install() {
   console.log(`Command: ${path.join(binDirectory, 'noosphere')}`);
   console.log('Entering a Git project now initializes and watches it automatically.');
   console.log('Create .noosphere-ignore in a repository to opt out.');
-}
-
-function formatServiceInstallError(error) {
-  const original = error?.message || String(error);
-  const lines = [
-    `Failed to register Noosphere background services: ${original}`,
-    '',
-    `Logs:  ${logDirectory}`,
-  ];
-  if (effectivePlatform === 'darwin') {
-    lines.push(
-      '',
-      'macOS recovery:',
-      '  launchctl bootout gui/$UID/xyz.noosphere.relayer || true',
-      '  launchctl bootout gui/$UID/xyz.noosphere.manager || true',
-      `  launchctl bootstrap gui/$UID ~/Library/LaunchAgents/xyz.noosphere.relayer.plist`,
-      `  launchctl bootstrap gui/$UID ~/Library/LaunchAgents/xyz.noosphere.manager.plist`,
-      '',
-      'If this happens after a system update, sign out and back in,',
-      'then re-run `npm --prefix noosphere-mcp run install:user`.',
-    );
-  } else if (effectivePlatform === 'linux') {
-    lines.push(
-      '',
-      'Linux recovery:',
-      '  systemctl --user daemon-reload',
-      `  systemctl --user enable --now ${relayerLabel} ${managerLabel}`,
-      '',
-      'If `systemctl --user` is not available, the host lacks a user',
-      'systemd instance. Run the relayer manually or use a launcher of',
-      `your choice pointing at: ${path.join(installedRelayer, 'index.js')}`,
-    );
-  } else {
-    lines.push(
-      '',
-      'Windows recovery:',
-      '  schtasks /Run /TN "\\Noosphere\\Relayer"',
-      '  schtasks /Run /TN "\\Noosphere\\Manager"',
-      '',
-      'If the create step failed, run the install:user script from a',
-      'shell where schtasks.exe is on PATH (most cmd or PowerShell sessions).',
-    );
-  }
-  return lines.join('\n');
 }
 
 async function uninstall() {

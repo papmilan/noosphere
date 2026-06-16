@@ -597,6 +597,47 @@ describe('npm child-process invocation', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Windows: scheduled task creation blocked by AV/UAC (regression)
+// ---------------------------------------------------------------------------
+
+describe('Windows scheduled task creation failure', () => {
+  it('emits actionable EPERM + foreground fallback message', async () => {
+    const fakeHome = await makeFakeHome();
+    const noosphereHome = path.join(fakeHome, '.noosphere');
+    const fakeBin = path.join(fakeHome, 'fake-bin');
+    await mkdir(fakeBin, { recursive: true });
+
+    // Shim simulates Bitdefender blocking the spawn before schtasks even
+    // runs. POSIX `sh -c 'exit 1'` produces a non-zero exit status with no
+    // stdout, which mirrors the Windows experience well enough for the
+    // installer to take the EPERM-flavoured branch.
+    const shim = `#!/bin/sh\nexit 1\n`;
+    await writeFile(path.join(fakeBin, 'schtasks.exe'), shim, { mode: 0o755 });
+
+    try {
+      const result = await runInstaller('install', {
+        HOME: fakeHome,
+        NOOSPHERE_HOME: noosphereHome,
+        NOOSPHERE_TEST_PLATFORM: 'win32',
+        NOOSPHERE_SKIP_NPM: '1',
+        NOOSPHERE_SKIP_CLAUDE_HOOK: '1',
+        PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+      });
+      assert.notEqual(
+        result.code,
+        0,
+        'installer must fail when schtasks fails',
+      );
+      assert.match(result.stderr, /noosphere run-relayer/);
+      assert.match(result.stderr, /noosphere run-manager/);
+      assert.match(result.stderr, /schtasks\.exe \/Create/);
+    } finally {
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('Shell integration — block injection idempotency', () => {
   it('replaces the block on a second install without duplicating it', async () => {
     const fakeHome = await makeFakeHome({ '.zshrc': '# line1\n' });

@@ -112,7 +112,14 @@ export async function doctorChecks(_opts) {
 // ---------------------------------------------------------------------------
 
 async function schtasks(...args) {
-  return execFileAsync('schtasks.exe', args);
+  try {
+    return await execFileAsync('schtasks.exe', args);
+  } catch (error) {
+    error.commandLine = `schtasks.exe ${args
+      .map((argument) => (/\s/.test(argument) ? `"${argument}"` : argument))
+      .join(' ')}`;
+    throw error;
+  }
 }
 
 async function taskExists(taskName) {

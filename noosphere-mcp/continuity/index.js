@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash, randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import {
   access,
   appendFile,
@@ -19,6 +19,7 @@ import { promisify } from 'node:util';
 
 import {
   disableProject,
+  noosphereHome,
   readRegistry,
   registerProject,
   pauseProject,
@@ -148,6 +149,12 @@ try {
       break;
     case 'credentials':
       await runCredentialsCommand(process.argv[3]);
+      break;
+    case 'run-relayer':
+      await runForegroundService('relayer');
+      break;
+    case 'run-manager':
+      await runForegroundService('manager');
       break;
     default:
       printHelp();
@@ -323,6 +330,52 @@ export async function configureProjectAdapters(root, adapters) {
 async function printProjects() {
   const registry = await readRegistry();
   console.log(JSON.stringify(registry.projects, null, 2));
+}
+
+async function runForegroundService(kind) {
+  const home = noosphereHome();
+  const targets = {
+    relayer: {
+      label: 'noosphere-relayer',
+      entry: path.join(home, 'app', 'noosphere-relayer', 'index.js'),
+      cwd: path.join(home, 'app', 'noosphere-relayer'),
+    },
+    manager: {
+      label: 'noosphere-manager',
+      entry: path.join(home, 'app', 'noosphere-mcp', 'lifecycle', 'manager.js'),
+      cwd: path.join(home, 'app', 'noosphere-mcp'),
+    },
+  };
+  const target = targets[kind];
+  if (!target) {
+    throw new Error(`Unknown foreground service: ${kind}`);
+  }
+  try {
+    await access(target.entry);
+  } catch {
+    throw new Error(
+      `${target.entry} is missing. Run install:user first, or set ` +
+      'NOOSPHERE_HOME if the runtime lives elsewhere.',
+    );
+  }
+  console.log(`Starting ${target.label} in foreground.`);
+  console.log('Press Ctrl+C to stop.');
+  const child = spawn(process.execPath, [target.entry], {
+    cwd: target.cwd,
+    stdio: 'inherit',
+    env: process.env,
+  });
+  const forward = (signal) => () => child.kill(signal);
+  process.on('SIGINT', forward('SIGINT'));
+  process.on('SIGTERM', forward('SIGTERM'));
+  await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code, signal) => {
+      if (signal) process.exitCode = 0;
+      else process.exitCode = code ?? 0;
+      resolve();
+    });
+  });
 }
 
 async function runLifecycleCommand(action) {
@@ -2282,6 +2335,9 @@ Commands:
   doctor      Check the installed lifecycle and credentials
   setup       First-time setup wizard (add --demo for local-only mode)
   credentials Inspect, migrate, or rotate Walrus Memory credentials
+  run-relayer Run the relayer in the foreground (when background services
+              are blocked by AV/UAC)
+  run-manager Run the project manager in the foreground
   activate    Auto-initialize and register the current Git project
   deactivate  Stop automatically watching the current project
   register    Register a project now (supports --path /absolute/repository)
