@@ -1,6 +1,6 @@
 {
   "name": "noosphere-continuity",
-  "version": "2.1.2",
+  "version": "2.1.3",
   "description": "Cross-agent project memory backed by Walrus Memory on Sui",
   "type": "module",
   "bin": {

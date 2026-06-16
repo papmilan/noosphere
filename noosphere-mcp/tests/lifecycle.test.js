@@ -550,6 +550,13 @@ describe('npm child-process invocation', () => {
     assert.equal(npmStyleCommand('pnpm', 'darwin'), 'pnpm');
   });
 
+  it('npmSpawnOptions sets shell:true on win32 only (CVE-2024-27980)', async () => {
+    const { npmSpawnOptions } = await import('../lifecycle/util.js');
+    assert.deepEqual(npmSpawnOptions('win32'), { shell: true });
+    assert.deepEqual(npmSpawnOptions('darwin'), { shell: false });
+    assert.deepEqual(npmSpawnOptions('linux'), { shell: false });
+  });
+
   it('installer on win32 spawns npm.cmd (not npm), so no ENOENT', async () => {
     const fakeHome = await makeFakeHome();
     const noosphereHome = path.join(fakeHome, '.noosphere');
