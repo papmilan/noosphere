@@ -20,7 +20,7 @@ import { promisify } from 'node:util';
 import { noosphereHome } from './registry.js';
 import { resolveRelayerPath } from './relayer-source.js';
 import { CredentialStore } from './credentials.js';
-import { escapeRegExp, exists } from './util.js';
+import { escapeRegExp, exists, npmCommand } from './util.js';
 
 const execFileAsync = promisify(execFile);
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -153,7 +153,7 @@ async function install() {
   }
 
   if (process.env.NOOSPHERE_SKIP_NPM !== '1') {
-    await execFileAsync('npm', ['ci', '--omit=dev'], {
+    await execFileAsync(npmCommand(effectivePlatform), ['ci', '--omit=dev'], {
       cwd: installedRelayer,
     });
   }

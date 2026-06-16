@@ -534,6 +534,62 @@ describe('Noosphere Windows lifecycle installer', () => {
 // Cross-platform shell integration tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Cross-platform npm spawn (regression: Windows ENOENT)
+// ---------------------------------------------------------------------------
+
+describe('npm child-process invocation', () => {
+  it('npmCommand resolves to npm.cmd on win32 and npm elsewhere', async () => {
+    const { npmCommand, npmStyleCommand } = await import(
+      '../lifecycle/util.js'
+    );
+    assert.equal(npmCommand('win32'), 'npm.cmd');
+    assert.equal(npmCommand('darwin'), 'npm');
+    assert.equal(npmCommand('linux'), 'npm');
+    assert.equal(npmStyleCommand('npx', 'win32'), 'npx.cmd');
+    assert.equal(npmStyleCommand('pnpm', 'darwin'), 'pnpm');
+  });
+
+  it('installer on win32 spawns npm.cmd (not npm), so no ENOENT', async () => {
+    const fakeHome = await makeFakeHome();
+    const noosphereHome = path.join(fakeHome, '.noosphere');
+    const fakeBin = path.join(fakeHome, 'fake-bin');
+    await mkdir(fakeBin, { recursive: true });
+
+    // Shim records its own executable path so we can prove the right
+    // filename was looked up. On Windows, only npm.cmd resolves through
+    // PATHEXT; npm (extensionless) yields ENOENT.
+    const marker = path.join(fakeHome, 'npm-shim.log');
+    const shim =
+      `#!/bin/sh\n` +
+      `printf '%s\\n' "$0" "$@" > "${marker}"\n`;
+    await writeFile(path.join(fakeBin, 'npm.cmd'), shim, { mode: 0o755 });
+
+    try {
+      const result = await runInstaller('install', {
+        HOME: fakeHome,
+        NOOSPHERE_HOME: noosphereHome,
+        NOOSPHERE_TEST_PLATFORM: 'win32',
+        NOOSPHERE_SKIP_SCHTASKS: '1',
+        NOOSPHERE_SKIP_CLAUDE_HOOK: '1',
+        NOOSPHERE_SKIP_NPM: '0',
+        PATH: `${fakeBin}${path.delimiter}${process.env.PATH || ''}`,
+      });
+      assert.equal(
+        result.code,
+        0,
+        `Installer exited ${result.code}\nSTDERR: ${result.stderr}\nSTDOUT: ${result.stdout}`,
+      );
+      const log = await readFile(marker, 'utf8');
+      assert.match(log, /npm\.cmd/, 'installer must invoke npm.cmd on win32');
+      assert.match(log, /^ci$/m);
+      assert.match(log, /^--omit=dev$/m);
+    } finally {
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('Shell integration — block injection idempotency', () => {
   it('replaces the block on a second install without duplicating it', async () => {
     const fakeHome = await makeFakeHome({ '.zshrc': '# line1\n' });
