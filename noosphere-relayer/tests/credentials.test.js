@@ -13,6 +13,27 @@ function decodePsScript(args) {
   return Buffer.from(args[idx + 1], 'base64').toString('utf16le');
 }
 
+// PowerShell 5.1 does not auto-load System.Security, so any script that
+// references [System.Security.Cryptography.ProtectedData] MUST first run
+// `Add-Type -AssemblyName System.Security` or the type lookup fails with
+// "Unable to find type". This assertion guards that ordering everywhere
+// we shell out to PowerShell from CredentialStore.
+function assertAddTypeBeforeProtectedData(script, label) {
+  const addTypeIdx = script.indexOf('Add-Type -AssemblyName System.Security');
+  const protectedDataIdx = script.indexOf('ProtectedData');
+  assert.notEqual(
+    addTypeIdx,
+    -1,
+    `${label}: script must call Add-Type -AssemblyName System.Security`,
+  );
+  if (protectedDataIdx !== -1) {
+    assert.ok(
+      addTypeIdx < protectedDataIdx,
+      `${label}: Add-Type must precede the first ProtectedData reference`,
+    );
+  }
+}
+
 // Builds a fake spawnSync that emulates Windows powershell.exe just enough
 // to exercise the CredentialStore code paths on any host platform.
 //
@@ -39,6 +60,7 @@ function makeFakePowerShell({ behavior = 'ok' } = {}) {
         script.includes('NOOSPHERE_CREDENTIAL_SECRET_B64'),
         'secret must travel via env var, not stdin',
       );
+      assertAddTypeBeforeProtectedData(script, 'write');
       if (behavior === 'zero-byte') {
         fs.writeFileSync(dpapiPath, '');
         return { status: 0, stdout: '', stderr: '', error: null };
@@ -60,6 +82,7 @@ function makeFakePowerShell({ behavior = 'ok' } = {}) {
     }
 
     // Read path
+    assertAddTypeBeforeProtectedData(script, 'read');
     if (!fs.existsSync(dpapiPath)) {
       return { status: 1, stdout: '', stderr: 'not found', error: null };
     }
@@ -191,5 +214,48 @@ describe('Windows DPAPI CredentialStore', () => {
     });
     store.setPassword(payload);
     assert.equal(store.getPassword(), payload);
+  });
+
+  it('emits Add-Type -AssemblyName System.Security before ProtectedData in both scripts', () => {
+    const captured = [];
+    const captureSpawn = (command, args, opts = {}) => {
+      const isWrite = Boolean(opts.env?.NOOSPHERE_CREDENTIAL_SECRET_B64);
+      captured.push({ kind: isWrite ? 'write' : 'read', script: decodePsScript(args) });
+      // Defer the real fake so we get end-to-end behavior alongside capture.
+      return makeFakePowerShell({ behavior: 'ok' })(command, args, opts);
+    };
+
+    const store = new CredentialStore('default', {
+      platform: 'win32',
+      home,
+      run: captureSpawn,
+    });
+
+    store.setPassword('{"MEMWAL_ACCOUNT_ID":"0xabc"}');
+    store.getPassword();
+
+    const write = captured.find((entry) => entry.kind === 'write');
+    const read = captured.find((entry) => entry.kind === 'read');
+    assert.ok(write, 'write script must have been captured');
+    assert.ok(read, 'read script must have been captured');
+
+    for (const entry of [write, read]) {
+      const addTypeIdx = entry.script.indexOf('Add-Type -AssemblyName System.Security');
+      const protectedIdx = entry.script.indexOf('ProtectedData');
+      assert.notEqual(
+        addTypeIdx,
+        -1,
+        `${entry.kind}: missing Add-Type -AssemblyName System.Security (PowerShell 5.1 requires it for DPAPI)`,
+      );
+      assert.notEqual(
+        protectedIdx,
+        -1,
+        `${entry.kind}: missing ProtectedData reference`,
+      );
+      assert.ok(
+        addTypeIdx < protectedIdx,
+        `${entry.kind}: Add-Type must appear before the first ProtectedData usage`,
+      );
+    }
   });
 });

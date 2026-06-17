@@ -63,13 +63,18 @@ export class CredentialStore {
       // write a complete file or fail loudly.
       const script = [
         '$ErrorActionPreference = "Stop"',
+        // PowerShell 5.1 does not load System.Security by default, so
+        // [System.Security.Cryptography.ProtectedData] is not resolvable
+        // ("Unable to find type") and the call silently never runs without
+        // ErrorAction=Stop. Load the assembly explicitly.
+        'Add-Type -AssemblyName System.Security',
         '$secretB64 = $env:NOOSPHERE_CREDENTIAL_SECRET_B64',
         'if (-not $secretB64) { throw "NOOSPHERE_CREDENTIAL_SECRET_B64 is empty" }',
         '$bytes = [Convert]::FromBase64String($secretB64)',
         'if ($bytes.Length -eq 0) { throw "Decoded secret payload is empty" }',
-        '$encrypted = [Security.Cryptography.ProtectedData]::Protect(',
+        '$encrypted = [System.Security.Cryptography.ProtectedData]::Protect(',
         '  $bytes, $null,',
-        '  [Security.Cryptography.DataProtectionScope]::CurrentUser',
+        '  [System.Security.Cryptography.DataProtectionScope]::CurrentUser',
         ')',
         'if (-not $encrypted -or $encrypted.Length -eq 0) { throw "DPAPI Protect returned empty ciphertext" }',
         '$value = [Convert]::ToBase64String($encrypted)',
@@ -167,11 +172,14 @@ export class CredentialStore {
         if (this.#cleanupZeroByte(dpapiPath)) return null;
         const script = [
           '$ErrorActionPreference = "Stop"',
+          // System.Security must be loaded explicitly under PowerShell 5.1;
+          // otherwise ProtectedData is "Unable to find type".
+          'Add-Type -AssemblyName System.Security',
           '$value = Get-Content -Raw -LiteralPath $env:NOOSPHERE_CREDENTIAL_PATH',
           '$encrypted = [Convert]::FromBase64String($value.Trim())',
-          '$bytes = [Security.Cryptography.ProtectedData]::Unprotect(',
+          '$bytes = [System.Security.Cryptography.ProtectedData]::Unprotect(',
           '  $encrypted, $null,',
-          '  [Security.Cryptography.DataProtectionScope]::CurrentUser',
+          '  [System.Security.Cryptography.DataProtectionScope]::CurrentUser',
           ')',
           '[Console]::Out.Write([Text.Encoding]::UTF8.GetString($bytes))',
         ].join('\n');
