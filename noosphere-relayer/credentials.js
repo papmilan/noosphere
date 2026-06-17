@@ -53,23 +53,66 @@ export class CredentialStore {
 
     if (this.platform === 'win32') {
       this.#ensureDirectory();
+      const dpapiPath = `${this.fallbackPath}.dpapi`;
+      const tmpPath = `${dpapiPath}.tmp`;
+      const secretB64 = Buffer.from(secret, 'utf8').toString('base64');
+      // Secret travels via env var instead of stdin: PowerShell stdin
+      // redirection with -EncodedCommand has been observed to drop input
+      // on Windows, producing a 0-byte ciphertext file. Env var + atomic
+      // temp+move + $ErrorActionPreference='Stop' guarantees we either
+      // write a complete file or fail loudly.
       const script = [
-        '$secret = [Console]::In.ReadToEnd()',
-        '$bytes = [Text.Encoding]::UTF8.GetBytes($secret)',
+        '$ErrorActionPreference = "Stop"',
+        '$secretB64 = $env:NOOSPHERE_CREDENTIAL_SECRET_B64',
+        'if (-not $secretB64) { throw "NOOSPHERE_CREDENTIAL_SECRET_B64 is empty" }',
+        '$bytes = [Convert]::FromBase64String($secretB64)',
+        'if ($bytes.Length -eq 0) { throw "Decoded secret payload is empty" }',
         '$encrypted = [Security.Cryptography.ProtectedData]::Protect(',
         '  $bytes, $null,',
         '  [Security.Cryptography.DataProtectionScope]::CurrentUser',
         ')',
+        'if (-not $encrypted -or $encrypted.Length -eq 0) { throw "DPAPI Protect returned empty ciphertext" }',
         '$value = [Convert]::ToBase64String($encrypted)',
-        'Set-Content -LiteralPath $env:NOOSPHERE_CREDENTIAL_PATH -Value $value',
+        'if ([string]::IsNullOrEmpty($value)) { throw "Base64-encoded ciphertext is empty" }',
+        '$utf8NoBom = New-Object System.Text.UTF8Encoding($false)',
+        '[IO.File]::WriteAllText($env:NOOSPHERE_CREDENTIAL_TMP, $value, $utf8NoBom)',
+        '$tmpInfo = Get-Item -LiteralPath $env:NOOSPHERE_CREDENTIAL_TMP',
+        'if ($tmpInfo.Length -eq 0) { throw "Wrote 0 bytes to temp file" }',
+        'Move-Item -LiteralPath $env:NOOSPHERE_CREDENTIAL_TMP -Destination $env:NOOSPHERE_CREDENTIAL_PATH -Force',
       ].join('\n');
-      this.#runPowerShell(script, {
-        input: secret,
-        env: {
-          ...process.env,
-          NOOSPHERE_CREDENTIAL_PATH: `${this.fallbackPath}.dpapi`,
-        },
-      });
+      try {
+        this.#runPowerShell(script, {
+          env: {
+            ...process.env,
+            NOOSPHERE_CREDENTIAL_PATH: dpapiPath,
+            NOOSPHERE_CREDENTIAL_TMP: tmpPath,
+            NOOSPHERE_CREDENTIAL_SECRET_B64: secretB64,
+          },
+        });
+      } catch (error) {
+        // Surface as much detail as possible and never leave a stale 0-byte
+        // file behind that would mask the failure on the next read.
+        this.#cleanupZeroByte(dpapiPath);
+        fs.rmSync(tmpPath, { force: true });
+        throw error;
+      }
+
+      let stat;
+      try {
+        stat = fs.statSync(dpapiPath);
+      } catch (error) {
+        throw new Error(
+          `DPAPI write reported success but produced no file at ${dpapiPath}: ${error.message}`,
+        );
+      }
+      if (stat.size === 0) {
+        fs.rmSync(dpapiPath, { force: true });
+        fs.rmSync(tmpPath, { force: true });
+        throw new Error(
+          `DPAPI write produced a 0-byte file at ${dpapiPath}; refusing to leave it on disk`,
+        );
+      }
+
       return { backend: 'windows-dpapi', encryptedAtRest: true };
     }
 
@@ -118,7 +161,12 @@ export class CredentialStore {
       if (this.platform === 'win32') {
         const dpapiPath = `${this.fallbackPath}.dpapi`;
         if (!fs.existsSync(dpapiPath)) return null;
+        // A 0-byte file is a partial-write artifact, not a valid credential.
+        // Remove it so callers report "no credentials" instead of "corrupt
+        // credentials" and so the next setPassword starts from a clean slate.
+        if (this.#cleanupZeroByte(dpapiPath)) return null;
         const script = [
+          '$ErrorActionPreference = "Stop"',
           '$value = Get-Content -Raw -LiteralPath $env:NOOSPHERE_CREDENTIAL_PATH',
           '$encrypted = [Convert]::FromBase64String($value.Trim())',
           '$bytes = [Security.Cryptography.ProtectedData]::Unprotect(',
@@ -240,6 +288,19 @@ export class CredentialStore {
       recursive: true,
       mode: 0o700,
     });
+  }
+
+  #cleanupZeroByte(filePath) {
+    try {
+      const stat = fs.statSync(filePath);
+      if (stat.size === 0) {
+        fs.rmSync(filePath, { force: true });
+        return true;
+      }
+    } catch {
+      // Missing file is fine; permission errors fall through to the caller.
+    }
+    return false;
   }
 
   #runPowerShell(script, options = {}) {
