@@ -13,6 +13,11 @@ const required = {
 const encoded = () => encodeEnvelope({ envelope: structuredClone(required) });
 
 describe('relayer ACP protocol boundary', () => {
+  it('preserves shared decoder errors for malformed and non-object input', () => {
+    assert.equal(decodeProjectStateEnvelope('{not json').errors[0].code, 'malformed-json');
+    assert.equal(decodeProjectStateEnvelope([]).errors[0].code, 'invalid-type');
+  });
+
   it('uses shared wire decoding and accepts required protocol fields', () => {
     assert.equal(decodeProjectStateEnvelope(JSON.stringify(encoded())).ok, true);
   });
