@@ -482,6 +482,9 @@ describe('Noosphere memory API', () => {
     assert.equal(response.status, 200);
     assert.equal(body.memory.mode, 'local-file');
     assert.equal(body.memory.ready, true);
+    assert.equal(body.exact_state.deployment_mode, 'local-only');
+    assert.equal(body.exact_state.cross_machine_recoverable, false);
+    assert.match(body.exact_state.relayer_index_id, /^sha256:[0-9a-f]{64}$/);
   });
 
   it('keeps liveness independent from Walrus readiness', async () => {
@@ -694,14 +697,17 @@ describe('Noosphere memory API', () => {
       appResponse,
       discoveryResponse,
       openApiResponse,
+      acpCapabilitiesResponse,
     ] = await Promise.all([
       fetch(`${baseUrl}/`),
       fetch(`${baseUrl}/app.js`),
       fetch(`${baseUrl}/.well-known/noosphere.json`),
       fetch(`${baseUrl}/openapi.json`),
+      fetch(`${baseUrl}/v1/acp/capabilities`),
     ]);
     const discovery = await discoveryResponse.json();
     const openApi = await openApiResponse.json();
+    const acpCapabilities = await acpCapabilitiesResponse.json();
     const csp = discoveryResponse.headers.get('content-security-policy') || '';
 
     assert.equal(homeResponse.status, 404);
@@ -710,13 +716,23 @@ describe('Noosphere memory API', () => {
     assert.doesNotMatch(csp, /cdnjs\.cloudflare\.com|unpkg\.com/);
     assert.equal(discovery.version, '2.0.0');
     assert.equal(discovery.architecture.custom_smart_contract, false);
+    assert.equal(discovery.exact_state.deployment_mode, 'local-only');
+    assert.equal(discovery.exact_state.cross_machine_recoverable, false);
+    assert.ok(discovery.endpoints.acp_capabilities);
     assert.equal(
       discovery.mcp.package,
       '@mysten-incubation/memwal-mcp',
     );
     assert.equal(openApi.info.version, '2.0.0');
+    assert.equal(acpCapabilitiesResponse.status, 200);
+    assert.equal(acpCapabilities.deployment_mode, 'local-only');
+    assert.equal(acpCapabilities.cross_machine_recoverable, false);
     assert.ok(openApi.paths['/v1/projects/{project_id}/recall']);
     assert.ok(openApi.paths['/v1/projects/{project_id}/bootstrap']);
+    assert.ok(openApi.paths['/v1/acp/capabilities']);
+    assert.ok(openApi.paths['/v1/projects/{project_id}/acp/snapshots']);
+    assert.ok(openApi.paths['/v1/projects/{project_id}/acp/heads']);
+    assert.ok(openApi.paths['/v1/projects/{project_id}/acp/history']);
   });
 
   it('runs the setup smoke test against the Walrus adapter contract', async () => {

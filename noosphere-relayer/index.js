@@ -35,6 +35,19 @@ import {
 } from './security.js';
 import { CredentialStore } from './credentials.js';
 import {
+  ACP_LIMITS,
+  canonicalize,
+} from '@noosphere/acp-protocol';
+import { decodeProjectStateEnvelope } from './acp-protocol.js';
+import { ExactStateService } from './exact-state.js';
+import {
+  createExactRouter,
+  processAcpSnapshotJob,
+  submitExactSnapshot,
+} from './exact-routes.js';
+import { FileSnapshotBackend, exactError } from './snapshot-backend.js';
+import { WalrusSnapshotBackend } from './walrus-snapshot-backend.js';
+import {
   resolveWalrusConfig,
   validateOnChainAccount,
   WalrusMemoryAdapter,
@@ -56,6 +69,22 @@ export const runtimeStore = new DurableStore({
     process.env.NOOSPHERE_STATE_PATH ||
     path.join(directory, '.noosphere-runtime', 'state.json'),
   persist: process.env.NODE_ENV !== 'test',
+  shared: process.env.NOOSPHERE_SHARED_RELAYER === 'true',
+});
+const exactFileBackend = new FileSnapshotBackend({
+  root: process.env.NOOSPHERE_SNAPSHOT_PATH || path.join(directory, '.noosphere-runtime', 'snapshots'),
+  shared: process.env.NOOSPHERE_SHARED_RELAYER === 'true',
+});
+export const exactSnapshotBackend = memoryStore.mode === MEMORY_BACKENDS.WALRUS
+  ? new WalrusSnapshotBackend({
+      adapter: memoryStore.walrus,
+      exactCopy: exactFileBackend,
+      indexHealth: () => runtimeStore.health(),
+    })
+  : exactFileBackend;
+export const exactStateService = new ExactStateService({
+  backend: exactSnapshotBackend,
+  index: runtimeStore,
 });
 const activeJobs = new Map();
 const uploadAttempts = parsePositiveInteger(
@@ -131,10 +160,11 @@ app.get('/health', (_req, res) => {
 });
 
 app.get('/ready', async (_req, res) => {
-  const [memory, pending, state] = await Promise.all([
+  const [memory, pending, state, exactState] = await Promise.all([
     memoryStore.health(),
     runtimeStore.listPending(),
     runtimeStore.health(),
+    exactStateService.getCapabilities(),
   ]);
   const uploadDelayMs = uploadDelayRemaining();
   const ready = memory.ready && state.ready;
@@ -143,6 +173,7 @@ app.get('/ready', async (_req, res) => {
     success: ready,
     service: 'Noosphere',
     memory,
+    exact_state: exactState,
     queue: {
       pending: pending.length,
       durable: state.durable,
@@ -166,8 +197,10 @@ app.get('/ready', async (_req, res) => {
   });
 });
 
-app.get('/.well-known/noosphere.json', (req, res) => {
+app.get('/.well-known/noosphere.json', async (req, res, next) => {
+  try {
   const baseUrl = getBaseUrl(req);
+  const exactState = await exactStateService.getCapabilities();
   res.json({
     name: 'Noosphere',
     version: '2.0.0',
@@ -188,6 +221,10 @@ app.get('/.well-known/noosphere.json', (req, res) => {
       rate_limit_window_ms: securityConfig.rateLimitWindowMs,
       durable_upload_queue: true,
     },
+    exact_state: {
+      ...exactState,
+      limits: ACP_LIMITS,
+    },
     endpoints: {
       remember: `${baseUrl}/v1/actions`,
       recall: `${baseUrl}/v1/projects/{project_id}/recall`,
@@ -195,6 +232,9 @@ app.get('/.well-known/noosphere.json', (req, res) => {
       bootstrap: `${baseUrl}/v1/projects/{project_id}/bootstrap`,
       local_projects: `${baseUrl}/v1/local/projects`,
       openapi: `${baseUrl}/openapi.json`,
+      acp_capabilities: `${baseUrl}/v1/acp/capabilities`,
+      acp_heads: `${baseUrl}/v1/projects/{project_id}/acp/heads`,
+      acp_snapshots: `${baseUrl}/v1/projects/{project_id}/acp/snapshots`,
     },
     universal_interfaces: {
       filesystem: [
@@ -224,6 +264,9 @@ app.get('/.well-known/noosphere.json', (req, res) => {
       ],
     },
   });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get('/openapi.json', (req, res) => {
@@ -231,6 +274,12 @@ app.get('/openapi.json', (req, res) => {
 });
 
 app.use('/v1', authenticationMiddleware(securityConfig));
+
+app.use('/v1', createExactRouter({
+  service: exactStateService,
+  limits: ACP_LIMITS,
+  submitSnapshot: submitSnapshotRequest,
+}));
 
 app.get(
   '/v1/local/projects',
@@ -558,6 +607,7 @@ app.post('/v1/actions', async (req, res, next) => {
       storage: memoryStore.mode,
     };
     const job = await runtimeStore.enqueue(receiptKey, {
+      kind: 'memory-action',
       projectId: record.project_id,
       actionType: record.action_type,
       serializedRecord: serializeMemory(record),
@@ -746,6 +796,15 @@ async function processPendingJob(job) {
 
   const operation = retryOperation(
     async () => {
+      if (job.kind === 'acp-snapshot') {
+        return processAcpSnapshotJob(job, {
+          service: exactStateService,
+          store: runtimeStore,
+        });
+      }
+      if (job.kind && job.kind !== 'memory-action') {
+        throw new Error(`unsupported-job-kind:${job.kind}`);
+      }
       const stored = await memoryStore.remember(
         job.projectId,
         job.serializedRecord,
@@ -786,6 +845,28 @@ async function processPendingJob(job) {
     });
   activeJobs.set(job.key, operation);
   return operation;
+}
+
+async function submitSnapshotRequest(projectId, envelope, expectedHeadsDigest) {
+  const decoded = decodeProjectStateEnvelope(envelope);
+  if (!decoded.ok) throw exactError(decoded.errors[0].code, 422, decoded.errors);
+  if (decoded.envelope.repository?.project_id !== projectId) {
+    throw exactError('project-id-mismatch', 422);
+  }
+  const canonicalEnvelope = canonicalize(decoded.envelope);
+  if (Buffer.byteLength(canonicalEnvelope) > ACP_LIMITS.snapshotBytes) {
+    throw exactError('snapshot-too-large', 413);
+  }
+  const submitted = await submitExactSnapshot({
+    projectId,
+    envelope: decoded.envelope,
+    canonicalEnvelope,
+    expectedHeadsDigest,
+    service: exactStateService,
+    store: runtimeStore,
+  });
+  if (submitted.status === 202) scheduleQueueRecovery();
+  return submitted;
 }
 
 async function recoverPendingJobs() {
@@ -1154,6 +1235,54 @@ function buildOpenApiDocument(baseUrl) {
           responses: {
             201: { description: 'Memory stored through the configured backend' },
           },
+        },
+      },
+      '/v1/acp/capabilities': {
+        get: {
+          security: [{ bearerAuth: [] }],
+          operationId: 'getAcpCapabilities',
+          summary: 'Get exact ACP synchronization topology and limits',
+          responses: { 200: { description: 'Exact-state capabilities' } },
+        },
+      },
+      '/v1/projects/{project_id}/acp/snapshots': {
+        post: {
+          security: [{ bearerAuth: [] }],
+          operationId: 'putAcpSnapshot',
+          summary: 'Store an immutable canonical ACP snapshot',
+          responses: {
+            200: { description: 'Existing snapshot receipt' },
+            201: { description: 'Snapshot durably published' },
+            202: { description: 'Snapshot queued; head not published' },
+            409: { description: 'Stale heads or head limit' },
+            413: { description: 'Snapshot too large' },
+            422: { description: 'Invalid envelope or project binding' },
+            507: { description: 'Project quota exceeded' },
+          },
+        },
+      },
+      '/v1/projects/{project_id}/acp/heads': {
+        get: {
+          security: [{ bearerAuth: [] }],
+          operationId: 'getAcpHeads',
+          summary: 'List deterministic ACP project heads',
+          responses: { 200: { description: 'Sorted head set' } },
+        },
+      },
+      '/v1/projects/{project_id}/acp/snapshots/{snapshot_id}': {
+        get: {
+          security: [{ bearerAuth: [] }],
+          operationId: 'getAcpSnapshot',
+          summary: 'Fetch exact canonical ACP snapshot bytes',
+          responses: { 200: { description: 'Canonical envelope with snapshot ETag' }, 404: { description: 'Snapshot not found' } },
+        },
+      },
+      '/v1/projects/{project_id}/acp/history': {
+        get: {
+          security: [{ bearerAuth: [] }],
+          operationId: 'getAcpHistory',
+          summary: 'List bounded ACP lineage metadata',
+          responses: { 200: { description: 'Bounded lineage metadata' }, 400: { description: 'Invalid limit' } },
         },
       },
       '/v1/local/projects': {

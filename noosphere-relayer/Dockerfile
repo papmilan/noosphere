@@ -3,7 +3,8 @@ FROM node:22-bookworm-slim
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=3001 \
-    NOOSPHERE_STATE_PATH=/app/.noosphere-runtime/state.json
+    NOOSPHERE_STATE_PATH=/app/.noosphere-runtime/state.json \
+    NOOSPHERE_SNAPSHOT_PATH=/app/.noosphere-runtime/snapshots
 
 WORKDIR /app
 
@@ -18,8 +19,9 @@ RUN npm ci --omit=dev --ignore-scripts \
 COPY --chown=node:node index.js memory.js local-memory.js walrus-memory.js ./
 COPY --chown=node:node durable-store.js security.js ./
 COPY --chown=node:node credentials.js local-projects.js ./
+COPY --chown=node:node acp-protocol.js exact-state.js exact-routes.js snapshot-backend.js walrus-snapshot-backend.js ./
 
-RUN mkdir -p /app/.noosphere-runtime && chown node:node /app/.noosphere-runtime
+RUN mkdir -p /app/.noosphere-runtime/snapshots && chown -R node:node /app/.noosphere-runtime
 
 USER node
 
