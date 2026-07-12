@@ -29,6 +29,11 @@ import {
 import { writeHint } from '../lifecycle/ide-bridge.js';
 import { runSetupWizard, runCredentialsCommand } from './credentials-cli.js';
 import { runOllamaSession } from './ollama.js';
+import { workspaceFingerprintHex as workspaceFingerprint, observeRepository, classifyCompatibility } from './acp/git-state.js';
+import { readState, writeState, validateState, buildInitialState } from './acp/store.js';
+import { decodeEnvelope } from './acp/wire.js';
+import { applyUpdate } from './acp/merge.js';
+import { renderKernel } from './acp/render.js';
 
 const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -41,6 +46,7 @@ const DEFAULT_WRITE_TIMEOUT_MS = 130_000;
 const DEFAULT_READ_TIMEOUT_MS = 30_000;
 const DEFAULT_BASELINE_HISTORY_COMMITS = 50;
 const MAX_BASELINE_HISTORY_COMMITS = 200;
+const MAX_HANDOFF_BYTES = 1_048_576;
 const MANAGED_START = '<!-- noosphere:continuity:start -->';
 const MANAGED_END = '<!-- noosphere:continuity:end -->';
 const ALL_ADAPTERS = ['codex', 'claude', 'gemini', 'cursor', 'mcp'];
@@ -143,6 +149,12 @@ try {
       break;
     case 'restore':
       await restoreFromWalrus(projectDir);
+      break;
+    case 'handoff':
+      await handoffFromCli(projectDir);
+      break;
+    case 'state':
+      await stateFromCli(projectDir);
       break;
     case 'setup':
       await runSetupWizard();
@@ -413,10 +425,7 @@ export async function watchProject(root, options = {}) {
     options.debounceMs || config.checkpoint_debounce_ms;
   const refreshMs =
     options.refreshMs || config.context_refresh_ms;
-  let lastFingerprint = await workspaceFingerprint(
-    root,
-    config.privacy.share_journal,
-  );
+  let lastFingerprint = await workspaceFingerprint(root);
   const previousState =
     (await readJson(path.join(root, '.noosphere', 'state.json'))) || {};
   let baselinePending =
@@ -445,10 +454,7 @@ export async function watchProject(root, options = {}) {
 
   const pollTimer = setInterval(async () => {
     try {
-      const fingerprint = await workspaceFingerprint(
-        root,
-        config.privacy.share_journal,
-      );
+      const fingerprint = await workspaceFingerprint(root);
       if (fingerprint !== lastFingerprint) {
         lastFingerprint = fingerprint;
         pendingSince = Date.now();
@@ -898,10 +904,7 @@ export async function buildWorkspaceSnapshot(root, config) {
     head,
     changed_files: changedFiles,
     diff_stat: diffStat || 'No tracked diff statistics available.',
-    workspace_fingerprint: await workspaceFingerprint(
-      root,
-      config.privacy.share_journal,
-    ),
+    workspace_fingerprint: await workspaceFingerprint(root),
     captured_at: new Date().toISOString(),
     raw_diff_included: config.privacy.include_diff,
     journal_present: await fileHasJournalEntries(root),
@@ -1292,43 +1295,6 @@ async function loadConfig(root) {
   };
 }
 
-async function workspaceFingerprint(root, includeJournal = false) {
-  const [status, diff, journal] = await Promise.all([
-    git(root, ['status', '--porcelain=v1']),
-    git(root, ['diff', '--no-ext-diff', '--binary', '--', '.']),
-    readFile(path.join(root, '.noosphere', 'journal.md'), 'utf8').catch(
-      () => '',
-    ),
-  ]);
-  const lines = status
-    .split('\n')
-    .filter((line) => line && !line.includes('.noosphere/'));
-  const untracked = lines
-    .filter((line) => line.startsWith('?? '))
-    .map((line) => line.slice(3));
-  const untrackedState = [];
-
-  for (const file of untracked.slice(0, 200)) {
-    try {
-      const details = await stat(path.join(root, file));
-      untrackedState.push(
-        `${file}:${details.size}:${details.mtimeMs}`,
-      );
-    } catch {
-      untrackedState.push(`${file}:missing`);
-    }
-  }
-
-  return hash(
-    JSON.stringify({
-      status: lines,
-      diff,
-      untracked: untrackedState,
-      journal: includeJournal ? journal : '',
-    }),
-  );
-}
-
 function formatCheckpoint(snapshot) {
   const files =
     snapshot.changed_files.length > 0
@@ -1437,6 +1403,97 @@ async function masterPromptFromCli(root) {
       'project-owner',
   });
   printMasterPromptResult(result);
+}
+
+async function handoffFromCli(root) {
+  await assertGitRepository(root);
+  const clock = new Date().toISOString();
+  const raw = await readHandoffSource();
+  const update = decodeEnvelope(raw, { clock });
+  if (!update.ok) {
+    throw new Error(`Invalid ACP handoff: ${formatAcpErrors(update.errors)}`);
+  }
+  const current = await readState(root, { clock });
+  if (current && !current.ok) {
+    throw new Error(
+      `Refusing to overwrite unreadable .noosphere/continuity.json: ${formatAcpErrors(current.errors)}. `
+        + 'Repair or remove it before importing a handoff.',
+    );
+  }
+  let next;
+  if (current) {
+    const merged = applyUpdate(current.state, update.state, { clock });
+    if (!merged.ok) throw new Error(`Cannot merge handoff: ${formatAcpErrors(merged.errors)}`);
+    next = merged;
+  } else {
+    next = { state: update.state, conflicts: update.state.runtime.conflicts };
+  }
+  const written = await writeState(root, next.state, { clock });
+  const conflicts = next.conflicts ?? [];
+  console.log(`ACP handoff stored (${written.envelope.snapshot_id}).`);
+  if (conflicts.length) {
+    console.log(`${conflicts.length} unresolved conflict(s); run \`noosphere state --json\` to review.`);
+  }
+}
+
+async function stateFromCli(root) {
+  await assertGitRepository(root);
+  const clock = new Date().toISOString();
+  const mode = process.argv[3];
+  if (mode === 'validate') {
+    const result = await validateState(root, { clock });
+    if (result.ok) {
+      console.log('ACP state is valid.');
+      return;
+    }
+    console.error(`ACP state invalid: ${formatAcpErrors(result.errors)}`);
+    process.exitCode = 1;
+    return;
+  }
+  const existing = await readState(root, { clock });
+  if (existing && !existing.ok) {
+    throw new Error(`Unreadable .noosphere/continuity.json: ${formatAcpErrors(existing.errors)}.`);
+  }
+  const decoded = existing ?? await buildInitialState(root, { clock });
+  if (!decoded.ok) throw new Error(`Cannot build ACP state: ${formatAcpErrors(decoded.errors)}`);
+  if (process.argv.includes('--json')) {
+    console.log(JSON.stringify(decoded.state.envelope, null, 2));
+    return;
+  }
+  const compatibility = classifyCompatibility(decoded.state, await observeRepository(root));
+  console.log(renderKernel(decoded.state, { compatibility, snapshotId: decoded.state.envelope.snapshot_id }));
+}
+
+async function readHandoffSource() {
+  const file = readOption('--file');
+  const useStdin = process.argv.includes('--stdin');
+  if (file && useStdin) throw new Error('Provide exactly one of --file or --stdin.');
+  if (file) {
+    const resolved = path.resolve(file);
+    const details = await stat(resolved);
+    if (details.size > MAX_HANDOFF_BYTES) {
+      throw new Error(`ACP handoff file exceeds ${MAX_HANDOFF_BYTES} bytes.`);
+    }
+    return readFile(resolved, 'utf8');
+  }
+  if (useStdin || !process.stdin.isTTY) {
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of process.stdin) {
+      total += chunk.length;
+      if (total > MAX_HANDOFF_BYTES) {
+        throw new Error(`ACP handoff exceeds ${MAX_HANDOFF_BYTES} bytes.`);
+      }
+      chunks.push(chunk);
+    }
+    const piped = Buffer.concat(chunks).toString('utf8');
+    if (piped.trim()) return piped;
+  }
+  throw new Error('Provide an ACP handoff with --file <path> or --stdin.');
+}
+
+function formatAcpErrors(errors) {
+  return (errors ?? []).map((error) => `${error.path} ${error.code}`).join('; ') || 'unknown error';
 }
 
 async function restoreFromWalrus(root) {
@@ -2357,6 +2414,9 @@ Commands:
               Print or explicitly store the exact pinned project prompt
   ollama      Run any Ollama model with shared project memory
   protocol    Print the universal agent protocol
+  state       Print the ACP continuity kernel (--json for the envelope,
+              validate to verify the persisted state)
+  handoff     Merge a structured ACP handoff (--file <path> or --stdin)
 
 Ollama examples:
   noosphere ollama qwen3-coder

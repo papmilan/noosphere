@@ -65,6 +65,30 @@ Noosphere does not capture hidden chain-of-thought. It records concise,
 externally understandable facts: what changed, what was decided, what failed,
 what was verified, and what should happen next.
 
+## ACP continuity kernel
+
+The Agent Cognitive-state Protocol (ACP) adds a local-first, storage-neutral
+project-state envelope on top of the existing memory and journal systems. It
+stores only externally shareable state — objective, decisions, evidence,
+assumptions, conflicts, blockers, risks, and next actions — never hidden
+reasoning, secrets, or raw chat.
+
+```bash
+noosphere state              # print the compact continuity kernel
+noosphere state --json       # print the canonical ACP envelope
+noosphere state validate     # verify the persisted envelope and kernel
+cat handoff.json | noosphere handoff --stdin
+noosphere handoff --file handoff.json
+```
+
+`.noosphere/continuity.json` is the canonical, content-addressed envelope;
+`.noosphere/continuity.md` is a derived kernel of at most 1,800 bytes that a
+fresh agent reads first. A handoff never overwrites conflicting work: a stale
+update appends new distinct assertions, and every competing edit becomes an
+explicit unresolved conflict. When mandatory conflicts or blockers would exceed
+the kernel budget, the kernel refuses to summarize and points to
+`noosphere state --json` instead.
+
 ## What Noosphere remembers
 
 Noosphere supports two complementary kinds of memory.
