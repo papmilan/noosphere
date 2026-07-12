@@ -1,0 +1,171 @@
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import {
+  ACP_PROTOCOL,
+  ACP_SCHEMA_VERSION,
+  createProjectState,
+} from '../continuity/acp/project-state.js';
+
+const CREATED_AT = '2026-07-12T00:00:00.000Z';
+
+function validEnvelope(overrides = {}) {
+  return {
+    protocol: ACP_PROTOCOL,
+    schema_version: ACP_SCHEMA_VERSION,
+    snapshot_id: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    parent_snapshot_id: null,
+    created_at: CREATED_AT,
+    expires_at: null,
+    origin: { agent_id: 'codex', client: 'codex-desktop', session_id: null },
+    integrity: {
+      algorithm: 'sha256',
+      digest: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      signature: { status: 'unsigned', algorithm: null, key_id: null, value: null },
+    },
+    permission_scope: 'project',
+    trust: { level: 'local-unverified', reasons: ['unsigned local envelope'] },
+    repository: {
+      project_id: 'noosphere',
+      root_identity: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      head: null,
+      branch: null,
+      merge_base: null,
+      dirty: false,
+      workspace_fingerprint: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    },
+    phase: 'implementation',
+    goal: {
+      project: 'Create reliable cross-agent project continuity.',
+      current_objective: 'Implement the ACP continuity kernel.',
+      success_conditions: ['A fresh agent selects the correct next action.'],
+    },
+    plan: [],
+    completed_work: [],
+    decisions: [],
+    evidence: [],
+    assumptions: [],
+    rejected_approaches: [],
+    unknowns: [],
+    blockers: [],
+    risks: [],
+    conflicts: [],
+    working_stance: {
+      confidence: 'medium',
+      momentum: 'progressing',
+      risk_posture: 'verify-before-change',
+      attention: [],
+      dissatisfaction: [],
+      successor_behavior: [],
+    },
+    next_actions: [],
+    references: [],
+    extensions: {},
+    ...overrides,
+  };
+}
+
+function decision(id, text, overrides = {}) {
+  return {
+    id,
+    text,
+    domain: 'storage',
+    status: 'active',
+    confidence: 'high',
+    provenance: ['r1'],
+    created_at: CREATED_AT,
+    expires_at: null,
+    repository_fingerprint: null,
+    supersedes: [],
+    ...overrides,
+  };
+}
+
+describe('createProjectState', () => {
+  it('rejects duplicate assertion IDs', () => {
+    const input = validEnvelope({
+      references: [{ id: 'r1', kind: 'file', locator: 'README.md' }],
+      decisions: [decision('d1', 'SQLite'), decision('d1', 'Postgres')],
+    });
+
+    const result = createProjectState(input, { clock: input.created_at });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.errors[0].code, 'duplicate-id');
+  });
+
+  it('creates an unresolved conflict for active decisions in one domain', () => {
+    const input = validEnvelope({
+      references: [{ id: 'r1', kind: 'file', locator: 'README.md' }],
+      decisions: [decision('d1', 'SQLite'), decision('d2', 'Postgres')],
+    });
+
+    const result = createProjectState(input, { clock: input.created_at });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.state.runtime.conflicts, [{
+      kind: 'decision-domain',
+      domain: 'storage',
+      assertion_ids: ['d1', 'd2'],
+      status: 'unresolved',
+    }]);
+  });
+
+  it('excludes expired assertions from active indexes using the supplied clock', () => {
+    const input = validEnvelope({
+      references: [{ id: 'r1', kind: 'file', locator: 'README.md' }],
+      decisions: [decision('d1', 'Expired choice', {
+        expires_at: '2026-07-12T00:00:01.000Z',
+      })],
+    });
+
+    const result = createProjectState(input, {
+      clock: '2026-07-12T00:00:02.000Z',
+    });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.state.runtime.activeByType.decisions, []);
+  });
+
+  it('deep-freezes the normalized envelope and runtime indexes', () => {
+    const input = validEnvelope();
+    const result = createProjectState(input, { clock: input.created_at });
+
+    assert.equal(result.ok, true);
+    assert.equal(Object.isFrozen(result.state), true);
+    assert.equal(Object.isFrozen(result.state.envelope.goal), true);
+    assert.equal(Object.isFrozen(result.state.runtime.byId), true);
+    assert.throws(() => {
+      result.state.envelope.goal.project = 'Changed';
+    }, TypeError);
+  });
+
+  it('orders decision-domain conflicts by domain and assertion ID', () => {
+    const input = validEnvelope({
+      references: [{ id: 'r1', kind: 'file', locator: 'README.md' }],
+      decisions: [
+        decision('z2', 'Postgres', { domain: 'storage' }),
+        decision('z1', 'SQLite', { domain: 'storage' }),
+        decision('a2', 'Redis', { domain: 'cache' }),
+        decision('a1', 'Memcached', { domain: 'cache' }),
+      ],
+    });
+
+    const result = createProjectState(input, { clock: input.created_at });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.state.runtime.conflicts, [
+      {
+        kind: 'decision-domain',
+        domain: 'cache',
+        assertion_ids: ['a1', 'a2'],
+        status: 'unresolved',
+      },
+      {
+        kind: 'decision-domain',
+        domain: 'storage',
+        assertion_ids: ['z1', 'z2'],
+        status: 'unresolved',
+      },
+    ]);
+  });
+});
