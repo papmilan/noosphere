@@ -1,6 +1,6 @@
 # ADR 0002: Reconcile ACP State by Lineage, Not Timestamp Authority
 
-- **Status:** Accepted
+- **Status:** Proposed revision awaiting review
 - **Date:** 2026-07-12
 - **Decision owners:** Noosphere maintainers
 - **Supersedes:** No prior decision
@@ -53,8 +53,22 @@ Reconciliation follows these rules:
 Lineage proves causal order, not authorship. Because v1.1 envelopes are not
 signed, automatic work may fetch, validate, and stage a candidate but may not
 replace local state. Applying a remote fast-forward or empty-local restore
-requires an explicit user command and confirmation. A future signed-writer ADR
-may permit automatic application without changing reconciliation semantics.
+requires an explicit user command and a short-lived confirmation bound to the
+full observation that produced the candidate. A future signed-writer ADR may
+permit automatic application without changing reconciliation semantics.
+
+Confirmation binds the remote snapshot ID, current local snapshot ID or null,
+remote head-set digest, repository observation digest, sync protocol version,
+reconciliation policy version, expiry, and the stable relayer index identity.
+Apply re-reads local state, re-observes Git, re-fetches and revalidates
+canonical remote bytes, and reruns reconciliation. Any mismatch or expiry
+returns `confirmation-stale` without a local write.
+
+Git status `advanced` is stale project state relative to the checkout. It is
+historical and non-actionable by default. An explicit `--allow-stale-advanced`
+override may activate it only through the same confirmation protocol;
+repository-dependent assertions remain trust-downgraded and cannot silently
+become authoritative next actions.
 
 ## Exact Storage Boundary
 
@@ -78,10 +92,12 @@ deterministic lookup. Semantic search is never used to select a head.
 ## Head-Set Semantics
 
 Head sets are unordered mathematically and serialized in lexicographic
-snapshot-ID order. Their digest is the SHA-256 digest of the canonical sorted
-array. Clients send the head-set digest they observed. A compare-and-set
-operation either commits against that exact digest or returns the current set
-without mutation.
+snapshot-ID order. Their digest is the SHA-256 digest of the RFC 8785 canonical
+UTF-8 JSON array. The empty set is canonical bytes `[]` and has digest
+`sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945`.
+Clients send the head-set digest they observed. A compare-and-set operation
+either commits against that exact digest or returns the current set without
+mutation.
 
 Uploading a snapshot is idempotent:
 
@@ -134,6 +150,34 @@ Pull failures do not delete or downgrade valid local state. Corrupt or foreign
 remote snapshots are quarantined and reported. Network errors produce a
 deferred-sync status, not a fabricated synchronized result.
 
+## Deployment and Durability Boundary
+
+Cross-machine exact synchronization exists only when every participating
+client uses the same reachable relayer and that relayer's exact index is on a
+shared durable deployment. Sharing Walrus credentials alone is insufficient:
+the index contains the exact snapshot-to-blob mapping, lineage, completeness,
+and head set.
+
+Deployments advertise one of three capability modes:
+
+- `local-only`: bytes and index are local; no cross-machine claim;
+- `shared-relayer`: exact bytes and durable index are served by the same shared
+  relayer deployment; cross-machine exact synchronization is available;
+- `walrus-backed/relayer-indexed`: bytes have a Walrus replica but exact lookup
+  and heads still depend on the same durable relayer index. Cross-machine sync
+  is available only through that relayer, not from Walrus credentials alone.
+
+Each durable index carries a stable non-secret identity so clients can verify
+that they participate in the same synchronization topology.
+
+Exact-byte durability means acknowledged canonical bytes can be read back
+byte-for-byte. Index durability means acknowledged mappings, parent edges,
+receipts, completeness, and heads survive relayer restart. Cross-machine
+recoverability requires both forms of durability to remain reachable through
+the same configured relayer. Loss of either can leave durable but undiscoverable
+bytes or an index pointing at unavailable bytes; neither state may be reported
+as recoverable.
+
 ## Security and Trust
 
 - Every downloaded snapshot passes size, JSON, schema, digest, domain
@@ -148,8 +192,16 @@ deferred-sync status, not a fabricated synchronized result.
   correctness.
 - The envelope limit is 1,048,576 bytes, matching the ACP handoff limit and
   remaining below the relayer's 2 MiB JSON request limit.
+- Default per-project limits are 10,000 indexed snapshots, 32 concurrent heads,
+  200 validated ancestry envelopes per reconciliation, and 268,435,456 indexed
+  canonical bytes. Limits are checked before publishing a head; exceeding one
+  produces an explicit quota or incomplete-lineage result, never truncation.
+- Expired envelopes may remain immutable history but can never become
+  actionable, including through an override.
 - Quarantine files are generated local state, excluded from Git, and never
-  loaded automatically.
+  loaded automatically. Their basename is derived only from a validated
+  lowercase `sha256:<64 hex>` snapshot ID, encoded as `sha256-<64 hex>.json`;
+  invalid IDs use a locally generated digest of the received bytes.
 - A future signature ADR may raise origin trust without changing lineage
   reconciliation.
 
@@ -167,7 +219,8 @@ are sorted by normalized snapshot ID before comparison or serialization.
 
 ### Positive
 
-- Cross-machine recovery can use exact state rather than reconstructed prose.
+- Cross-machine recovery through the same durable relayer index can use exact
+  state rather than reconstructed prose.
 - Concurrent agents cannot silently overwrite one another.
 - Retries are naturally idempotent through content addressing.
 - Storage backends remain replaceable.
@@ -188,8 +241,9 @@ are sorted by normalized snapshot ID before comparison or serialization.
   file-backed relayer implementation supports one writer process only.
 - Rebuilding a lost relayer index from Walrus is not guaranteed until the
   Walrus backend exposes exact enumeration or an independently durable
-  manifest. V1.1 guarantees client-machine recovery through the configured
-  relayer, not recovery from total loss of both the relayer index and client.
+  manifest. V1.1 reports client-machine recoverability only when the configured
+  shared relayer exposes healthy exact bytes and its durable index; it does not
+  guarantee recovery from total loss of both the relayer index and clients.
 
 ## Rejected Alternatives
 
