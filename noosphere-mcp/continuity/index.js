@@ -46,6 +46,7 @@ const DEFAULT_WRITE_TIMEOUT_MS = 130_000;
 const DEFAULT_READ_TIMEOUT_MS = 30_000;
 const DEFAULT_BASELINE_HISTORY_COMMITS = 50;
 const MAX_BASELINE_HISTORY_COMMITS = 200;
+const MAX_HANDOFF_BYTES = 1_048_576;
 const MANAGED_START = '<!-- noosphere:continuity:start -->';
 const MANAGED_END = '<!-- noosphere:continuity:end -->';
 const ALL_ADAPTERS = ['codex', 'claude', 'gemini', 'cursor', 'mcp'];
@@ -1413,8 +1414,14 @@ async function handoffFromCli(root) {
     throw new Error(`Invalid ACP handoff: ${formatAcpErrors(update.errors)}`);
   }
   const current = await readState(root, { clock });
+  if (current && !current.ok) {
+    throw new Error(
+      `Refusing to overwrite unreadable .noosphere/continuity.json: ${formatAcpErrors(current.errors)}. `
+        + 'Repair or remove it before importing a handoff.',
+    );
+  }
   let next;
-  if (current && current.ok) {
+  if (current) {
     const merged = applyUpdate(current.state, update.state, { clock });
     if (!merged.ok) throw new Error(`Cannot merge handoff: ${formatAcpErrors(merged.errors)}`);
     next = merged;
@@ -1444,10 +1451,13 @@ async function stateFromCli(root) {
     return;
   }
   const existing = await readState(root, { clock });
-  const decoded = existing && existing.ok ? existing : await buildInitialState(root, { clock });
+  if (existing && !existing.ok) {
+    throw new Error(`Unreadable .noosphere/continuity.json: ${formatAcpErrors(existing.errors)}.`);
+  }
+  const decoded = existing ?? await buildInitialState(root, { clock });
   if (!decoded.ok) throw new Error(`Cannot build ACP state: ${formatAcpErrors(decoded.errors)}`);
   if (process.argv.includes('--json')) {
-    console.log(JSON.stringify(existing && existing.ok ? existing.state.envelope : decoded.state.envelope, null, 2));
+    console.log(JSON.stringify(decoded.state.envelope, null, 2));
     return;
   }
   const compatibility = classifyCompatibility(decoded.state, await observeRepository(root));
@@ -1458,10 +1468,24 @@ async function readHandoffSource() {
   const file = readOption('--file');
   const useStdin = process.argv.includes('--stdin');
   if (file && useStdin) throw new Error('Provide exactly one of --file or --stdin.');
-  if (file) return readFile(path.resolve(file), 'utf8');
+  if (file) {
+    const resolved = path.resolve(file);
+    const details = await stat(resolved);
+    if (details.size > MAX_HANDOFF_BYTES) {
+      throw new Error(`ACP handoff file exceeds ${MAX_HANDOFF_BYTES} bytes.`);
+    }
+    return readFile(resolved, 'utf8');
+  }
   if (useStdin || !process.stdin.isTTY) {
     const chunks = [];
-    for await (const chunk of process.stdin) chunks.push(chunk);
+    let total = 0;
+    for await (const chunk of process.stdin) {
+      total += chunk.length;
+      if (total > MAX_HANDOFF_BYTES) {
+        throw new Error(`ACP handoff exceeds ${MAX_HANDOFF_BYTES} bytes.`);
+      }
+      chunks.push(chunk);
+    }
     const piped = Buffer.concat(chunks).toString('utf8');
     if (piped.trim()) return piped;
   }

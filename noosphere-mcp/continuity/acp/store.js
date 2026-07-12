@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createProjectState } from './project-state.js';
 import { decodeEnvelope, encodeEnvelope } from './wire.js';
@@ -48,10 +48,15 @@ export async function writeState(root, state, options = {}) {
   const kernel = renderKernel(state, { compatibility, snapshotId: envelope.snapshot_id });
   const jsonTmp = `${json}.${process.pid}.tmp`;
   const mdTmp = `${markdown}.${process.pid}.tmp`;
-  await writeFile(jsonTmp, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600 });
-  await writeFile(mdTmp, `${kernel}\n`, { mode: 0o600 });
-  await rename(jsonTmp, json);
-  await rename(mdTmp, markdown);
+  try {
+    await writeFile(jsonTmp, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600 });
+    await writeFile(mdTmp, `${kernel}\n`, { mode: 0o600 });
+    await rename(jsonTmp, json);
+    await rename(mdTmp, markdown);
+  } finally {
+    await rm(jsonTmp, { force: true }).catch(() => {});
+    await rm(mdTmp, { force: true }).catch(() => {});
+  }
   return { envelope, kernel, compatibility };
 }
 

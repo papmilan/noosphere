@@ -114,4 +114,22 @@ describe('ACP store and CLI', () => {
     await writeFile(path.join(dir, '.noosphere', 'continuity.md'), 'tampered\n');
     await assert.rejects(execFileAsync('node', [CLI, 'state', 'validate', '--path', dir]));
   });
+
+  it('refuses to overwrite an unreadable continuity.json on handoff', async () => {
+    const dir = await makeRepo();
+    const observed = await observeRepository(dir);
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(path.join(dir, '.noosphere'), { recursive: true });
+    const corrupt = '{ this is not valid ACP json';
+    await writeFile(path.join(dir, '.noosphere', 'continuity.json'), corrupt);
+    const candidateFile = path.join(dir, 'handoff.json');
+    await writeFile(candidateFile, JSON.stringify(await signedEnvelope(observed)));
+
+    await assert.rejects(
+      execFileAsync('node', [CLI, 'handoff', '--file', candidateFile, '--path', dir]),
+      /unreadable/i,
+    );
+    // The corrupt file must be left exactly as-is, not overwritten.
+    assert.equal(await readFile(path.join(dir, '.noosphere', 'continuity.json'), 'utf8'), corrupt);
+  });
 });
