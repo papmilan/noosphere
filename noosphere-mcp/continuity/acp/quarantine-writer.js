@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { chmod, lstat, open, stat } from 'node:fs/promises';
+import { lstat, open, stat } from 'node:fs/promises';
 
 const [filename, expectedDev, expectedIno] = process.argv.slice(2);
 const SAFE_NAME = /^sha256-[0-9a-f]{64}\.json$/;
@@ -31,7 +31,7 @@ try {
   }
   try {
     await handle.writeFile(Buffer.concat(chunks, size));
-    await chmod(filename, 0o600);
+    await handle.chmod(0o600);
     await handle.sync();
   } finally {
     await handle.close();

@@ -17,6 +17,7 @@ import {
 const dirs = [];
 const execFileAsync = promisify(execFile);
 const SYNC_MODULE = new URL('../continuity/acp/sync-metadata.js', import.meta.url).href;
+const QUARANTINE_WRITER = new URL('../continuity/acp/quarantine-writer.js', import.meta.url);
 async function temp() { const root = await import('node:fs/promises').then(({ mkdtemp }) => mkdtemp(path.join(os.tmpdir(), 'noosphere-sync-meta-'))); dirs.push(root); return root; }
 after(async () => Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true }))));
 const id = (char) => `sha256:${char.repeat(64)}`;
@@ -151,6 +152,12 @@ describe('ACP sync metadata confirmations', () => {
 });
 
 describe('ACP quarantine', () => {
+  it('changes permissions only through the already-open file descriptor', async () => {
+    const source = await readFile(QUARANTINE_WRITER, 'utf8');
+    assert.match(source, /handle\.chmod\(0o600\)/);
+    assert.doesNotMatch(source, /chmod\(filename/);
+  });
+
   it('uses only safe names, exclusive owner-only files, and rejects symlink directories or targets', async () => {
     const root = await temp();
     const bytes = Buffer.from('untrusted remote bytes');
