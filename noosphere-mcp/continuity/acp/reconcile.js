@@ -12,8 +12,10 @@ export function reconcileExactState({
   rootIdentity,
 }) {
   const heads = [...new Set(remoteHeads)].sort();
-  const graph = new Map(validatedById || []);
-  if (local?.envelope?.snapshot_id) graph.set(local.envelope.snapshot_id, local);
+  if (!validAuthorityGraph(validatedById, local)) {
+    return { action: 'quarantine', reason: 'invalid-authority-graph', actionable: false, remote_heads: heads };
+  }
+  const graph = validatedById;
   if (graph.size > ACP_LIMITS.ancestryEnvelopes) return incomplete();
   if (metadataDisagrees(graph, historyById)) return incomplete();
 
@@ -60,6 +62,16 @@ export function reconcileExactState({
     requires_confirmation: true,
     trust_downgrade: downgrade,
   };
+}
+
+function validAuthorityGraph(validatedById, local) {
+  if (!(validatedById instanceof Map)) return false;
+  for (const [snapshotId, state] of validatedById) {
+    if (!state?.envelope || state.envelope.snapshot_id !== snapshotId) return false;
+  }
+  if (local == null) return true;
+  const localId = local?.envelope?.snapshot_id;
+  return typeof localId === 'string' && validatedById.get(localId) === local;
 }
 
 function completePath(start, graph, localId) {

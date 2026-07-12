@@ -22,7 +22,9 @@ function state(snapshotId, parent = null, overrides = {}) {
 }
 
 function reconcile({ local = state(LOCAL, PARENT), heads = [REMOTE], states, compatibility = { status: 'exact', trustDowngrade: 0 }, policy = DEFAULT_POLICY, historyById, projectId, rootIdentity } = {}) {
-  const values = states || [state(PARENT), local, state(REMOTE, LOCAL)];
+  const values = states
+    ? [...states.filter((value) => value.envelope.snapshot_id !== local?.envelope?.snapshot_id), ...(local ? [local] : [])]
+    : [state(PARENT), ...(local ? [local] : []), state(REMOTE, LOCAL)];
   return reconcileExactState({
     local, remoteHeads: heads, validatedById: new Map(values.map((value) => [value.envelope.snapshot_id, value])),
     compatibility, clock: CLOCK, policy, historyById, projectId, rootIdentity,
@@ -83,6 +85,16 @@ describe('reconcileExactState', () => {
   it('is stable across map and head response order', () => {
     const states = [state(PARENT), state(LOCAL, PARENT), state(REMOTE, LOCAL), state(OTHER, LOCAL)];
     assert.deepEqual(reconcile({ heads: [OTHER, REMOTE], states }), reconcile({ heads: [REMOTE, OTHER], states: [...states].reverse() }));
+  });
+
+  it('rejects mis-keyed authority entries and unvalidated local references deterministically', () => {
+    const local = state(LOCAL, PARENT);
+    const remote = state(REMOTE, LOCAL);
+    const invalid = { action: 'quarantine', reason: 'invalid-authority-graph', actionable: false, remote_heads: [REMOTE] };
+    const input = { remoteHeads: [REMOTE], compatibility: { status: 'exact' }, clock: CLOCK, policy: DEFAULT_POLICY };
+    assert.deepEqual(reconcileExactState({ ...input, local, validatedById: new Map([[OTHER, remote], [LOCAL, local]]) }), invalid);
+    assert.deepEqual(reconcileExactState({ ...input, local: structuredClone(local), validatedById: new Map([[REMOTE, remote], [LOCAL, local], [PARENT, state(PARENT)]]) }), invalid);
+    assert.deepEqual(reconcileExactState({ ...input, local, validatedById: new Map([[REMOTE, remote], [PARENT, state(PARENT)]]) }), invalid);
   });
 });
 

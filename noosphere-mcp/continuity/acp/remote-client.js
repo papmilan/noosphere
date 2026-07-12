@@ -17,20 +17,28 @@ export class RemoteStateError extends Error {
 }
 
 export class RemoteStateClient {
-  constructor({ baseUrl, token, fetchImpl = fetch, timeoutMs = 8_000 }) {
+  constructor({ baseUrl, token, fetchImpl = fetch, timeoutMs = 8_000, expectedRelayerIndexId = null }) {
     this.baseUrl = String(baseUrl).replace(/\/$/, '');
     this.token = token;
     this.fetchImpl = fetchImpl;
     this.timeoutMs = timeoutMs;
+    if (expectedRelayerIndexId !== null && !DIGEST_ID.test(expectedRelayerIndexId)) {
+      throw new RemoteStateError('invalid-relayer-index-id');
+    }
+    this.relayerIndexId = expectedRelayerIndexId;
   }
 
   async capabilities() {
-    const result = await this.request('/v1/acp/capabilities');
+    const result = await this.request('/v1/acp/capabilities', {}, { requirePinned: false });
     if (result.sync_protocol_version !== SYNC_PROTOCOL_VERSION
       || result.reconciliation_policy_version !== RECONCILIATION_POLICY_VERSION) {
       throw new RemoteStateError('unsupported-capabilities');
     }
     if (!DIGEST_ID.test(result.relayer_index_id)) throw new RemoteStateError('invalid-relayer-index-id');
+    if (this.relayerIndexId !== null && this.relayerIndexId !== result.relayer_index_id) {
+      throw new RemoteStateError('relayer-index-mismatch');
+    }
+    this.relayerIndexId = result.relayer_index_id;
     return result;
   }
 
@@ -42,20 +50,22 @@ export class RemoteStateClient {
     return this.request(`/v1/projects/${encodeURIComponent(projectId)}/acp/snapshots`, {
       method: 'POST',
       body,
-    });
+    }, { verifyIndex: false });
   }
 
   getHeads(projectId) {
-    return this.request(`/v1/projects/${encodeURIComponent(projectId)}/acp/heads`);
+    return this.request(`/v1/projects/${encodeURIComponent(projectId)}/acp/heads`, {}, { verifyIndex: true });
   }
 
   async getSnapshot(projectId, snapshotId) {
+    this.requirePinnedIndex();
     assertSnapshotId(snapshotId);
     return this.withResponse(
       `/v1/projects/${encodeURIComponent(projectId)}/acp/snapshots/${encodeURIComponent(snapshotId)}`,
       {},
       async (response) => {
         if (!response.ok) throw await responseError(response, ACP_LIMITS.snapshotBytes);
+        this.verifyIndex(response);
         const bytes = await readBounded(response, ACP_LIMITS.snapshotBytes);
         const etag = response.headers.get('etag');
         if (etag !== `"${snapshotId}"`) throw new RemoteStateError('snapshot-mismatch', { status: response.status });
@@ -76,17 +86,30 @@ export class RemoteStateClient {
     }
     const query = new URLSearchParams({ limit: String(limit) });
     if (head !== undefined) query.set('head', head);
-    return this.request(`/v1/projects/${encodeURIComponent(projectId)}/acp/history?${query}`);
+    return this.request(`/v1/projects/${encodeURIComponent(projectId)}/acp/history?${query}`, {}, { verifyIndex: true });
   }
 
-  async request(path, options = {}) {
+  async request(path, options = {}, { requirePinned = true, verifyIndex = false } = {}) {
+    if (requirePinned) this.requirePinnedIndex();
     return this.withResponse(path, options, async (response) => {
       if (!response.ok) throw await responseError(response, ACP_LIMITS.snapshotBytes);
+      if (verifyIndex) this.verifyIndex(response);
       const bytes = await readBounded(response, ACP_LIMITS.snapshotBytes);
       try { return JSON.parse(bytes.toString('utf8')); } catch (cause) {
         throw new RemoteStateError('malformed-json', { status: response.status, cause });
       }
     });
+  }
+
+  requirePinnedIndex() {
+    if (this.relayerIndexId === null) throw new RemoteStateError('capabilities-required');
+  }
+
+  verifyIndex(response) {
+    this.requirePinnedIndex();
+    const observed = response.headers.get('x-relayer-index-id');
+    if (observed === null) throw new RemoteStateError('missing-relayer-index-id', { status: response.status });
+    if (observed !== this.relayerIndexId) throw new RemoteStateError('relayer-index-mismatch', { status: response.status });
   }
 
   async withResponse(path, options, consume) {

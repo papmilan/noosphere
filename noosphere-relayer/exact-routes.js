@@ -17,21 +17,27 @@ export function createExactRouter({ service, limits, submitSnapshot } = {}) {
   }));
 
   router.get('/projects/:project_id/acp/heads', route(async (req, res) => {
-    res.json({ success: true, ...await service.getHeads(req.params.project_id) });
+    const [heads, capabilities] = await Promise.all([
+      service.getHeads(req.params.project_id), service.getCapabilities(),
+    ]);
+    res.set('X-Relayer-Index-Id', capabilities.relayer_index_id).json({ success: true, ...heads });
   }));
 
   router.get('/projects/:project_id/acp/snapshots/:snapshot_id', route(async (req, res) => {
-    const result = await service.getSnapshot(req.params.project_id, req.params.snapshot_id);
-    res.set('ETag', `"${result.snapshot_id}"`).type('application/json').send(result.bytes);
+    const [result, capabilities] = await Promise.all([
+      service.getSnapshot(req.params.project_id, req.params.snapshot_id), service.getCapabilities(),
+    ]);
+    res.set('X-Relayer-Index-Id', capabilities.relayer_index_id)
+      .set('ETag', `"${result.snapshot_id}"`).type('application/json').send(result.bytes);
   }));
 
   router.get('/projects/:project_id/acp/history', route(async (req, res) => {
     const limit = parseBoundedHistoryLimit(req.query.limit, 1, limits.ancestryEnvelopes);
-    const history = await service.getHistory(req.params.project_id, {
-      head: req.query.head,
-      limit,
-    });
-    res.json({ success: true, history });
+    const [history, capabilities] = await Promise.all([
+      service.getHistory(req.params.project_id, { head: req.query.head, limit }),
+      service.getCapabilities(),
+    ]);
+    res.set('X-Relayer-Index-Id', capabilities.relayer_index_id).json({ success: true, history });
   }));
 
   return router;

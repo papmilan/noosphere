@@ -14,7 +14,7 @@ describe('RemoteStateClient', () => {
       calls.push({ url, options });
       if (url.endsWith('/capabilities')) return json({ sync_protocol_version: SYNC_PROTOCOL_VERSION, reconciliation_policy_version: RECONCILIATION_POLICY_VERSION, relayer_index_id: INDEX });
       if (options.method === 'POST') return json({ snapshot_id: SNAPSHOT, created: true }, { status: 201 });
-      return json({ heads: [SNAPSHOT], heads_digest: INDEX, relayer_index_id: INDEX });
+      return json({ heads: [SNAPSHOT], heads_digest: INDEX }, { headers: { 'x-relayer-index-id': INDEX } });
     };
     const client = new RemoteStateClient({ baseUrl: 'https://relay.example/', token: 'token', fetchImpl });
     assert.equal((await client.capabilities()).relayer_index_id, INDEX);
@@ -33,34 +33,45 @@ describe('RemoteStateClient', () => {
     ]) await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', fetchImpl: async () => json(body) }).capabilities(), RemoteStateError);
   });
 
+  it('requires a pinned capability index and rejects identity changes across calls', async () => {
+    const unpinned = new RemoteStateClient({ baseUrl: 'https://x', fetchImpl: async () => json({ heads: [] }, { headers: { 'x-relayer-index-id': INDEX } }) });
+    await assert.rejects(unpinned.getHeads('p'), /capabilities-required/);
+    let current = INDEX;
+    const client = new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl: async () => json({ heads: [] }, { headers: { 'x-relayer-index-id': current } }) });
+    await client.getHeads('p');
+    current = `sha256:${'c'.repeat(64)}`;
+    await assert.rejects(client.getHeads('p'), /relayer-index-mismatch/);
+    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl: async () => json({ heads: [] }) }).getHeads('p'), /missing-relayer-index-id/);
+  });
+
   it('bounds JSON and snapshot bodies to 1 MiB and rejects malformed JSON', async () => {
     const oversized = 'x'.repeat(1_048_577);
-    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', fetchImpl: async () => new Response(oversized) }).getHeads('p'), /response-too-large/);
-    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', fetchImpl: async () => new Response('{bad') }).getHeads('p'), /malformed-json/);
-    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', fetchImpl: async () => new Response(oversized) }).getSnapshot('p', SNAPSHOT), /response-too-large/);
+    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl: async () => new Response(oversized, { headers: { 'x-relayer-index-id': INDEX } }) }).getHeads('p'), /response-too-large/);
+    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl: async () => new Response('{bad', { headers: { 'x-relayer-index-id': INDEX } }) }).getHeads('p'), /malformed-json/);
+    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl: async () => new Response(oversized, { headers: { 'x-relayer-index-id': INDEX } }) }).getSnapshot('p', SNAPSHOT), /response-too-large/);
     await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', fetchImpl: async () => { throw new Error('must not fetch'); } }).putSnapshot('p', { value: oversized }, INDEX), /request-too-large/);
   });
 
   it('returns exact bytes and headers only when ETag matches the requested snapshot', async () => {
     const bytes = Buffer.from('{"exact":true}');
-    const client = new RemoteStateClient({ baseUrl: 'https://x', fetchImpl: async () => new Response(bytes, { headers: { etag: `"${SNAPSHOT}"`, 'x-relayer-index-id': INDEX } }) });
+    const client = new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl: async () => new Response(bytes, { headers: { etag: `"${SNAPSHOT}"`, 'x-relayer-index-id': INDEX } }) });
     const result = await client.getSnapshot('p', SNAPSHOT);
     assert.deepEqual(result.bytes, bytes);
     assert.equal(result.etag, `"${SNAPSHOT}"`);
     assert.equal(result.relayer_index_id, INDEX);
-    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', fetchImpl: async () => new Response(bytes, { headers: { etag: `"sha256:${'c'.repeat(64)}"` } }) }).getSnapshot('p', SNAPSHOT), /snapshot-mismatch/);
+    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl: async () => new Response(bytes, { headers: { etag: `"sha256:${'c'.repeat(64)}"`, 'x-relayer-index-id': INDEX } }) }).getSnapshot('p', SNAPSHOT), /snapshot-mismatch/);
   });
 
   it('aborts requests at the configured timeout', async () => {
     const fetchImpl = (_url, { signal }) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
-    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', fetchImpl, timeoutMs: 5 }).getHeads('p'), /request-timeout/);
+    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl, timeoutMs: 5 }).getHeads('p'), /request-timeout/);
     const slowBody = new ReadableStream({ start(controller) { setTimeout(() => { controller.enqueue(new TextEncoder().encode('{}')); controller.close(); }, 25); } });
-    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', fetchImpl: async () => new Response(slowBody), timeoutMs: 5 }).getHeads('p'), /request-timeout/);
+    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl: async () => new Response(slowBody, { headers: { 'x-relayer-index-id': INDEX } }), timeoutMs: 5 }).getHeads('p'), /request-timeout/);
   });
 
   it('returns typed bounded server errors for normative statuses', async () => {
     for (const status of [409, 413, 422, 507]) {
-      const client = new RemoteStateClient({ baseUrl: 'https://x', fetchImpl: async () => json({ error: 'typed-error', details: [{ code: 'safe' }] }, { status }) });
+      const client = new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl: async () => json({ error: 'typed-error', details: [{ code: 'safe' }] }, { status, headers: { 'x-relayer-index-id': INDEX } }) });
       await assert.rejects(client.putSnapshot('p', {}, INDEX), (error) => error instanceof RemoteStateError && error.status === status && error.code === 'typed-error');
     }
   });
