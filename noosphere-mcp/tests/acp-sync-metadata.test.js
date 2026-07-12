@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { lstat, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
+import { promisify } from 'node:util';
 import {
   consumeConfirmation,
   digestRepositoryObservation,
@@ -13,6 +15,8 @@ import {
 } from '../continuity/acp/sync-metadata.js';
 
 const dirs = [];
+const execFileAsync = promisify(execFile);
+const SYNC_MODULE = new URL('../continuity/acp/sync-metadata.js', import.meta.url).href;
 async function temp() { const root = await import('node:fs/promises').then(({ mkdtemp }) => mkdtemp(path.join(os.tmpdir(), 'noosphere-sync-meta-'))); dirs.push(root); return root; }
 after(async () => Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true }))));
 const id = (char) => `sha256:${char.repeat(64)}`;
@@ -71,13 +75,81 @@ describe('ACP sync metadata confirmations', () => {
     const issued = await issueConfirmation(other, observation(20, { remote_expires_at: remoteExpiry }), NOW);
     assert.equal(issued.expires_at, remoteExpiry);
   });
+
+  it('strictly rejects incomplete, extra, malformed, or unsupported observations before persistence', async () => {
+    const mutations = [
+      (value) => { delete value.remote_snapshot_id; },
+      (value) => { value.extra = true; },
+      (value) => { value.local_snapshot_id = 'bad'; },
+      (value) => { value.remote_heads_digest = 'bad'; },
+      (value) => { value.repository_observation.root_identity = 'bad'; },
+      (value) => { value.repository_observation.extra = true; },
+      (value) => { value.relayer_index_id = 'bad'; },
+      (value) => { value.sync_protocol_version = 'other'; },
+      (value) => { value.reconciliation_policy_version = 'other'; },
+      (value) => { value.action = 'already-synced'; },
+      (value) => { value.allow_stale_advanced = 'yes'; },
+      (value) => { value.remote_expires_at = 'tomorrow'; },
+    ];
+    for (const mutate of mutations) {
+      const root = await temp();
+      const value = observation();
+      mutate(value);
+      await assert.rejects(issueConfirmation(root, value, NOW), /confirmation-schema/);
+      assert.equal(Object.keys((await readSyncMetadata(root)).confirmations).length, 0);
+    }
+  });
+
+  it('serializes concurrent issuers at the live-entry limit and recovers a dead-owner lock', async () => {
+    const root = await temp();
+    const results = await Promise.allSettled(Array.from({ length: 20 }, (_, number) => issueConfirmation(root, observation(number), NOW)));
+    assert.equal(results.filter(({ status }) => status === 'fulfilled').length, 16);
+    assert.equal(results.filter(({ status, reason }) => status === 'rejected' && /confirmation-limit/.test(reason.message)).length, 4);
+    assert.equal(Object.keys((await readSyncMetadata(root)).confirmations).length, 16);
+
+    const staleRoot = await temp();
+    await mkdir(path.join(staleRoot, '.noosphere'), { recursive: true });
+    await writeFile(path.join(staleRoot, '.noosphere', 'continuity-sync.lock'), JSON.stringify({ pid: 99999999, token: 'dead', created_at: 0 }), { mode: 0o600 });
+    assert.ok(await issueConfirmation(staleRoot, observation(), NOW));
+  });
+
+  it('prevents lost updates across concurrent Node processes', async () => {
+    const root = await temp();
+    const script = `
+      const [root, start, moduleUrl] = process.argv.slice(1);
+      const { issueConfirmation } = await import(moduleUrl);
+      const id = (c) => 'sha256:' + c.repeat(64);
+      for (let offset = 0; offset < 8; offset += 1) {
+        const n = Number(start) + offset;
+        await issueConfirmation(root, {
+          remote_snapshot_id: 'sha256:' + n.toString(16).padStart(64, '0'),
+          local_snapshot_id: null, remote_heads_digest: id('a'),
+          repository_observation: { root_identity: id('b'), head: 'abc', branch: 'main', dirty: false, workspace_fingerprint: id('c'), ancestors: ['abc'] },
+          relayer_index_id: id('d'), sync_protocol_version: 'noosphere.acp-sync/1',
+          reconciliation_policy_version: 'noosphere.acp-reconcile/1', action: 'remote-only-restore',
+          allow_stale_advanced: false, remote_expires_at: null,
+        }, ${NOW});
+      }
+    `;
+    await Promise.all([
+      execFileAsync('node', ['--input-type=module', '-e', script, root, '0', SYNC_MODULE]),
+      execFileAsync('node', ['--input-type=module', '-e', script, root, '8', SYNC_MODULE]),
+    ]);
+    assert.equal(Object.keys((await readSyncMetadata(root)).confirmations).length, 16);
+  });
 });
 
 describe('ACP quarantine', () => {
   it('uses only safe names, exclusive owner-only files, and rejects symlink directories or targets', async () => {
     const root = await temp();
     const bytes = Buffer.from('untrusted remote bytes');
-    const hostile = await quarantineBytes(root, '../../secret', bytes);
+    let hostile;
+    try { hostile = await quarantineBytes(root, '../../secret', bytes); }
+    catch (error) {
+      assert.equal(error.code, 'quarantine-unsupported');
+      assert.equal(process.platform, 'darwin');
+      return;
+    }
     assert.match(path.basename(hostile.path), /^sha256-[0-9a-f]{64}\.json$/);
     assert.equal((await stat(hostile.path)).mode & 0o777, 0o600);
     assert.deepEqual(await readFile(hostile.path), bytes);

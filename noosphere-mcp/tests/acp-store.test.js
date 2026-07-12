@@ -167,4 +167,26 @@ describe('ACP store and CLI', () => {
     assert.deepEqual(await readFile(jsonPath), before[0]);
     assert.deepEqual(await readFile(mdPath), before[1]);
   });
+
+  it('recovers the durable pair transaction after restart at every recorded crash phase', async () => {
+    for (const phase of ['prepared', 'committing', 'json-committed', 'committed']) {
+      const dir = await makeRepo();
+      const observed = await observeRepository(dir);
+      const first = decodeEnvelope(await signedEnvelope(observed), { clock: CREATED_AT }).state;
+      const written = await writeStateIfCurrent(dir, first, null, { clock: CREATED_AT, compatibility: { status: 'exact', trustDowngrade: 0 } });
+      const second = decodeEnvelope(await signedEnvelope(observed, { phase: 'verification' }), { clock: CREATED_AT }).state;
+      const crash = Object.assign(new Error(`crash-${phase}`), { simulatedCrash: true });
+      await assert.rejects(writeStateIfCurrent(dir, second, written.envelope.snapshot_id, {
+        clock: CREATED_AT,
+        compatibility: { status: 'exact', trustDowngrade: 0 },
+        phaseHook: async (current) => { if (current === phase) throw crash; },
+      }), new RegExp(`crash-${phase}`));
+      const recovered = await readState(dir, { clock: CREATED_AT });
+      assert.equal(recovered.ok, true);
+      assert.equal(recovered.state.envelope.snapshot_id, phase === 'committed' ? second.envelope.snapshot_id : written.envelope.snapshot_id);
+      const artifacts = (await import('node:fs/promises').then(({ readdir }) => readdir(path.join(dir, '.noosphere'))))
+        .filter((name) => name.includes('continuity-transaction') || name.includes('.txn-'));
+      assert.deepEqual(artifacts, []);
+    }
+  });
 });

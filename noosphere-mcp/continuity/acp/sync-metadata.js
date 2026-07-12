@@ -4,11 +4,19 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalize } from '@noosphere/acp-protocol';
+import { RECONCILIATION_POLICY_VERSION, SYNC_PROTOCOL_VERSION } from '@noosphere/acp-protocol';
 
 const METADATA_FILE = 'continuity-sync.json';
 const CONFIRMATION_LIMIT = 16;
 const CONFIRMATION_TTL_MS = 5 * 60 * 1000;
 const SNAPSHOT_ID = /^sha256:[0-9a-f]{64}$/;
+const OBSERVATION_KEYS = [
+  'action', 'allow_stale_advanced', 'local_snapshot_id', 'reconciliation_policy_version',
+  'relayer_index_id', 'remote_expires_at', 'remote_heads_digest', 'remote_snapshot_id',
+  'repository_observation', 'sync_protocol_version',
+];
+const REPOSITORY_KEYS = ['ancestors', 'branch', 'dirty', 'head', 'root_identity', 'workspace_fingerprint'];
+const CONFIRMATION_ACTIONS = new Set(['fast-forward-local', 'remote-only-restore', 'historical-advanced']);
 
 export async function readSyncMetadata(root) {
   const file = metadataPath(root);
@@ -52,6 +60,11 @@ export function digestRepositoryObservation(observed) {
 }
 
 export async function issueConfirmation(root, observation, clock = Date.now()) {
+  return withMetadataLock(root, () => issueConfirmationLocked(root, observation, clock));
+}
+
+async function issueConfirmationLocked(root, observation, clock) {
+  validateObservation(observation);
   const now = clockMs(clock);
   const metadata = await readSyncMetadata(root);
   pruneConfirmations(metadata.confirmations, now);
@@ -89,11 +102,16 @@ export async function issueConfirmation(root, observation, clock = Date.now()) {
 }
 
 export async function consumeConfirmation(root, confirmationId, clock = Date.now()) {
+  return withMetadataLock(root, () => consumeConfirmationLocked(root, confirmationId, clock));
+}
+
+async function consumeConfirmationLocked(root, confirmationId, clock) {
   const metadata = await readSyncMetadata(root);
   const confirmation = metadata.confirmations[confirmationId];
   if (!confirmation) throw syncError('confirmation-missing');
   delete metadata.confirmations[confirmationId];
   await writeSyncMetadata(root, metadata);
+  try { validateConfirmation(confirmation); } catch { throw syncError('confirmation-invalid'); }
   const { confirmation_id, digest: storedDigest, ...body } = confirmation;
   const expected = digest(canonicalize(body));
   if (confirmation_id !== confirmationId || storedDigest !== expected || confirmation_id !== expected) {
@@ -122,10 +140,14 @@ export async function quarantineBytes(root, receivedSnapshotId, receivedBytes) {
   try {
     if (!(await directoryHandle.stat()).isDirectory()) throw syncError('quarantine-symlink');
     const safeId = SNAPSHOT_ID.test(receivedSnapshotId) ? receivedSnapshotId.slice(7) : hashHex(bytes);
-    const target = path.join(directory, `sha256-${safeId}.json`);
+    const filename = `sha256-${safeId}.json`;
+    const descriptorRoot = await descriptorDirectory(directoryHandle.fd);
+    if (descriptorRoot === null) throw syncError('quarantine-unsupported');
+    const target = path.join(directory, filename);
+    const safeTarget = path.join(descriptorRoot, filename);
     let handle;
     try {
-      handle = await open(target, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW || 0), 0o600);
+      handle = await open(safeTarget, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW || 0), 0o600);
     } catch (error) {
       if (error.code === 'ELOOP') throw syncError('quarantine-symlink', error);
       if (error.code === 'EEXIST') {
@@ -160,6 +182,105 @@ function pruneConfirmations(confirmations, now) {
     if (Date.parse(confirmation.expires_at) <= now) delete confirmations[id];
   }
 }
+
+function validateObservation(value) {
+  if (!plainObject(value) || !exactKeys(value, OBSERVATION_KEYS)) throw syncError('confirmation-schema');
+  if (!SNAPSHOT_ID.test(value.remote_snapshot_id)
+    || !(value.local_snapshot_id === null || SNAPSHOT_ID.test(value.local_snapshot_id))
+    || !SNAPSHOT_ID.test(value.remote_heads_digest)
+    || !SNAPSHOT_ID.test(value.relayer_index_id)
+    || value.sync_protocol_version !== SYNC_PROTOCOL_VERSION
+    || value.reconciliation_policy_version !== RECONCILIATION_POLICY_VERSION
+    || !CONFIRMATION_ACTIONS.has(value.action)
+    || typeof value.allow_stale_advanced !== 'boolean'
+    || !(value.remote_expires_at === null || validTimestamp(value.remote_expires_at))) {
+    throw syncError('confirmation-schema');
+  }
+  const observed = value.repository_observation;
+  if (!plainObject(observed) || !exactKeys(observed, REPOSITORY_KEYS)
+    || !SNAPSHOT_ID.test(observed.root_identity)
+    || !SNAPSHOT_ID.test(observed.workspace_fingerprint)
+    || !(observed.head === null || nonemptyString(observed.head))
+    || !(observed.branch === null || nonemptyString(observed.branch))
+    || typeof observed.dirty !== 'boolean'
+    || !Array.isArray(observed.ancestors)
+    || observed.ancestors.some((ancestor) => !nonemptyString(ancestor))) {
+    throw syncError('confirmation-schema');
+  }
+}
+
+function validateConfirmation(value) {
+  const keys = [...OBSERVATION_KEYS.filter((key) => !['repository_observation', 'remote_expires_at'].includes(key)),
+    'repository_observation_digest', 'issued_at', 'expires_at', 'confirmation_id', 'digest'].sort();
+  if (!plainObject(value) || !exactKeys(value, keys)
+    || !SNAPSHOT_ID.test(value.remote_snapshot_id)
+    || !(value.local_snapshot_id === null || SNAPSHOT_ID.test(value.local_snapshot_id))
+    || !SNAPSHOT_ID.test(value.remote_heads_digest)
+    || !SNAPSHOT_ID.test(value.repository_observation_digest)
+    || !SNAPSHOT_ID.test(value.relayer_index_id)
+    || value.sync_protocol_version !== SYNC_PROTOCOL_VERSION
+    || value.reconciliation_policy_version !== RECONCILIATION_POLICY_VERSION
+    || !CONFIRMATION_ACTIONS.has(value.action)
+    || typeof value.allow_stale_advanced !== 'boolean'
+    || !validTimestamp(value.issued_at) || !validTimestamp(value.expires_at)
+    || Date.parse(value.expires_at) > Date.parse(value.issued_at) + CONFIRMATION_TTL_MS
+    || !SNAPSHOT_ID.test(value.confirmation_id) || !SNAPSHOT_ID.test(value.digest)) {
+    throw syncError('confirmation-schema');
+  }
+}
+
+async function withMetadataLock(root, operation) {
+  const directory = path.join(root, '.noosphere');
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await chmod(directory, 0o700);
+  const lockPath = path.join(directory, 'continuity-sync.lock');
+  const token = randomUUID();
+  let handle;
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    try {
+      handle = await open(lockPath, 'wx', 0o600);
+      await handle.writeFile(JSON.stringify({ pid: process.pid, token, created_at: Date.now() }));
+      await handle.sync();
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      if (await staleLock(lockPath)) await rm(lockPath, { force: true });
+      else await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  if (!handle) throw syncError('confirmation-lock-timeout');
+  try { return await operation(); } finally {
+    await handle.close();
+    const current = await readFile(lockPath, 'utf8').then(JSON.parse).catch(() => null);
+    if (current?.token === token) await rm(lockPath, { force: true });
+  }
+}
+
+async function staleLock(lockPath) {
+  const lock = await readFile(lockPath, 'utf8').then(JSON.parse).catch(() => null);
+  if (!lock || !Number.isInteger(lock.pid) || typeof lock.token !== 'string') {
+    const details = await lstat(lockPath).catch(() => null);
+    return details !== null && Date.now() - details.mtimeMs > 60_000;
+  }
+  try { process.kill(lock.pid, 0); return Date.now() - Number(lock.created_at || 0) > 60_000; }
+  catch (error) { return error.code === 'ESRCH'; }
+}
+
+async function descriptorDirectory(fd) {
+  for (const base of ['/proc/self/fd', '/dev/fd']) {
+    const candidate = path.join(base, String(fd));
+    try {
+      const details = await lstat(candidate);
+      if (details.isSymbolicLink()) return candidate;
+    } catch {}
+  }
+  return null;
+}
+
+function plainObject(value) { return value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
+function exactKeys(value, keys) { return JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort()); }
+function nonemptyString(value) { return typeof value === 'string' && value.length > 0 && value.length <= 4000; }
+function validTimestamp(value) { return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) && Number.isFinite(Date.parse(value)); }
 
 function metadataPath(root) { return path.join(root, '.noosphere', METADATA_FILE); }
 function hashHex(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
