@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import {
   ACP_PROTOCOL,
@@ -80,6 +81,25 @@ function decision(id, text, overrides = {}) {
   };
 }
 
+function decisionConflict(overrides = {}) {
+  return {
+    kind: 'decision-domain',
+    severity: 'high',
+    status: 'unresolved',
+    domain: 'storage',
+    candidates: [{
+      assertion_id: 'd1',
+      value: 'SQLite',
+      provenance: ['r1'],
+      repository_binding: null,
+      trust: 'local-unverified',
+      created_at: CREATED_AT,
+      expires_at: null,
+    }],
+    ...overrides,
+  };
+}
+
 describe('createProjectState', () => {
   it('rejects duplicate assertion IDs', () => {
     const input = validEnvelope({
@@ -104,9 +124,19 @@ describe('createProjectState', () => {
     assert.equal(result.ok, true);
     assert.deepEqual(result.state.runtime.conflicts, [{
       kind: 'decision-domain',
-      domain: 'storage',
-      assertion_ids: ['d1', 'd2'],
+      severity: 'high',
       status: 'unresolved',
+      domain: 'storage',
+      candidates: [
+        {
+          assertion_id: 'd1', value: 'SQLite', provenance: ['r1'], repository_binding: null,
+          trust: 'local-unverified', created_at: CREATED_AT, expires_at: null,
+        },
+        {
+          assertion_id: 'd2', value: 'Postgres', provenance: ['r1'], repository_binding: null,
+          trust: 'local-unverified', created_at: CREATED_AT, expires_at: null,
+        },
+      ],
     }]);
   });
 
@@ -156,16 +186,106 @@ describe('createProjectState', () => {
     assert.deepEqual(result.state.runtime.conflicts, [
       {
         kind: 'decision-domain',
-        domain: 'cache',
-        assertion_ids: ['a1', 'a2'],
+        severity: 'high',
         status: 'unresolved',
+        domain: 'cache',
+        candidates: [
+          { assertion_id: 'a1', value: 'Memcached', provenance: ['r1'], repository_binding: null, trust: 'local-unverified', created_at: CREATED_AT, expires_at: null },
+          { assertion_id: 'a2', value: 'Redis', provenance: ['r1'], repository_binding: null, trust: 'local-unverified', created_at: CREATED_AT, expires_at: null },
+        ],
       },
       {
         kind: 'decision-domain',
-        domain: 'storage',
-        assertion_ids: ['z1', 'z2'],
+        severity: 'high',
         status: 'unresolved',
+        domain: 'storage',
+        candidates: [
+          { assertion_id: 'z1', value: 'SQLite', provenance: ['r1'], repository_binding: null, trust: 'local-unverified', created_at: CREATED_AT, expires_at: null },
+          { assertion_id: 'z2', value: 'Postgres', provenance: ['r1'], repository_binding: null, trust: 'local-unverified', created_at: CREATED_AT, expires_at: null },
+        ],
       },
     ]);
+  });
+
+  it('accepts omitted optional parent and expiry fields', () => {
+    const input = validEnvelope();
+    delete input.parent_snapshot_id;
+    delete input.expires_at;
+
+    const result = createProjectState(input, { clock: input.created_at });
+
+    assert.equal(result.ok, true);
+  });
+
+  it('accepts omitted assertion expiry fields', () => {
+    const item = decision('d1', 'SQLite');
+    delete item.expires_at;
+    const input = validEnvelope({
+      references: [{ id: 'r1', kind: 'file', locator: 'README.md' }],
+      decisions: [item],
+    });
+
+    const result = createProjectState(input, { clock: input.created_at });
+
+    assert.equal(result.ok, true);
+  });
+
+  it('indexes prototype-sensitive IDs and domains without mutation or crashes', () => {
+    const input = validEnvelope({
+      references: [{ id: 'r1', kind: 'file', locator: 'README.md' }],
+      decisions: [
+        decision('__proto__', 'SQLite', { domain: '__proto__' }),
+        decision('toString', 'Postgres', { domain: '__proto__' }),
+      ],
+    });
+
+    const result = createProjectState(input, { clock: input.created_at });
+
+    assert.equal(result.ok, true);
+    assert.equal(Object.getPrototypeOf(result.state.runtime.byId), null);
+    assert.equal(Object.getPrototypeOf(result.state.runtime.activeDecisionsByDomain), null);
+    assert.deepEqual(result.state.runtime.activeDecisionsByDomain.__proto__, ['__proto__', 'toString']);
+  });
+
+  it('accepts persisted v1 conflicts with candidate values and context', () => {
+    const input = validEnvelope({
+      references: [{ id: 'r1', kind: 'file', locator: 'README.md' }],
+      conflicts: [decisionConflict()],
+    });
+
+    const result = createProjectState(input, { clock: input.created_at });
+
+    assert.equal(result.ok, true);
+  });
+
+  it('bounds nested extension values recursively', () => {
+    const oversizedText = validEnvelope({ extensions: { 'example.com.payload': { nested: ['x'.repeat(4_001)] } } });
+    const oversizedArray = validEnvelope({ extensions: { 'example.com.payload': { nested: Array.from({ length: 101 }, () => 'ok') } } });
+
+    assert.equal(createProjectState(oversizedText, { clock: CREATED_AT }).ok, false);
+    assert.equal(createProjectState(oversizedArray, { clock: CREATED_AT }).ok, false);
+  });
+
+  it('normalizes runtime string values from CRLF or CR to LF before NFC', () => {
+    const input = validEnvelope({
+      goal: {
+        project: 'Cafe\r\nCafe\u0301\rLine',
+        current_objective: 'Normalize values.',
+        success_conditions: ['Keep line endings stable.'],
+      },
+    });
+
+    const result = createProjectState(input, { clock: input.created_at });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.state.envelope.goal.project, 'Cafe\nCafé\nLine');
+  });
+
+  it('publishes the lifecycle statuses accepted by the runtime', () => {
+    const schema = JSON.parse(readFileSync(new URL('../continuity/acp/schema.json', import.meta.url), 'utf8'));
+
+    assert.deepEqual(schema.$defs.assertion.properties.status.enum, ['active', 'resolved', 'superseded', 'rejected']);
+    assert.deepEqual(schema.$defs.planAssertion.properties.status.enum, ['planned', 'in_progress', 'completed', 'blocked', 'superseded']);
+    assert.deepEqual(schema.$defs.conflict.properties.status.enum, ['unresolved', 'resolved']);
   });
 });

@@ -21,6 +21,7 @@ export const defaultPolicy = Object.freeze({
   maxTextLength: 4_000,
   maxCollectionSize: 100,
   maxExtensionKeys: 20,
+  maxExtensionDepth: 10,
 });
 
 export function createProjectState(envelope, { clock, policy = defaultPolicy } = {}) {
@@ -80,7 +81,7 @@ function validateEnvelope(envelope, policy) {
   validateWorkingStance(envelope.working_stance, errors, limits);
 
   for (const type of ASSERTION_TYPES) validateAssertions(envelope[type], `$.${type}`, type, errors, limits);
-  validateAssertions(envelope.conflicts, '$.conflicts', 'conflicts', errors, limits);
+  validateConflicts(envelope.conflicts, errors, limits);
   validateReferences(envelope.references, errors, limits);
   validateExtensions(envelope.extensions, errors, limits);
   validateIdentityAndProvenance(envelope, errors);
@@ -155,7 +156,7 @@ function validateAssertions(items, path, type, errors, limits) {
       ? ['id', 'text', 'domain', 'status', 'confidence', 'provenance', 'created_at', 'expires_at', 'repository_fingerprint', 'supersedes']
       : ['id', 'text', 'status', 'confidence', 'provenance', 'created_at', 'expires_at', 'repository_fingerprint', 'supersedes', 'priority'];
     validateObject(item, itemPath, allowed, errors);
-    required(item, itemPath, ['id', 'text', 'confidence', 'provenance', 'created_at', 'expires_at', 'repository_fingerprint', 'supersedes'], errors);
+    required(item, itemPath, ['id', 'text', 'confidence', 'provenance', 'created_at', 'repository_fingerprint', 'supersedes'], errors);
     string(item?.id, `${itemPath}.id`, errors, limits);
     string(item?.text, `${itemPath}.text`, errors, limits);
     if (type === 'decisions') string(item?.domain, `${itemPath}.domain`, errors, limits);
@@ -191,7 +192,59 @@ function validateExtensions(value, errors, limits) {
   if (keys.length > limits.maxExtensionKeys) error(errors, '$.extensions', 'collection-too-large', 'extensions exceed policy limit');
   for (const key of keys) {
     if (!EXTENSION_KEY.test(key)) error(errors, `$.extensions.${key}`, 'invalid-extension-key', 'extension keys must be namespaced');
+    validateExtensionValue(value[key], `$.extensions.${key}`, errors, limits, 1);
   }
+}
+
+function validateExtensionValue(value, path, errors, limits, depth) {
+  if (depth > limits.maxExtensionDepth) return error(errors, path, 'extension-too-deep', 'extension nesting exceeds policy limit');
+  if (typeof value === 'string') {
+    if (value.length > limits.maxTextLength) error(errors, path, 'text-too-large', 'text exceeds policy limit');
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > limits.maxCollectionSize) error(errors, path, 'collection-too-large', 'collection exceeds policy limit');
+    value.forEach((item, index) => validateExtensionValue(item, `${path}[${index}]`, errors, limits, depth + 1));
+    return;
+  }
+  if (!isObject(value)) return;
+  const keys = Object.keys(value);
+  if (keys.length > limits.maxExtensionKeys) error(errors, path, 'collection-too-large', 'extension object exceeds policy limit');
+  for (const key of keys) validateExtensionValue(value[key], `${path}.${key}`, errors, limits, depth + 1);
+}
+
+function validateConflicts(items, errors, limits) {
+  if (!Array.isArray(items)) return error(errors, '$.conflicts', 'invalid-type', 'must be an array');
+  if (items.length > limits.maxCollectionSize) error(errors, '$.conflicts', 'collection-too-large', 'collection exceeds policy limit');
+  items.forEach((conflict, index) => {
+    const path = `$.conflicts[${index}]`;
+    validateObject(conflict, path, ['kind', 'severity', 'status', 'domain', 'candidates'], errors);
+    required(conflict, path, ['kind', 'severity', 'status', 'candidates'], errors);
+    string(conflict?.kind, `${path}.kind`, errors, limits);
+    enumValue(conflict?.severity, `${path}.severity`, ['low', 'medium', 'high'], errors);
+    enumValue(conflict?.status, `${path}.status`, ['unresolved', 'resolved'], errors);
+    if (conflict?.domain !== undefined) string(conflict.domain, `${path}.domain`, errors, limits);
+    if (!Array.isArray(conflict?.candidates)) {
+      error(errors, `${path}.candidates`, 'invalid-type', 'must be an array');
+      return;
+    }
+    if (conflict.candidates.length < 1) error(errors, `${path}.candidates`, 'invalid-size', 'must include at least one candidate');
+    if (conflict.candidates.length > limits.maxCollectionSize) error(errors, `${path}.candidates`, 'collection-too-large', 'collection exceeds policy limit');
+    conflict.candidates.forEach((candidate, candidateIndex) => validateConflictCandidate(candidate, `${path}.candidates[${candidateIndex}]`, errors, limits));
+  });
+}
+
+function validateConflictCandidate(candidate, path, errors, limits) {
+  validateObject(candidate, path, ['assertion_id', 'value', 'provenance', 'repository_binding', 'trust', 'created_at', 'expires_at'], errors);
+  required(candidate, path, ['assertion_id', 'value', 'provenance', 'repository_binding', 'trust', 'created_at'], errors);
+  string(candidate?.assertion_id, `${path}.assertion_id`, errors, limits);
+  string(candidate?.value, `${path}.value`, errors, limits);
+  strings(candidate?.provenance, `${path}.provenance`, errors, limits);
+  nullableString(candidate?.repository_binding, `${path}.repository_binding`, errors, limits, /^sha256:[a-f0-9]{64}$/);
+  enumValue(candidate?.trust, `${path}.trust`, ['local-unverified', 'local-verified', 'shared-unverified', 'shared-verified'], errors);
+  timestamp(candidate?.created_at, `${path}.created_at`, errors);
+  nullableTimestamp(candidate?.expires_at, `${path}.expires_at`, errors);
+  if (validTimestamp(candidate?.created_at) && validTimestamp(candidate?.expires_at) && candidate.expires_at < candidate.created_at) error(errors, `${path}.expires_at`, 'invalid-expiry', 'expires_at must not be before created_at');
 }
 
 function validateIdentityAndProvenance(envelope, errors) {
@@ -214,6 +267,13 @@ function validateIdentityAndProvenance(envelope, errors) {
       }
     }
   }
+  for (const [conflictIndex, conflict] of (envelope.conflicts ?? []).entries()) {
+    for (const [candidateIndex, candidate] of (conflict?.candidates ?? []).entries()) {
+      for (const [provenanceIndex, referenceId] of (candidate?.provenance ?? []).entries()) {
+        if (typeof referenceId === 'string' && !known.has(referenceId)) error(errors, `$.conflicts[${conflictIndex}].candidates[${candidateIndex}].provenance[${provenanceIndex}]`, 'dangling-provenance', 'provenance must resolve to a reference or evidence ID');
+      }
+    }
+  }
 }
 
 function buildIndexes(envelope, clock) {
@@ -222,10 +282,10 @@ function buildIndexes(envelope, clock) {
     error(errors, '$.clock', 'invalid-timestamp', 'clock must be a UTC RFC 3339 timestamp with milliseconds');
     return { errors, value: null };
   }
-  const byId = {};
-  const referencesById = {};
-  const activeByType = Object.fromEntries(ASSERTION_TYPES.map((type) => [type, []]));
-  const activeDecisionsByDomain = {};
+  const byId = Object.create(null);
+  const referencesById = Object.create(null);
+  const activeByType = Object.assign(Object.create(null), Object.fromEntries(ASSERTION_TYPES.map((type) => [type, []])));
+  const activeDecisionsByDomain = Object.create(null);
   const superseded = new Set();
 
   for (const type of ASSERTION_TYPES) for (const item of envelope[type]) for (const id of item.supersedes) superseded.add(id);
@@ -243,18 +303,36 @@ function buildIndexes(envelope, clock) {
 
   const conflicts = Object.keys(activeDecisionsByDomain).sort().flatMap((domain) => {
     const assertionIds = activeDecisionsByDomain[domain];
-    return assertionIds.length > 1 ? [{ kind: 'decision-domain', domain, assertion_ids: assertionIds, status: 'unresolved' }] : [];
+    return assertionIds.length > 1 ? [{
+      kind: 'decision-domain',
+      severity: 'high',
+      status: 'unresolved',
+      domain,
+      candidates: assertionIds.map((id) => conflictCandidate(byId[id], envelope.trust.level)),
+    }] : [];
   });
   return { errors, value: { byId, referencesById, activeByType, activeDecisionsByDomain, conflicts } };
 }
 
 function isActive(item, superseded, clock) {
-  return item.status !== 'superseded' && item.status !== 'resolved' && item.status !== 'rejected' && item.status !== 'completed' && item.status !== 'blocked' && !superseded.has(item.id) && (item.expires_at === null || item.expires_at > clock);
+  return item.status !== 'superseded' && item.status !== 'resolved' && item.status !== 'rejected' && item.status !== 'completed' && item.status !== 'blocked' && !superseded.has(item.id) && (item.expires_at == null || item.expires_at > clock);
+}
+
+function conflictCandidate(item, trust) {
+  return {
+    assertion_id: item.id,
+    value: item.text,
+    provenance: item.provenance,
+    repository_binding: item.repository_fingerprint,
+    trust,
+    created_at: item.created_at,
+    expires_at: item.expires_at ?? null,
+  };
 }
 
 function normalizeEnvelope(value) {
   if (Array.isArray(value)) return value.map(normalizeEnvelope);
-  if (!isObject(value)) return typeof value === 'string' ? value.normalize('NFC') : value;
+  if (!isObject(value)) return typeof value === 'string' ? value.replace(/\r\n?/g, '\n').normalize('NFC') : value;
   return Object.fromEntries(Object.keys(value).sort().map((key) => [key.normalize('NFC'), normalizeEnvelope(value[key]) ]));
 }
 
@@ -271,12 +349,12 @@ function normalizePolicy(policy) {
     maxTextLength: positiveInteger(policy?.maxTextLength, defaultPolicy.maxTextLength),
     maxCollectionSize: positiveInteger(policy?.maxCollectionSize, defaultPolicy.maxCollectionSize),
     maxExtensionKeys: positiveInteger(policy?.maxExtensionKeys, defaultPolicy.maxExtensionKeys),
+    maxExtensionDepth: positiveInteger(policy?.maxExtensionDepth, defaultPolicy.maxExtensionDepth),
   };
 }
 
 function assertionStatuses(type) {
   if (type === 'decisions') return ['proposed', 'active', 'superseded', 'rejected', 'resolved'];
-  if (type === 'conflicts') return ['unresolved', 'resolved'];
   if (type === 'plan' || type === 'next_actions') return ['planned', 'in_progress', 'completed', 'blocked', 'superseded'];
   return ['active', 'resolved', 'superseded', 'rejected'];
 }
@@ -309,7 +387,7 @@ function string(value, path, errors, limits, pattern) {
   if (pattern && !pattern.test(value)) error(errors, path, 'invalid-format', 'value has an invalid format');
 }
 function nullableString(value, path, errors, limits, pattern) {
-  if (value === null) return;
+  if (value === null || value === undefined) return;
   string(value, path, errors, limits, pattern);
 }
 function strings(value, path, errors, limits) {
@@ -320,7 +398,7 @@ function strings(value, path, errors, limits) {
 function timestamp(value, path, errors) {
   if (!validTimestamp(value)) error(errors, path, 'invalid-timestamp', 'must be a UTC RFC 3339 timestamp with milliseconds');
 }
-function nullableTimestamp(value, path, errors) { if (value !== null) timestamp(value, path, errors); }
+function nullableTimestamp(value, path, errors) { if (value !== null && value !== undefined) timestamp(value, path, errors); }
 function validTimestamp(value) {
   if (typeof value !== 'string' || !TIMESTAMP.test(value)) return false;
   const parsed = new Date(value);
@@ -334,7 +412,11 @@ function recordId(id, path, ids, errors) {
   else ids.set(id, path);
 }
 function positiveInteger(value, fallback) { return Number.isInteger(value) && value > 0 ? value : fallback; }
-function isObject(value) { return value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }
+function isObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
 function error(errors, path, code, message) { errors.push({ path, code, message }); }
 function orderErrors(errors) {
   return errors.sort((left, right) => compareText(left.path, right.path) || compareText(left.code, right.code));
