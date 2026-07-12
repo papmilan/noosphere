@@ -110,4 +110,18 @@ describe('renderKernel', () => {
     assert.match(output, /unsafe-to-summarize/);
     assert.ok(Buffer.byteLength(output, 'utf8') <= 1800);
   });
+
+  it('warns for advanced history and suppresses all non-authoritative next actions', () => {
+    const s = state({
+      next_actions: [assertion('n1', 'Do not render me', { status: 'planned', priority: 1 })],
+      references: [{ id: 'r1', kind: 'file', locator: 'README.md' }],
+    });
+    const output = renderKernel(s, {
+      compatibility: { status: 'advanced', actionable: true, reasons: [] },
+      trustProjection: { trustDowngrade: 1, nonAuthoritativeAssertionIds: [], nonAuthoritativeReferenceIds: ['r1'], nonAuthoritativeNextActionIds: ['n1'] },
+    });
+    assert.match(output, /STALE HISTORY/);
+    assert.doesNotMatch(output, /Do not render me/);
+    assert.match(output, /NON-AUTHORITATIVE.*REF/);
+  });
 });

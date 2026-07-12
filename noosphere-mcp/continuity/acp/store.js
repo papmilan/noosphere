@@ -5,6 +5,7 @@ import { createProjectState } from './project-state.js';
 import { decodeEnvelope, encodeEnvelope } from './wire.js';
 import { classifyCompatibility, observeRepository } from './git-state.js';
 import { renderKernel } from './render.js';
+import { projectAdvancedTrust } from './trust-projection.js';
 
 const JSON_FILE = 'continuity.json';
 const MD_FILE = 'continuity.md';
@@ -59,7 +60,8 @@ async function writeStateUnlocked(root, state, options = {}) {
   const envelope = encodeEnvelope(state);
   const compatibility = options.compatibility
     ?? classifyCompatibility(state, await observeRepository(root));
-  const kernel = renderKernel(state, { compatibility, snapshotId: envelope.snapshot_id });
+  const trustProjection = options.trustProjection ?? (compatibility.status === 'advanced' ? projectAdvancedTrust(state) : undefined);
+  const kernel = renderKernel(state, { compatibility, snapshotId: envelope.snapshot_id, trustProjection });
   const jsonTmp = `${json}.${process.pid}.tmp`;
   const mdTmp = `${markdown}.${process.pid}.tmp`;
   try {
@@ -90,7 +92,8 @@ async function writeStateIfCurrentLocked(root, state, expectedSnapshotId, option
   const envelope = encodeEnvelope(state);
   const compatibility = options.compatibility
     ?? classifyCompatibility(state, await observeRepository(root));
-  const kernel = renderKernel(state, { compatibility, snapshotId: envelope.snapshot_id });
+  const trustProjection = options.trustProjection ?? (compatibility.status === 'advanced' ? projectAdvancedTrust(state) : undefined);
+  const kernel = renderKernel(state, { compatibility, snapshotId: envelope.snapshot_id, trustProjection });
   const token = randomUUID();
   const names = {
     newJson: `.continuity-txn-${token}-json.new`,
@@ -156,7 +159,8 @@ export async function validateState(root, options = {}) {
 
   const observed = await observeRepository(root);
   const compatibility = classifyCompatibility(decoded.state, observed);
-  const expected = renderKernel(decoded.state, { compatibility, snapshotId: decoded.state.envelope.snapshot_id });
+  const trustProjection = compatibility.status === 'advanced' ? projectAdvancedTrust(decoded.state) : undefined;
+  const expected = renderKernel(decoded.state, { compatibility, snapshotId: decoded.state.envelope.snapshot_id, trustProjection });
   const actual = (await readFile(markdown, 'utf8').catch(() => '')).replace(/\n$/, '');
   const errors = [];
   if (compatibility.status === 'foreign') {

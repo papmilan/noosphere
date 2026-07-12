@@ -23,21 +23,23 @@ export function renderKernel(state, inputs = {}) {
   const compatibility = inputs.compatibility ?? { status: 'unknown', actionable: false, reasons: [] };
   const conflicts = unresolvedConflicts(state);
   const blockers = activeItems(state, 'blockers');
+  const projection = inputs.trustProjection;
 
   const mandatory = [
     '# ACP CONTINUITY KERNEL',
     `Snapshot: ${inputs.snapshotId ?? state.envelope.snapshot_id}`,
     `Repository: ${compatibility.status} (${compatibility.actionable ? 'actionable' : 'not actionable'})`,
+    ...(projection ? ['STALE HISTORY: repository-dependent assertions and next actions are non-authoritative.'] : []),
     `Phase: ${state.envelope.phase}`,
     `Objective: ${oneLine(state.envelope.goal.current_objective)}`,
     ...conflicts.map(conflictLine),
-    ...blockers.map((item) => `BLOCKER: ${oneLine(item.text)}`),
+    ...blockers.map((item) => `${authorityLabel(item.id, projection)}BLOCKER: ${oneLine(item.text)}`),
   ].join('\n');
 
   if (byteLength(mandatory) > BUDGET) return UNSAFE_KERNEL;
 
   let output = mandatory;
-  for (const section of optionalSections(state)) {
+  for (const section of optionalSections(state, projection)) {
     if (!section) continue;
     const candidate = `${output}\n${section}`;
     if (byteLength(candidate) <= BUDGET) output = candidate;
@@ -45,29 +47,36 @@ export function renderKernel(state, inputs = {}) {
   return output;
 }
 
-function optionalSections(state) {
+function optionalSections(state, projection) {
   return [
-    section(activeItems(state, 'risks').map((item) => `RISK: ${oneLine(item.text)}`)),
-    section(activeItems(state, 'decisions').map((item) => `DECISION [${oneLine(item.domain)}]: ${oneLine(item.text)}`)),
+    section(activeItems(state, 'risks').map((item) => `${authorityLabel(item.id, projection)}RISK: ${oneLine(item.text)}`)),
+    section(activeItems(state, 'decisions').map((item) => `${authorityLabel(item.id, projection)}DECISION [${oneLine(item.domain)}]: ${oneLine(item.text)}`)),
     section([`Stance: confidence=${state.envelope.working_stance.confidence}, momentum=${state.envelope.working_stance.momentum}, risk=${state.envelope.working_stance.risk_posture}`]),
-    section(nextActionLine(state)),
-    referenceSection(state),
+    section(nextActionLine(state, projection)),
+    referenceSection(state, projection),
   ];
 }
 
-function nextActionLine(state) {
+function nextActionLine(state, projection) {
+  const suppressed = new Set(projection?.nonAuthoritativeNextActionIds || []);
   const actions = activeItems(state, 'next_actions')
+    .filter((item) => !suppressed.has(item.id))
     .slice()
     .sort((left, right) => priorityOf(left) - priorityOf(right) || compareText(left.id, right.id));
   return actions.length ? [`NEXT: ${oneLine(actions[0].text)}`] : [];
 }
 
-function referenceSection(state) {
+function referenceSection(state, projection) {
+  const downgraded = new Set(projection?.nonAuthoritativeReferenceIds || []);
   const refs = Object.values(state.runtime.referencesById)
     .slice()
     .sort((left, right) => compareText(left.id, right.id))
-    .map((ref) => `REF ${oneLine(ref.kind)} ${oneLine(ref.id)}: ${oneLine(ref.locator)}`);
+    .map((ref) => `${downgraded.has(ref.id) ? 'NON-AUTHORITATIVE ' : ''}REF ${oneLine(ref.kind)} ${oneLine(ref.id)}: ${oneLine(ref.locator)}`);
   return section(refs);
+}
+
+function authorityLabel(id, projection) {
+  return new Set(projection?.nonAuthoritativeAssertionIds || []).has(id) ? 'NON-AUTHORITATIVE ' : '';
 }
 
 function conflictLine(conflict) {
