@@ -84,6 +84,24 @@ describe('ACP sync discovery', () => {
     assert.equal(bounded.reconciliation.action, 'incomplete-lineage');
   });
 
+  it('quarantines an unexpired head whose authority lineage contains an expired ancestor', async () => {
+    const root = await temp();
+    const parent = envelope({ objective: 'expired parent', expiresAt: '2026-07-12T12:00:00.000Z' });
+    const child = envelope({ parent: parent.snapshot_id, objective: 'unexpired child' });
+    const result = await issueRemoteConfirmation(root, 'p', {
+      client: clientFor(new Map([[child.snapshot_id, child], [parent.snapshot_id, parent]]), child.snapshot_id),
+      readState: async () => null,
+      observeRepository: async () => observed(),
+      quarantineBytes: async () => undefined,
+      clock: () => NOW,
+    });
+
+    assert.equal(result.reconciliation.action, 'quarantine');
+    assert.equal(result.reconciliation.reason, 'remote-expired');
+    assert.equal(result.reconciliation.actionable, false);
+    assert.equal(result.confirmation, null);
+  });
+
   it('keeps advanced state historical by default and binds a newly issued override', async () => {
     const root = await temp();
     const remote = envelope();
@@ -200,10 +218,26 @@ describe('ACP sync listing interfaces', () => {
   it('lists bounded remote history through the exact client and safe quarantine files only', async () => {
     let capabilities = 0;
     const history = await listRemoteHistory('p', { head: id('1'), limit: 2 }, {
-      client: { async capabilities() { capabilities += 1; }, async getHistory(_project, options) { return { history: [options] }; } },
+      client: {
+        async capabilities() {
+          capabilities += 1;
+          return {
+            exact_bytes_durable: true,
+            index_durable: true,
+            relayer_index_id: id('c'),
+            sync_protocol_version: SYNC_PROTOCOL_VERSION,
+            reconciliation_policy_version: RECONCILIATION_POLICY_VERSION,
+          };
+        },
+        async getHistory(_project, options) { return { history: [options] }; },
+      },
     });
     assert.equal(capabilities, 1);
     assert.equal(history.history[0].limit, 2);
+
+    await assert.rejects(listRemoteHistory('p', { head: id('1'), limit: 2 }, {
+      client: { async capabilities() { return {}; }, async getHistory() { throw new Error('must not fetch'); } },
+    }), /unsupported-capabilities/);
 
     const root = await temp(); const directory = path.join(root, '.noosphere', 'quarantine');
     await mkdir(directory, { recursive: true });

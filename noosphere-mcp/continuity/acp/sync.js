@@ -162,7 +162,8 @@ export async function syncProjectState(root, projectId, deps, options = {}) {
 }
 
 export async function listRemoteHistory(projectId, options, deps) {
-  await deps.client.capabilities();
+  const capabilities = await deps.client.capabilities();
+  assertCapabilities(capabilities);
   return deps.client.getHistory(projectId, options);
 }
 

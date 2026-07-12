@@ -32,7 +32,7 @@ export function reconcileExactState({
   if (lineage.some((candidate) => isForeign(candidate, expectedProject, expectedRoot))) {
     return quarantine('foreign-state', heads);
   }
-  if (candidates.some((candidate) => isExpired(candidate, clock))) {
+  if (lineage.some((candidate) => isExpired(candidate, clock))) {
     return quarantine('remote-expired', heads);
   }
   if (localId && heads.includes(localId)) return { action: 'already-synced', actionable: false };
