@@ -34,6 +34,7 @@ import { readState, writeState, validateState, buildInitialState } from './acp/s
 import { decodeEnvelope } from './acp/wire.js';
 import { applyUpdate } from './acp/merge.js';
 import { renderKernel } from './acp/render.js';
+import { canonicalize } from '@noosphere/acp-protocol';
 import { RemoteStateClient } from './acp/remote-client.js';
 import {
   applyRemoteConfirmation,
@@ -1446,7 +1447,7 @@ async function handoffFromCli(root) {
   }
   const written = await writeState(root, next.state, { clock });
   if (await readProjectConfig(root)) {
-    await enqueueExactUpload(root, written.envelope.snapshot_id);
+    await enqueueExactUpload(root, written.envelope);
     await retryExactUploads(root).catch(() => undefined);
   }
   const conflicts = next.conflicts ?? [];
@@ -1668,11 +1669,21 @@ async function discoverExactState(root, config) {
   return issueRemoteConfirmation(root, config.project_id, deps);
 }
 
-async function enqueueExactUpload(root, snapshotId) {
+async function enqueueExactUpload(root, envelope) {
   if (!acpSyncEnabled()) return;
+  const canonicalEnvelope = canonicalize(envelope);
+  if (Buffer.byteLength(canonicalEnvelope, 'utf8') > MAX_HANDOFF_BYTES) {
+    throw Object.assign(new Error('upload-job-too-large'), { code: 'upload-job-too-large' });
+  }
+  const snapshotId = envelope.snapshot_id;
   const metadata = await readSyncMetadata(root);
   const uploads = (metadata.uploads || []).filter((job) => job.snapshot_id !== snapshotId);
-  uploads.push({ snapshot_id: snapshotId, attempts: 0, next_attempt_at: new Date(0).toISOString() });
+  uploads.push({
+    snapshot_id: snapshotId,
+    canonical_envelope: canonicalEnvelope,
+    attempts: 0,
+    next_attempt_at: new Date(0).toISOString(),
+  });
   metadata.uploads = uploads.slice(-16);
   await writeSyncMetadata(root, metadata);
 }
@@ -1689,7 +1700,11 @@ async function retryExactUploads(root, options = {}) {
     if (Date.parse(job.next_attempt_at) > now) continue;
     job.attempts = Math.min(Number(job.attempts || 0) + 1, 32);
     try {
-      await pushLocalState(root, config.project_id, deps);
+      const envelope = validateExactUploadJob(job);
+      const capabilities = await deps.client.capabilities();
+      const heads = await deps.client.getHeads(config.project_id);
+      await deps.client.putSnapshot(config.project_id, envelope, heads.heads_digest);
+      metadata.relayer_index_id = capabilities.relayer_index_id;
       metadata.uploads = metadata.uploads.filter((entry) => entry.snapshot_id !== job.snapshot_id);
     } catch (error) {
       const retryBase = Math.max(1, Number(process.env.NOOSPHERE_ACP_RETRY_BASE_MS) || 1_000);
@@ -1699,6 +1714,20 @@ async function retryExactUploads(root, options = {}) {
     }
   }
   await writeSyncMetadata(root, metadata);
+}
+
+function validateExactUploadJob(job) {
+  try {
+    if (typeof job?.canonical_envelope !== 'string'
+      || Buffer.byteLength(job.canonical_envelope, 'utf8') > MAX_HANDOFF_BYTES) throw new Error('invalid');
+    const decoded = decodeEnvelope(job.canonical_envelope, { clock: new Date().toISOString() });
+    if (!decoded.ok
+      || decoded.state.envelope.snapshot_id !== job.snapshot_id
+      || canonicalize(decoded.state.envelope) !== job.canonical_envelope) throw new Error('invalid');
+    return decoded.state.envelope;
+  } catch (cause) {
+    throw Object.assign(new Error('upload-job-invalid', { cause }), { code: 'upload-job-invalid' });
+  }
 }
 
 function acpSyncEnabled() {

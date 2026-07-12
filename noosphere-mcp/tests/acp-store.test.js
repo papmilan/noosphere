@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import http from 'node:http';
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +11,7 @@ import { ACP_PROTOCOL, ACP_SCHEMA_VERSION } from '../continuity/acp/project-stat
 import { decodeEnvelope, digestEnvelope } from '../continuity/acp/wire.js';
 import { observeRepository } from '../continuity/acp/git-state.js';
 import { readState, writeState, writeStateIfCurrent } from '../continuity/acp/store.js';
-import { RECONCILIATION_POLICY_VERSION, SYNC_PROTOCOL_VERSION, digestHeadSet } from '@noosphere/acp-protocol';
+import { RECONCILIATION_POLICY_VERSION, SYNC_PROTOCOL_VERSION, canonicalize, digestHeadSet } from '@noosphere/acp-protocol';
 
 const execFileAsync = promisify(execFile);
 const CLI = fileURLToPath(new URL('../continuity/index.js', import.meta.url));
@@ -122,12 +122,20 @@ describe('ACP store and CLI', () => {
     assert.match(result.stdout, /ACP handoff stored/);
     const stored = JSON.parse(await readFile(path.join(dir, '.noosphere', 'continuity.json'), 'utf8'));
     const metadata = JSON.parse(await readFile(path.join(dir, '.noosphere', 'continuity-sync.json'), 'utf8'));
+    assert.equal((await stat(path.join(dir, '.noosphere', 'continuity-sync.json'))).mode & 0o777, 0o600);
     assert.equal(metadata.uploads[0].snapshot_id, stored.snapshot_id);
     assert.equal(metadata.uploads[0].attempts, 1);
-    assert.equal(JSON.stringify(metadata).includes(stored.goal.current_objective), false);
+    assert.equal(metadata.uploads[0].canonical_envelope, canonicalize(stored));
+    assert.doesNotMatch(`${result.stdout}${result.stderr}`, /Persist ACP state|next_actions|integrity/);
+
+    const stateB = decodeEnvelope(await signedEnvelope(observed, {
+      goal: { project: 'Continuity.', current_objective: 'New local state B.', success_conditions: [] },
+    }), { clock: CREATED_AT }).state;
+    const writtenB = await writeState(dir, stateB, { clock: CREATED_AT });
 
     const indexId = `sha256:${'d'.repeat(64)}`;
     let posts = 0;
+    let postedEnvelope;
     const server = http.createServer(async (request, response) => {
       const send = (status, body) => {
         response.writeHead(status, { 'content-type': 'application/json', 'x-relayer-index-id': indexId });
@@ -143,7 +151,9 @@ describe('ACP store and CLI', () => {
       });
       if (request.method === 'POST' && request.url === '/v1/projects/noosphere/acp/snapshots') {
         posts += 1;
-        for await (const _chunk of request) { /* drain */ }
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        postedEnvelope = JSON.parse(Buffer.concat(chunks).toString('utf8')).envelope;
         return send(201, { created: posts === 1 });
       }
       return send(404, { error: 'unexpected' });
@@ -159,6 +169,64 @@ describe('ACP store and CLI', () => {
       const retried = JSON.parse(await readFile(path.join(dir, '.noosphere', 'continuity-sync.json'), 'utf8'));
       assert.deepEqual(retried.uploads, []);
       assert.equal(posts, 1);
+      assert.equal(postedEnvelope.snapshot_id, stored.snapshot_id);
+      assert.equal(postedEnvelope.goal.current_objective, stored.goal.current_objective);
+      assert.notEqual(postedEnvelope.snapshot_id, writtenB.envelope.snapshot_id);
+    } finally {
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('retains a corrupt queued envelope and performs no upload', async () => {
+    const dir = await makeRepo();
+    const observed = await observeRepository(dir);
+    const candidateFile = path.join(dir, 'handoff.json');
+    await writeFile(candidateFile, JSON.stringify(await signedEnvelope(observed)));
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(path.join(dir, '.noosphere'), { recursive: true });
+    await writeFile(path.join(dir, '.noosphere', 'config.json'), JSON.stringify({
+      project_id: 'noosphere', relayer_url: 'http://127.0.0.1:1',
+    }));
+    await execFileAsync('node', [CLI, 'handoff', '--file', candidateFile, '--path', dir], {
+      env: { ...process.env, NOOSPHERE_ACP_RETRY_BASE_MS: '1' },
+    });
+    const metadataPath = path.join(dir, '.noosphere', 'continuity-sync.json');
+    const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
+    metadata.uploads[0].canonical_envelope += ' ';
+    metadata.uploads[0].next_attempt_at = new Date(0).toISOString();
+    await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, { mode: 0o600 });
+
+    const indexId = `sha256:${'e'.repeat(64)}`;
+    let posts = 0;
+    const server = http.createServer((request, response) => {
+      const send = (status, body) => {
+        response.writeHead(status, { 'content-type': 'application/json', 'x-relayer-index-id': indexId });
+        response.end(JSON.stringify(body));
+      };
+      if (request.url === '/v1/acp/capabilities') return send(200, {
+        exact_bytes_durable: true, index_durable: true, relayer_index_id: indexId,
+        sync_protocol_version: SYNC_PROTOCOL_VERSION,
+        reconciliation_policy_version: RECONCILIATION_POLICY_VERSION,
+      });
+      if (request.url === '/v1/projects/noosphere/acp/heads') return send(200, {
+        heads: [], heads_digest: digestHeadSet([]), complete: true,
+      });
+      if (request.method === 'POST') posts += 1;
+      return send(404, { error: 'unexpected' });
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      await writeFile(path.join(dir, '.noosphere', 'config.json'), JSON.stringify({
+        project_id: 'noosphere', relayer_url: `http://127.0.0.1:${server.address().port}`,
+      }));
+      await execFileAsync('node', [CLI, 'activate', '--quiet', '--path', dir], {
+        env: { ...process.env, NOOSPHERE_HOME: path.join(dir, '.home') },
+      });
+      const retained = JSON.parse(await readFile(metadataPath, 'utf8')).uploads[0];
+      assert.equal(posts, 0);
+      assert.equal(retained.snapshot_id, metadata.uploads[0].snapshot_id);
+      assert.equal(retained.last_error, 'upload-job-invalid');
     } finally {
       server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
