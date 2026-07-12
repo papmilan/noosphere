@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createProjectState } from './project-state.js';
@@ -56,6 +56,47 @@ export async function writeState(root, state, options = {}) {
   } finally {
     await rm(jsonTmp, { force: true }).catch(() => {});
     await rm(mdTmp, { force: true }).catch(() => {});
+  }
+  return { envelope, kernel, compatibility };
+}
+
+export async function writeStateIfCurrent(root, state, expectedSnapshotId, options = {}) {
+  if (expectedSnapshotId !== null && !/^sha256:[0-9a-f]{64}$/.test(expectedSnapshotId)) {
+    throw storeError('invalid-expected-snapshot-id');
+  }
+  const { dir, json, markdown } = statePaths(root);
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const envelope = encodeEnvelope(state);
+  const compatibility = options.compatibility
+    ?? classifyCompatibility(state, await observeRepository(root));
+  const kernel = renderKernel(state, { compatibility, snapshotId: envelope.snapshot_id });
+  const token = randomUUID();
+  const jsonTmp = `${json}.${token}.tmp`;
+  const mdTmp = `${markdown}.${token}.tmp`;
+  const previousJson = await readOptional(json);
+  const previousMarkdown = await readOptional(markdown);
+  let jsonRenamed = false;
+  const renameForCommit = options.rename ?? rename;
+  try {
+    await writeFile(jsonTmp, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+    await writeFile(mdTmp, `${kernel}\n`, { mode: 0o600, flag: 'wx' });
+    const currentId = await currentSnapshotId(json, options);
+    if (currentId !== expectedSnapshotId) throw storeError('confirmation-stale');
+    await renameForCommit(jsonTmp, json);
+    jsonRenamed = true;
+    await renameForCommit(mdTmp, markdown);
+  } catch (error) {
+    if (jsonRenamed) {
+      try {
+        await restorePair(json, markdown, previousJson, previousMarkdown);
+      } catch (rollbackError) {
+        throw storeError('state-rollback-failed', new AggregateError([error, rollbackError]));
+      }
+    }
+    throw error;
+  } finally {
+    await rm(jsonTmp, { force: true }).catch(() => undefined);
+    await rm(mdTmp, { force: true }).catch(() => undefined);
   }
   return { envelope, kernel, compatibility };
 }
@@ -136,4 +177,45 @@ function initialEnvelope(root, observed, projectId, clock) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+async function currentSnapshotId(jsonPath, options) {
+  let raw;
+  try { raw = await readFile(jsonPath, 'utf8'); } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  const decoded = decodeEnvelope(raw, { clock: options.clock ?? nowIso(), policy: options.policy });
+  if (!decoded.ok) throw storeError('state-unreadable');
+  return decoded.state.envelope.snapshot_id;
+}
+
+async function readOptional(file) {
+  try { return await readFile(file); } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function restorePair(json, markdown, previousJson, previousMarkdown) {
+  await restoreFile(json, previousJson);
+  await restoreFile(markdown, previousMarkdown);
+}
+
+async function restoreFile(target, bytes) {
+  if (bytes === null) {
+    await rm(target, { force: true });
+    return;
+  }
+  const temporary = `${target}.${randomUUID()}.restore`;
+  try {
+    await writeFile(temporary, bytes, { mode: 0o600, flag: 'wx' });
+    await rename(temporary, target);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
+}
+
+function storeError(code, cause) {
+  return Object.assign(new Error(code, { cause }), { code });
 }

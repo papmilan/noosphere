@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { ACP_PROTOCOL, ACP_SCHEMA_VERSION } from '../continuity/acp/project-state.js';
 import { decodeEnvelope, digestEnvelope } from '../continuity/acp/wire.js';
 import { observeRepository } from '../continuity/acp/git-state.js';
-import { readState, writeState } from '../continuity/acp/store.js';
+import { readState, writeState, writeStateIfCurrent } from '../continuity/acp/store.js';
 
 const execFileAsync = promisify(execFile);
 const CLI = fileURLToPath(new URL('../continuity/index.js', import.meta.url));
@@ -131,5 +131,40 @@ describe('ACP store and CLI', () => {
     );
     // The corrupt file must be left exactly as-is, not overwritten.
     assert.equal(await readFile(path.join(dir, '.noosphere', 'continuity.json'), 'utf8'), corrupt);
+  });
+
+  it('compares explicit null/current snapshot IDs before writing', async () => {
+    const dir = await makeRepo();
+    const observed = await observeRepository(dir);
+    const first = decodeEnvelope(await signedEnvelope(observed), { clock: CREATED_AT }).state;
+    const initial = await writeStateIfCurrent(dir, first, null, { clock: CREATED_AT, compatibility: { status: 'exact', trustDowngrade: 0 } });
+    await assert.rejects(writeStateIfCurrent(dir, first, null, { clock: CREATED_AT, compatibility: { status: 'exact', trustDowngrade: 0 } }), /confirmation-stale/);
+    const secondEnvelope = await signedEnvelope(observed, { goal: { project: 'Continuity.', current_objective: 'Second state.', success_conditions: [] } });
+    const second = decodeEnvelope(secondEnvelope, { clock: CREATED_AT }).state;
+    await writeStateIfCurrent(dir, second, initial.envelope.snapshot_id, { clock: CREATED_AT, compatibility: { status: 'exact', trustDowngrade: 0 } });
+    assert.equal((await readState(dir, { clock: CREATED_AT })).state.envelope.goal.current_objective, 'Second state.');
+  });
+
+  it('restores the prior JSON/Markdown pair when the second rename fails', async () => {
+    const dir = await makeRepo();
+    const observed = await observeRepository(dir);
+    const first = decodeEnvelope(await signedEnvelope(observed), { clock: CREATED_AT }).state;
+    const written = await writeStateIfCurrent(dir, first, null, { clock: CREATED_AT, compatibility: { status: 'exact', trustDowngrade: 0 } });
+    const jsonPath = path.join(dir, '.noosphere', 'continuity.json');
+    const mdPath = path.join(dir, '.noosphere', 'continuity.md');
+    const before = [await readFile(jsonPath), await readFile(mdPath)];
+    const second = decodeEnvelope(await signedEnvelope(observed, { phase: 'verification' }), { clock: CREATED_AT }).state;
+    let renames = 0;
+    await assert.rejects(writeStateIfCurrent(dir, second, written.envelope.snapshot_id, {
+      clock: CREATED_AT,
+      compatibility: { status: 'exact', trustDowngrade: 0 },
+      rename: async (source, destination) => {
+        renames += 1;
+        if (renames === 2) throw new Error('injected-second-rename-failure');
+        return rename(source, destination);
+      },
+    }), /injected-second-rename-failure/);
+    assert.deepEqual(await readFile(jsonPath), before[0]);
+    assert.deepEqual(await readFile(mdPath), before[1]);
   });
 });
