@@ -52,5 +52,11 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "bundleDependencies": [
+    "@noosphere/acp-protocol"
+  ],
+  "dependencies": {
+    "@noosphere/acp-protocol": "file:../noosphere-acp-protocol"
   }
 }
