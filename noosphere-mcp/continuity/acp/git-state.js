@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -63,12 +63,12 @@ function classification(status, trustDowngrade, actionable, reasons) {
 }
 
 // Shared with continuity/index.js: a content fingerprint of the tracked working
-// tree that ignores Noosphere's own local files.
-export async function workspaceFingerprintHex(root, includeJournal = false) {
-  const [status, diff, journal] = await Promise.all([
+// tree that ignores Noosphere's own local files. The `.noosphere/` journal is
+// deliberately excluded so sharing a journal note never triggers a checkpoint.
+export async function workspaceFingerprintHex(root) {
+  const [status, diff] = await Promise.all([
     git(root, ['status', '--porcelain=v1']),
     git(root, ['diff', '--no-ext-diff', '--binary', '--', '.']),
-    readFile(path.join(root, '.noosphere', 'journal.md'), 'utf8').catch(() => ''),
   ]);
   const lines = trackedStatusLines(status);
   const untracked = lines.filter((line) => line.startsWith('?? ')).map((line) => line.slice(3));
@@ -81,14 +81,7 @@ export async function workspaceFingerprintHex(root, includeJournal = false) {
       untrackedState.push(`${file}:missing`);
     }
   }
-  return hashHex(
-    JSON.stringify({
-      status: lines,
-      diff,
-      untracked: untrackedState,
-      journal: includeJournal ? journal : '',
-    }),
-  );
+  return hashHex(JSON.stringify({ status: lines, diff, untracked: untrackedState }));
 }
 
 function trackedStatusLines(status) {

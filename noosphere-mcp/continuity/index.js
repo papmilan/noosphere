@@ -424,10 +424,7 @@ export async function watchProject(root, options = {}) {
     options.debounceMs || config.checkpoint_debounce_ms;
   const refreshMs =
     options.refreshMs || config.context_refresh_ms;
-  let lastFingerprint = await workspaceFingerprint(
-    root,
-    config.privacy.share_journal,
-  );
+  let lastFingerprint = await workspaceFingerprint(root);
   const previousState =
     (await readJson(path.join(root, '.noosphere', 'state.json'))) || {};
   let baselinePending =
@@ -456,10 +453,7 @@ export async function watchProject(root, options = {}) {
 
   const pollTimer = setInterval(async () => {
     try {
-      const fingerprint = await workspaceFingerprint(
-        root,
-        config.privacy.share_journal,
-      );
+      const fingerprint = await workspaceFingerprint(root);
       if (fingerprint !== lastFingerprint) {
         lastFingerprint = fingerprint;
         pendingSince = Date.now();
@@ -909,10 +903,7 @@ export async function buildWorkspaceSnapshot(root, config) {
     head,
     changed_files: changedFiles,
     diff_stat: diffStat || 'No tracked diff statistics available.',
-    workspace_fingerprint: await workspaceFingerprint(
-      root,
-      config.privacy.share_journal,
-    ),
+    workspace_fingerprint: await workspaceFingerprint(root),
     captured_at: new Date().toISOString(),
     raw_diff_included: config.privacy.include_diff,
     journal_present: await fileHasJournalEntries(root),
