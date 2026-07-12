@@ -29,6 +29,15 @@ jobs:
           cache-dependency-path: ${{ matrix.package == 'noosphere-mcp' && 'noosphere-mcp/package-lock.json' || 'noosphere-relayer/npm-shrinkwrap.json' }}
 
       - run: npm ci
+
+      # noosphere-mcp's tests boot noosphere-relayer's source directly (a
+      # monorepo sibling-directory import in lifecycle/relayer-source.js), so
+      # the relayer's own dependencies must be installed too or those tests
+      # fail with ERR_MODULE_NOT_FOUND and hang waiting on a broken server.
+      - if: matrix.package == 'noosphere-mcp'
+        working-directory: noosphere-relayer
+        run: npm ci
+
       - run: npm run check
       - run: npm audit --audit-level=high
 
