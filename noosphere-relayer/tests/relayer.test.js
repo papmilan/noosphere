@@ -688,18 +688,26 @@ describe('Noosphere memory API', () => {
     }
   });
 
-  it('publishes the simplified discovery and OpenAPI documents', async () => {
-    const [homeResponse, discoveryResponse, openApiResponse] = await Promise.all([
+  it('publishes discovery and OpenAPI documents without website assets', async () => {
+    const [
+      homeResponse,
+      appResponse,
+      discoveryResponse,
+      openApiResponse,
+    ] = await Promise.all([
       fetch(`${baseUrl}/`),
+      fetch(`${baseUrl}/app.js`),
       fetch(`${baseUrl}/.well-known/noosphere.json`),
       fetch(`${baseUrl}/openapi.json`),
     ]);
-    const home = await homeResponse.text();
     const discovery = await discoveryResponse.json();
     const openApi = await openApiResponse.json();
+    const csp = discoveryResponse.headers.get('content-security-policy') || '';
 
-    assert.equal(homeResponse.status, 200);
-    assert.doesNotMatch(home, /Connect wallet|auth-overlay|data-auth-gate/);
+    assert.equal(homeResponse.status, 404);
+    assert.equal(appResponse.status, 404);
+    assert.match(csp, /script-src 'self'/);
+    assert.doesNotMatch(csp, /cdnjs\.cloudflare\.com|unpkg\.com/);
     assert.equal(discovery.version, '2.0.0');
     assert.equal(discovery.architecture.custom_smart_contract, false);
     assert.equal(
