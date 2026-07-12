@@ -26,6 +26,7 @@ export function renderKernel(state, inputs = {}) {
 
   const mandatory = [
     '# ACP CONTINUITY KERNEL',
+    `Snapshot: ${inputs.snapshotId ?? state.envelope.snapshot_id}`,
     `Repository: ${compatibility.status} (${compatibility.actionable ? 'actionable' : 'not actionable'})`,
     `Phase: ${state.envelope.phase}`,
     `Objective: ${state.envelope.goal.current_objective}`,
