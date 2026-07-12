@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import {
   access,
   constants,
@@ -23,7 +23,7 @@ export class DurableStore {
     this.persist = persist;
     this.receiptTtlMs = receiptTtlMs;
     this.now = now;
-    this.state = { version: 1, receipts: {}, pending: {} };
+    this.state = this.emptyState();
     this.loaded = false;
     this.writeChain = Promise.resolve();
   }
@@ -40,6 +40,7 @@ export class DurableStore {
           version: 1,
           receipts: stored.receipts || {},
           pending: stored.pending || {},
+          exact_state: stored.exact_state || this.emptyExactState(),
         };
       }
     } catch (error) {
@@ -131,6 +132,38 @@ export class DurableStore {
     return { ready: true, durable: true };
   }
 
+  async readExactProject(projectId) {
+    await this.initialize();
+    return structuredClone(
+      this.state.exact_state.projects[projectId] || emptyProjectRecord(),
+    );
+  }
+
+  async updateExactProject(projectId, mutation) {
+    await this.initialize();
+    return this.enqueueWrite(async () => {
+      const current = structuredClone(
+        this.state.exact_state.projects[projectId] || emptyProjectRecord(),
+      );
+      const next = await mutation(current);
+      this.state.exact_state.projects[projectId] = next;
+      await this.writeState();
+      return structuredClone(next);
+    });
+  }
+
+  async exactStateIdentity() {
+    await this.initialize();
+    if (this.persist) await this.enqueueWrite(() => this.writeState());
+    return this.state.exact_state.relayer_index_id;
+  }
+
+  enqueueWrite(mutation) {
+    const result = this.writeChain.catch(() => undefined).then(mutation);
+    this.writeChain = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
   async prune() {
     const cutoff = this.now() - this.receiptTtlMs;
     for (const [key, receipt] of Object.entries(this.state.receipts)) {
@@ -140,10 +173,7 @@ export class DurableStore {
 
   async save() {
     if (!this.persist) return;
-    this.writeChain = this.writeChain
-      .catch(() => undefined)
-      .then(() => this.writeState());
-    return this.writeChain;
+    return this.enqueueWrite(() => this.writeState());
   }
 
   async writeState() {
@@ -161,7 +191,7 @@ export class DurableStore {
   }
 
   async clear() {
-    this.state = { version: 1, receipts: {}, pending: {} };
+    this.state = this.emptyState();
     this.loaded = true;
     if (this.persist) {
       await unlink(this.filePath).catch((error) => {
@@ -169,6 +199,33 @@ export class DurableStore {
       });
     }
   }
+
+  emptyExactState() {
+    return {
+      version: 1,
+      relayer_index_id: `sha256:${randomBytes(32).toString('hex')}`,
+      projects: {},
+    };
+  }
+
+  emptyState() {
+    return {
+      version: 1,
+      receipts: {},
+      pending: {},
+      exact_state: this.emptyExactState(),
+    };
+  }
+}
+
+function emptyProjectRecord() {
+  return {
+    snapshots: {},
+    heads: [],
+    heads_digest: null,
+    complete: true,
+    indexed_bytes: 0,
+  };
 }
 
 export async function retryOperation(
