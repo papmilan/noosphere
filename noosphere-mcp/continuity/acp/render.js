@@ -29,9 +29,9 @@ export function renderKernel(state, inputs = {}) {
     `Snapshot: ${inputs.snapshotId ?? state.envelope.snapshot_id}`,
     `Repository: ${compatibility.status} (${compatibility.actionable ? 'actionable' : 'not actionable'})`,
     `Phase: ${state.envelope.phase}`,
-    `Objective: ${state.envelope.goal.current_objective}`,
+    `Objective: ${oneLine(state.envelope.goal.current_objective)}`,
     ...conflicts.map(conflictLine),
-    ...blockers.map((item) => `BLOCKER: ${item.text}`),
+    ...blockers.map((item) => `BLOCKER: ${oneLine(item.text)}`),
   ].join('\n');
 
   if (byteLength(mandatory) > BUDGET) return UNSAFE_KERNEL;
@@ -47,8 +47,8 @@ export function renderKernel(state, inputs = {}) {
 
 function optionalSections(state) {
   return [
-    section(activeItems(state, 'risks').map((item) => `RISK: ${item.text}`)),
-    section(activeItems(state, 'decisions').map((item) => `DECISION [${item.domain}]: ${item.text}`)),
+    section(activeItems(state, 'risks').map((item) => `RISK: ${oneLine(item.text)}`)),
+    section(activeItems(state, 'decisions').map((item) => `DECISION [${oneLine(item.domain)}]: ${oneLine(item.text)}`)),
     section([`Stance: confidence=${state.envelope.working_stance.confidence}, momentum=${state.envelope.working_stance.momentum}, risk=${state.envelope.working_stance.risk_posture}`]),
     section(nextActionLine(state)),
     referenceSection(state),
@@ -59,21 +59,29 @@ function nextActionLine(state) {
   const actions = activeItems(state, 'next_actions')
     .slice()
     .sort((left, right) => priorityOf(left) - priorityOf(right) || compareText(left.id, right.id));
-  return actions.length ? [`NEXT: ${actions[0].text}`] : [];
+  return actions.length ? [`NEXT: ${oneLine(actions[0].text)}`] : [];
 }
 
 function referenceSection(state) {
   const refs = Object.values(state.runtime.referencesById)
     .slice()
     .sort((left, right) => compareText(left.id, right.id))
-    .map((ref) => `REF ${ref.kind} ${ref.id}: ${ref.locator}`);
+    .map((ref) => `REF ${oneLine(ref.kind)} ${oneLine(ref.id)}: ${oneLine(ref.locator)}`);
   return section(refs);
 }
 
 function conflictLine(conflict) {
-  const domain = conflict.domain ? `:${conflict.domain}` : '';
-  const values = conflict.candidates.map((candidate) => candidate.value).join(' vs ');
-  return `UNRESOLVED CONFLICT [${conflict.kind}${domain}]: ${values}`;
+  const domain = conflict.domain ? `:${oneLine(conflict.domain)}` : '';
+  const values = conflict.candidates.map((candidate) => oneLine(candidate.value)).join(' vs ');
+  return `UNRESOLVED CONFLICT [${oneLine(conflict.kind)}${domain}]: ${values}`;
+}
+
+// Free-text fields may legally contain newlines and other line-structure
+// characters. The kernel is a line-oriented projection an agent reads, so any
+// such character is collapsed to a space to stop stored text from forging kernel
+// lines (fake freshness, conflicts, or NEXT actions).
+function oneLine(value) {
+  return String(value).replace(/[\r\n\t\f\v\u0085\u2028\u2029]+/g, ' ');
 }
 
 function section(lines) {
