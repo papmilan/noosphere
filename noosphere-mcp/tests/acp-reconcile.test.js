@@ -87,13 +87,16 @@ describe('reconcileExactState', () => {
     assert.deepEqual(reconcile({ heads: [OTHER, REMOTE], states }), reconcile({ heads: [REMOTE, OTHER], states: [...states].reverse() }));
   });
 
-  it('rejects mis-keyed authority entries and unvalidated local references deterministically', () => {
+  it('rejects mis-keyed authority entries and mismatched local content but accepts an identical clone', () => {
     const local = state(LOCAL, PARENT);
     const remote = state(REMOTE, LOCAL);
     const invalid = { action: 'quarantine', reason: 'invalid-authority-graph', actionable: false, remote_heads: [REMOTE] };
     const input = { remoteHeads: [REMOTE], compatibility: { status: 'exact' }, clock: CLOCK, policy: DEFAULT_POLICY };
     assert.deepEqual(reconcileExactState({ ...input, local, validatedById: new Map([[OTHER, remote], [LOCAL, local]]) }), invalid);
-    assert.deepEqual(reconcileExactState({ ...input, local: structuredClone(local), validatedById: new Map([[REMOTE, remote], [LOCAL, local], [PARENT, state(PARENT)]]) }), invalid);
+    assert.equal(reconcileExactState({ ...input, local: structuredClone(local), validatedById: new Map([[REMOTE, remote], [LOCAL, local], [PARENT, state(PARENT)]]) }).action, 'fast-forward-local');
+    const changedLocal = structuredClone(local);
+    changedLocal.envelope.created_at = '2020-01-01T00:00:00.000Z';
+    assert.deepEqual(reconcileExactState({ ...input, local: changedLocal, validatedById: new Map([[REMOTE, remote], [LOCAL, local], [PARENT, state(PARENT)]]) }), invalid);
     assert.deepEqual(reconcileExactState({ ...input, local, validatedById: new Map([[REMOTE, remote], [PARENT, state(PARENT)]]) }), invalid);
   });
 });

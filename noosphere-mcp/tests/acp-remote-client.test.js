@@ -13,7 +13,7 @@ describe('RemoteStateClient', () => {
     const fetchImpl = async (url, options) => {
       calls.push({ url, options });
       if (url.endsWith('/capabilities')) return json({ sync_protocol_version: SYNC_PROTOCOL_VERSION, reconciliation_policy_version: RECONCILIATION_POLICY_VERSION, relayer_index_id: INDEX });
-      if (options.method === 'POST') return json({ snapshot_id: SNAPSHOT, created: true }, { status: 201 });
+      if (options.method === 'POST') return json({ snapshot_id: SNAPSHOT, created: true }, { status: 201, headers: { 'x-relayer-index-id': INDEX } });
       return json({ heads: [SNAPSHOT], heads_digest: INDEX }, { headers: { 'x-relayer-index-id': INDEX } });
     };
     const client = new RemoteStateClient({ baseUrl: 'https://relay.example/', token: 'token', fetchImpl });
@@ -42,6 +42,8 @@ describe('RemoteStateClient', () => {
     current = `sha256:${'c'.repeat(64)}`;
     await assert.rejects(client.getHeads('p'), /relayer-index-mismatch/);
     await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl: async () => json({ heads: [] }) }).getHeads('p'), /missing-relayer-index-id/);
+    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl: async () => json({ created: true }) }).putSnapshot('p', {}, INDEX), /missing-relayer-index-id/);
+    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl: async () => json({ error: 'stale-heads' }, { status: 409, headers: { 'x-relayer-index-id': `sha256:${'c'.repeat(64)}` } }) }).putSnapshot('p', {}, INDEX), /relayer-index-mismatch/);
   });
 
   it('bounds JSON and snapshot bodies to 1 MiB and rejects malformed JSON', async () => {

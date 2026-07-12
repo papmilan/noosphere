@@ -8,6 +8,8 @@ export function createExactRouter({ service, limits, submitSnapshot } = {}) {
   }));
 
   router.post('/projects/:project_id/acp/snapshots', route(async (req, res) => {
+    const capabilities = await service.getCapabilities();
+    res.set('X-Relayer-Index-Id', capabilities.relayer_index_id);
     const operation = submitSnapshot
       ? await submitSnapshot(req.params.project_id, req.body?.envelope, req.body?.expected_heads_digest)
       : await service.putSnapshot(req.params.project_id, req.body?.envelope, req.body?.expected_heads_digest);

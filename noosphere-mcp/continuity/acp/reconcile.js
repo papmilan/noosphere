@@ -1,4 +1,4 @@
-import { ACP_LIMITS } from '@noosphere/acp-protocol';
+import { ACP_LIMITS, canonicalize } from '@noosphere/acp-protocol';
 
 export function reconcileExactState({
   local,
@@ -71,7 +71,13 @@ function validAuthorityGraph(validatedById, local) {
   }
   if (local == null) return true;
   const localId = local?.envelope?.snapshot_id;
-  return typeof localId === 'string' && validatedById.get(localId) === local;
+  const validated = validatedById.get(localId);
+  if (typeof localId !== 'string' || validated === undefined) return false;
+  try {
+    return canonicalize(local.envelope) === canonicalize(validated.envelope);
+  } catch {
+    return false;
+  }
 }
 
 function completePath(start, graph, localId) {

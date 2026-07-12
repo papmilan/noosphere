@@ -50,7 +50,7 @@ export class RemoteStateClient {
     return this.request(`/v1/projects/${encodeURIComponent(projectId)}/acp/snapshots`, {
       method: 'POST',
       body,
-    }, { verifyIndex: false });
+    }, { verifyIndex: true, verifyIndexOnError: true });
   }
 
   getHeads(projectId) {
@@ -89,11 +89,12 @@ export class RemoteStateClient {
     return this.request(`/v1/projects/${encodeURIComponent(projectId)}/acp/history?${query}`, {}, { verifyIndex: true });
   }
 
-  async request(path, options = {}, { requirePinned = true, verifyIndex = false } = {}) {
+  async request(path, options = {}, { requirePinned = true, verifyIndex = false, verifyIndexOnError = false } = {}) {
     if (requirePinned) this.requirePinnedIndex();
     return this.withResponse(path, options, async (response) => {
+      if (verifyIndex && verifyIndexOnError) this.verifyIndex(response);
       if (!response.ok) throw await responseError(response, ACP_LIMITS.snapshotBytes);
-      if (verifyIndex) this.verifyIndex(response);
+      if (verifyIndex && !verifyIndexOnError) this.verifyIndex(response);
       const bytes = await readBounded(response, ACP_LIMITS.snapshotBytes);
       try { return JSON.parse(bytes.toString('utf8')); } catch (cause) {
         throw new RemoteStateError('malformed-json', { status: response.status, cause });
