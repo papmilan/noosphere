@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { waitForChild } from './child-process.js';
+import { RECONCILIATION_POLICY_VERSION, SYNC_PROTOCOL_VERSION, digestHeadSet } from '@noosphere/acp-protocol';
 
 const execFileAsync = promisify(execFile);
 const packageRoot = path.resolve(
@@ -36,13 +37,29 @@ let lifecycleHome;
 let storedActions;
 let idempotencyKeys;
 let typedRecallMemories;
+let acpRequests;
 
 before(async () => {
   storedActions = [];
   idempotencyKeys = [];
   typedRecallMemories = [];
+  acpRequests = [];
   server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
+    if (url.pathname.startsWith('/v1/acp/') || url.pathname.includes('/acp/')) acpRequests.push(`${req.method} ${url.pathname}`);
+    const indexId = `sha256:${'c'.repeat(64)}`;
+    if (req.method === 'GET' && url.pathname === '/v1/acp/capabilities') {
+      respondJson(res, 200, {
+        exact_bytes_durable: true, index_durable: true, relayer_index_id: indexId,
+        sync_protocol_version: SYNC_PROTOCOL_VERSION,
+        reconciliation_policy_version: RECONCILIATION_POLICY_VERSION,
+      }, { 'x-relayer-index-id': indexId });
+      return;
+    }
+    if (req.method === 'GET' && /^\/v1\/projects\/[^/]+\/acp\/heads$/.test(url.pathname)) {
+      respondJson(res, 200, { heads: [], heads_digest: digestHeadSet([]), complete: true }, { 'x-relayer-index-id': indexId });
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/health') {
       respondJson(res, 200, { status: 'ok' });
       return;
@@ -416,6 +433,7 @@ describe('Noosphere continuity CLI', () => {
   });
 
   it('auto-initializes and registers separate Git projects', async () => {
+    const beforeAcp = acpRequests.length;
     const nested = path.join(secondProjectDir, 'src', 'nested');
     await mkdir(nested, { recursive: true });
     await runCli(['activate', '--quiet'], secondProjectDir);
@@ -452,6 +470,9 @@ describe('Noosphere continuity CLI', () => {
         (project) => project.path === canonicalSecond,
       ),
     );
+    const activationRequests = acpRequests.slice(beforeAcp);
+    assert.ok(activationRequests.some((entry) => entry === 'GET /v1/acp/capabilities'));
+    assert.equal(activationRequests.some((entry) => entry.startsWith('POST ')), false);
   });
 
   it('one manager automatically watches every registered project', async () => {
@@ -908,8 +929,8 @@ async function runCli(args, cwd = projectDir) {
   return Buffer.concat(stdout).toString();
 }
 
-function respondJson(res, status, value) {
-  res.writeHead(status, { 'content-type': 'application/json' });
+function respondJson(res, status, value, headers = {}) {
+  res.writeHead(status, { 'content-type': 'application/json', ...headers });
   res.end(JSON.stringify(value));
 }
 

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import http from 'node:http';
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,6 +11,7 @@ import { ACP_PROTOCOL, ACP_SCHEMA_VERSION } from '../continuity/acp/project-stat
 import { decodeEnvelope, digestEnvelope } from '../continuity/acp/wire.js';
 import { observeRepository } from '../continuity/acp/git-state.js';
 import { readState, writeState, writeStateIfCurrent } from '../continuity/acp/store.js';
+import { RECONCILIATION_POLICY_VERSION, SYNC_PROTOCOL_VERSION, digestHeadSet } from '@noosphere/acp-protocol';
 
 const execFileAsync = promisify(execFile);
 const CLI = fileURLToPath(new URL('../continuity/index.js', import.meta.url));
@@ -101,6 +103,126 @@ describe('ACP store and CLI', () => {
     assert.match(result.stdout, /ACP handoff stored/);
     const stored = JSON.parse(await readFile(path.join(dir, '.noosphere', 'continuity.json'), 'utf8'));
     assert.equal(stored.goal.current_objective, 'Persist ACP state.');
+  });
+
+  it('keeps handoff local-first and queues an exact upload while the relayer is offline', async () => {
+    const dir = await makeRepo();
+    const observed = await observeRepository(dir);
+    const candidateFile = path.join(dir, 'handoff.json');
+    await writeFile(candidateFile, JSON.stringify(await signedEnvelope(observed)));
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(path.join(dir, '.noosphere'), { recursive: true });
+    await writeFile(path.join(dir, '.noosphere', 'config.json'), JSON.stringify({
+      project_id: 'noosphere', relayer_url: 'http://127.0.0.1:1',
+    }));
+
+    const result = await execFileAsync('node', [CLI, 'handoff', '--file', candidateFile, '--path', dir], {
+      env: { ...process.env, NOOSPHERE_ACP_RETRY_BASE_MS: '1' },
+    });
+    assert.match(result.stdout, /ACP handoff stored/);
+    const stored = JSON.parse(await readFile(path.join(dir, '.noosphere', 'continuity.json'), 'utf8'));
+    const metadata = JSON.parse(await readFile(path.join(dir, '.noosphere', 'continuity-sync.json'), 'utf8'));
+    assert.equal(metadata.uploads[0].snapshot_id, stored.snapshot_id);
+    assert.equal(metadata.uploads[0].attempts, 1);
+    assert.equal(JSON.stringify(metadata).includes(stored.goal.current_objective), false);
+
+    const indexId = `sha256:${'d'.repeat(64)}`;
+    let posts = 0;
+    const server = http.createServer(async (request, response) => {
+      const send = (status, body) => {
+        response.writeHead(status, { 'content-type': 'application/json', 'x-relayer-index-id': indexId });
+        response.end(JSON.stringify(body));
+      };
+      if (request.url === '/v1/acp/capabilities') return send(200, {
+        exact_bytes_durable: true, index_durable: true, relayer_index_id: indexId,
+        sync_protocol_version: SYNC_PROTOCOL_VERSION,
+        reconciliation_policy_version: RECONCILIATION_POLICY_VERSION,
+      });
+      if (request.url === '/v1/projects/noosphere/acp/heads') return send(200, {
+        heads: [], heads_digest: digestHeadSet([]), complete: true,
+      });
+      if (request.method === 'POST' && request.url === '/v1/projects/noosphere/acp/snapshots') {
+        posts += 1;
+        for await (const _chunk of request) { /* drain */ }
+        return send(201, { created: posts === 1 });
+      }
+      return send(404, { error: 'unexpected' });
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      await writeFile(path.join(dir, '.noosphere', 'config.json'), JSON.stringify({
+        project_id: 'noosphere', relayer_url: `http://127.0.0.1:${server.address().port}`,
+      }));
+      const env = { ...process.env, NOOSPHERE_HOME: path.join(dir, '.home') };
+      await execFileAsync('node', [CLI, 'activate', '--quiet', '--path', dir], { env });
+      await execFileAsync('node', [CLI, 'activate', '--quiet', '--path', dir], { env });
+      const retried = JSON.parse(await readFile(path.join(dir, '.noosphere', 'continuity-sync.json'), 'utf8'));
+      assert.deepEqual(retried.uploads, []);
+      assert.equal(posts, 1);
+    } finally {
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('returns a stable disabled action without reading or printing an envelope', async () => {
+    const dir = await makeRepo();
+    const result = await execFileAsync('node', [CLI, 'state', 'sync', '--json', '--path', dir], {
+      env: { ...process.env, NOOSPHERE_ACP_SYNC: 'false' },
+    });
+    assert.deepEqual(JSON.parse(result.stdout), {
+      action: 'sync-disabled',
+      actionable: false,
+      confirmation_id: null,
+      snapshot_id: null,
+    });
+    assert.doesNotMatch(result.stdout, /current_objective|integrity|next_actions/);
+  });
+
+  it('exposes exact sync and history as bounded JSON without semantic calls or envelope contents', async () => {
+    const dir = await makeRepo();
+    const observed = await observeRepository(dir);
+    await writeState(dir, decodeEnvelope(await signedEnvelope(observed), { clock: CREATED_AT }).state, { clock: CREATED_AT });
+    const indexId = `sha256:${'c'.repeat(64)}`;
+    const requests = [];
+    const server = http.createServer(async (request, response) => {
+      requests.push(`${request.method} ${new URL(request.url, 'http://localhost').pathname}`);
+      const send = (status, body) => {
+        response.writeHead(status, { 'content-type': 'application/json', 'x-relayer-index-id': indexId });
+        response.end(JSON.stringify(body));
+      };
+      if (request.url === '/v1/acp/capabilities') return send(200, {
+        exact_bytes_durable: true, index_durable: true, relayer_index_id: indexId,
+        sync_protocol_version: SYNC_PROTOCOL_VERSION,
+        reconciliation_policy_version: RECONCILIATION_POLICY_VERSION,
+      });
+      if (request.url === '/v1/projects/noosphere/acp/heads') return send(200, {
+        heads: [], heads_digest: digestHeadSet([]), complete: true,
+      });
+      if (request.url.startsWith('/v1/projects/noosphere/acp/history')) return send(200, { history: [] });
+      if (request.method === 'POST' && request.url === '/v1/projects/noosphere/acp/snapshots') {
+        for await (const _chunk of request) { /* drain */ }
+        return send(201, { created: true });
+      }
+      return send(404, { error: 'unexpected' });
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const { mkdir } = await import('node:fs/promises');
+      await mkdir(path.join(dir, '.noosphere'), { recursive: true });
+      await writeFile(path.join(dir, '.noosphere', 'config.json'), JSON.stringify({
+        project_id: 'noosphere', relayer_url: `http://127.0.0.1:${server.address().port}`,
+      }));
+      const sync = await execFileAsync('node', [CLI, 'state', 'sync', '--json', '--path', dir]);
+      assert.equal(JSON.parse(sync.stdout).action, 'push-local');
+      assert.doesNotMatch(sync.stdout, /current_objective|integrity|next_actions/);
+      const history = await execFileAsync('node', [CLI, 'state', 'history', '--json', '--limit', '2', '--path', dir]);
+      assert.deepEqual(JSON.parse(history.stdout).history, []);
+      assert.equal(requests.some((entry) => entry.includes('/recall') || entry.includes('/v1/actions')), false);
+    } finally {
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it('validates a freshly written state and rejects a tampered kernel', async () => {

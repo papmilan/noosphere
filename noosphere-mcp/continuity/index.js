@@ -34,6 +34,16 @@ import { readState, writeState, validateState, buildInitialState } from './acp/s
 import { decodeEnvelope } from './acp/wire.js';
 import { applyUpdate } from './acp/merge.js';
 import { renderKernel } from './acp/render.js';
+import { RemoteStateClient } from './acp/remote-client.js';
+import {
+  applyRemoteConfirmation,
+  issueRemoteConfirmation,
+  listQuarantine,
+  listRemoteHistory,
+  pushLocalState,
+  syncProjectState,
+} from './acp/sync.js';
+import { readSyncMetadata, writeSyncMetadata } from './acp/sync-metadata.js';
 
 const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -259,6 +269,12 @@ export async function activateProject(start, { quiet = false } = {}) {
   }
   const config = await loadConfig(root);
   await registerProject(root, config.project_id);
+  await retryExactUploads(root, { config }).catch((error) => {
+    if (!quiet) console.warn(`Noosphere: exact-state upload deferred (${error.code || error.message}).`);
+  });
+  await discoverExactState(root, config).catch((error) => {
+    if (!quiet) console.warn(`Noosphere: exact-state discovery deferred (${error.code || error.message}).`);
+  });
 
   const contextFile = path.join(root, '.noosphere', 'context.md');
   const contextContent = await readFile(contextFile, 'utf8').catch(() => '');
@@ -1429,6 +1445,10 @@ async function handoffFromCli(root) {
     next = { state: update.state, conflicts: update.state.runtime.conflicts };
   }
   const written = await writeState(root, next.state, { clock });
+  if (await readProjectConfig(root)) {
+    await enqueueExactUpload(root, written.envelope.snapshot_id);
+    await retryExactUploads(root).catch(() => undefined);
+  }
   const conflicts = next.conflicts ?? [];
   console.log(`ACP handoff stored (${written.envelope.snapshot_id}).`);
   if (conflicts.length) {
@@ -1440,6 +1460,10 @@ async function stateFromCli(root) {
   await assertGitRepository(root);
   const clock = new Date().toISOString();
   const mode = process.argv[3];
+  if (['sync', 'push', 'pull', 'history', 'quarantine'].includes(mode)) {
+    await stateRemoteFromCli(root, mode);
+    return;
+  }
   if (mode === 'validate') {
     const result = await validateState(root, { clock });
     if (result.ok) {
@@ -1499,6 +1523,8 @@ function formatAcpErrors(errors) {
 async function restoreFromWalrus(root) {
   const config = await loadConfig(root);
   console.log(`Restoring project state from Walrus for ${config.project_id}...`);
+
+  await discoverExactState(root, config).catch(() => undefined);
 
   if (!(await pingRelayer(config.relayer_url))) {
     throw relayerDownError(config.relayer_url);
@@ -1560,6 +1586,130 @@ async function restoreFromWalrus(root) {
   await refreshContext(root);
   console.log(`  context.md refreshed from Walrus`);
   console.log(`Restore complete. ${restored} file(s) written.`);
+}
+
+async function stateRemoteFromCli(root, mode) {
+  if (mode === 'quarantine') {
+    printSyncResult({ action: 'quarantine-list', actionable: false, entries: await listQuarantine(root) });
+    return;
+  }
+  if (!acpSyncEnabled()) {
+    printSyncResult({ action: 'sync-disabled', actionable: false });
+    return;
+  }
+  const config = await loadConfig(root);
+  const deps = await syncDependencies(root, config);
+  let result;
+  if (mode === 'history') {
+    const head = readOption('--head');
+    result = {
+      action: 'history', actionable: false,
+      ...(await listRemoteHistory(config.project_id, {
+        ...(head ? { head } : {}),
+        limit: readIntegerOption('--limit'),
+      }, deps)),
+    };
+  } else if (mode === 'push') {
+    await retryExactUploads(root, { config, deps });
+    result = { action: 'push-local', actionable: false, push: await pushLocalState(root, config.project_id, deps) };
+  } else if (readOption('--confirm-remote')) {
+    const confirmationId = readOption('--confirm-remote');
+    const metadata = await readSyncMetadata(root);
+    const cached = metadata.confirmations?.[confirmationId];
+    if (!cached) throw Object.assign(new Error('confirmation-missing'), { code: 'confirmation-missing' });
+    if (cached.allow_stale_advanced !== process.argv.includes('--allow-stale-advanced')) {
+      throw Object.assign(new Error('confirmation-override-mismatch'), { code: 'confirmation-override-mismatch' });
+    }
+    const applied = await applyRemoteConfirmation(root, confirmationId, { ...deps, projectId: config.project_id });
+    result = { action: 'remote-applied', actionable: false, snapshot_id: applied.envelope.snapshot_id };
+  } else if (mode === 'pull') {
+    result = await issueRemoteConfirmation(root, config.project_id, deps, cliSyncOptions());
+  } else {
+    await retryExactUploads(root, { config, deps });
+    result = await syncProjectState(root, config.project_id, deps, cliSyncOptions());
+  }
+  printSyncResult(result);
+}
+
+function cliSyncOptions() {
+  return { allowStaleAdvanced: process.argv.includes('--allow-stale-advanced') };
+}
+
+function printSyncResult(result) {
+  const reconciliation = result.reconciliation || result;
+  const output = {
+    action: reconciliation.action || 'unknown',
+    actionable: reconciliation.actionable === true,
+    confirmation_id: result.confirmation?.confirmation_id || null,
+    snapshot_id: result.snapshot_id || reconciliation.candidate_snapshot_id || null,
+  };
+  if (reconciliation.reason) output.reason = reconciliation.reason;
+  if (Array.isArray(result.entries)) output.entries = result.entries.map(({ name, bytes, modified_at }) => ({ name, bytes, modified_at }));
+  if (Array.isArray(result.history)) output.history = result.history.map(({ snapshot_id, parent_snapshot_id }) => ({ snapshot_id, parent_snapshot_id }));
+  if (result.push) output.remote_status = result.push.queued === true ? 'queued' : 'stored';
+  process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+}
+
+async function syncDependencies(root, config) {
+  const metadata = await readSyncMetadata(root);
+  return {
+    client: new RemoteStateClient({
+      baseUrl: config.relayer_url,
+      token: process.env.NOOSPHERE_API_TOKEN,
+      timeoutMs: Number(process.env.NOOSPHERE_ACP_TIMEOUT_MS) || 2_000,
+      expectedRelayerIndexId: metadata.relayer_index_id || null,
+    }),
+  };
+}
+
+async function discoverExactState(root, config) {
+  if (!acpSyncEnabled()) return null;
+  const deps = await syncDependencies(root, config);
+  return issueRemoteConfirmation(root, config.project_id, deps);
+}
+
+async function enqueueExactUpload(root, snapshotId) {
+  if (!acpSyncEnabled()) return;
+  const metadata = await readSyncMetadata(root);
+  const uploads = (metadata.uploads || []).filter((job) => job.snapshot_id !== snapshotId);
+  uploads.push({ snapshot_id: snapshotId, attempts: 0, next_attempt_at: new Date(0).toISOString() });
+  metadata.uploads = uploads.slice(-16);
+  await writeSyncMetadata(root, metadata);
+}
+
+async function retryExactUploads(root, options = {}) {
+  if (!acpSyncEnabled()) return;
+  const metadata = await readSyncMetadata(root);
+  const jobs = metadata.uploads || [];
+  if (jobs.length === 0) return;
+  const config = options.config || await loadConfig(root);
+  const deps = options.deps || await syncDependencies(root, config);
+  const now = Date.now();
+  for (const job of jobs) {
+    if (Date.parse(job.next_attempt_at) > now) continue;
+    job.attempts = Math.min(Number(job.attempts || 0) + 1, 32);
+    try {
+      await pushLocalState(root, config.project_id, deps);
+      metadata.uploads = metadata.uploads.filter((entry) => entry.snapshot_id !== job.snapshot_id);
+    } catch (error) {
+      const retryBase = Math.max(1, Number(process.env.NOOSPHERE_ACP_RETRY_BASE_MS) || 1_000);
+      const delay = Math.min(retryBase * (2 ** Math.min(job.attempts - 1, 8)), 5 * 60_000);
+      job.next_attempt_at = new Date(now + delay).toISOString();
+      job.last_error = String(error.code || 'remote-unavailable').slice(0, 80);
+    }
+  }
+  await writeSyncMetadata(root, metadata);
+}
+
+function acpSyncEnabled() {
+  return process.env.NOOSPHERE_ACP_SYNC !== 'false';
+}
+
+function readIntegerOption(name) {
+  const value = readOption(name);
+  if (value == null) return undefined;
+  if (!/^\d+$/.test(value)) throw new Error(`${name} requires a positive integer.`);
+  return Number(value);
 }
 
 async function capturePromptFromCli(root) {
@@ -2415,7 +2565,10 @@ Commands:
   ollama      Run any Ollama model with shared project memory
   protocol    Print the universal agent protocol
   state       Print the ACP continuity kernel (--json for the envelope,
-              validate to verify the persisted state)
+              validate to verify the persisted state). Exact-state commands:
+              state sync|push|pull|history|quarantine [--json]
+              Use --confirm-remote <confirmation_id> to apply a cached pull;
+              advanced history also requires --allow-stale-advanced
   handoff     Merge a structured ACP handoff (--file <path> or --stdin)
 
 Ollama examples:
