@@ -42,6 +42,7 @@ import { decodeProjectStateEnvelope } from './acp-protocol.js';
 import { ExactStateService } from './exact-state.js';
 import {
   createExactRouter,
+  isRetryableExactError,
   processAcpSnapshotJob,
   submitExactSnapshot,
 } from './exact-routes.js';
@@ -370,6 +371,13 @@ app.post(
         res.status(404).json({ success: false, error: 'No pending job found' });
         return;
       }
+      if (job.terminal) {
+        res.status(job.terminalError?.status || 409).json({
+          success: false,
+          error: job.terminalError?.code || 'exact-state-terminal',
+        });
+        return;
+      }
       if (activeJobs.has(job.key)) {
         res.status(409).json({ success: false, error: 'Job is already active' });
         return;
@@ -385,7 +393,7 @@ app.post(
           JSON.stringify({
             event: 'upload_retry_failed',
             project_id: job.projectId,
-            error: error.message,
+            error: error.code || 'upload-retry-failed',
           }),
         );
       });
@@ -734,11 +742,15 @@ app.get(
 
 app.use((error, _req, res, _next) => {
   const status = error.status || 500;
-  console.error('[error]', error);
+  const generic = status >= 500;
+  console.error('[error]', {
+    status,
+    code: generic ? 'internal-server-error' : error.code || 'request-error',
+  });
   res.status(status).json({
     success: false,
-    error: status === 500 ? 'Internal server error' : error.message,
-    ...(process.env.NODE_ENV === 'development' && { details: error.message }),
+    error: generic ? 'Internal server error' : error.message,
+    ...(process.env.NODE_ENV === 'development' && !generic && { details: error.message }),
   });
 });
 
@@ -821,8 +833,10 @@ async function processPendingJob(job) {
     {
       attempts: uploadAttempts,
       baseDelayMs: uploadRetryBaseMs,
-      shouldRetry: (error) => !isRateLimited(error),
+      shouldRetry: (error) => !isRateLimited(error)
+        && (job.kind !== 'acp-snapshot' || isRetryableExactError(error)),
       onFailure: async (error) => {
+        if (job.kind === 'acp-snapshot' && !isRetryableExactError(error)) return;
         const current = await runtimeStore.getPending(job.key);
         const delay = retryDelayFor(error, (current?.attempts || 0) + 1);
         await runtimeStore.markAttempt(job.key, error, {
@@ -874,7 +888,9 @@ async function recoverPendingJobs() {
     scheduleQueueRecovery(uploadDelayRemaining());
     return;
   }
-  const pending = prioritizePendingJobs(await runtimeStore.listPending());
+  const pending = prioritizePendingJobs(
+    (await runtimeStore.listPending()).filter((candidate) => !candidate.terminal),
+  );
   const job = pending.find(
     (candidate) =>
       !activeJobs.has(candidate.key) &&
@@ -900,7 +916,11 @@ async function recoverPendingJobs() {
     await processPendingJob(job);
     console.log(`[queue] Recovered ${job.key}`);
   } catch (error) {
-    console.error(`[queue] Recovery failed for ${job.key}: ${error.message}`);
+    console.error('[queue] Recovery failed', {
+      key: job.key,
+      code: error.code || 'queue-recovery-failed',
+      status: error.status || 500,
+    });
   }
   scheduleQueueRecovery();
 }

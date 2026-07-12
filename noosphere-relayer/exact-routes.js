@@ -57,13 +57,27 @@ export async function submitExactSnapshot({
   const snapshotId = envelope.snapshot_id;
   const key = `acp-snapshot:${snapshotId}`;
   const receipt = await store.getReceipt(key);
-  if (receipt) return { status: 200, result: { ...receipt, created: false, deduplicated: true } };
+  if (receipt) {
+    const { expected_heads_digest: storedDigest, ...storedResult } = receipt;
+    if (storedDigest !== undefined && storedDigest !== expectedHeadsDigest) {
+      throw httpError('stale-heads', 409);
+    }
+    return { status: 200, result: { ...storedResult, created: false, deduplicated: true } };
+  }
   const pending = await store.getPending(key);
-  if (pending) return { status: 202, result: queuedSnapshot(pending) };
+  if (pending) {
+    if (pending.terminal) throw terminalError(pending);
+    if (pending.projectId !== projectId
+      || pending.canonicalEnvelope !== canonicalEnvelope
+      || pending.expectedHeadsDigest !== expectedHeadsDigest) {
+      throw httpError('snapshot-submission-conflict', 409);
+    }
+    return { status: 202, result: queuedSnapshot(pending) };
+  }
 
   try {
     const result = await service.putSnapshot(projectId, envelope, expectedHeadsDigest);
-    await store.complete(key, result);
+    await completeSnapshot(store, key, expectedHeadsDigest, result);
     return { status: result.created ? 201 : 200, result };
   } catch (error) {
     if (!isRetryableExactError(error)) throw error;
@@ -80,10 +94,16 @@ export async function submitExactSnapshot({
 
 export async function processAcpSnapshotJob(job, { service, store }) {
   if (job.kind !== 'acp-snapshot') throw new Error(`unsupported-job-kind:${job.kind}`);
-  const envelope = JSON.parse(job.canonicalEnvelope);
-  const result = await service.putSnapshot(job.projectId, envelope, job.expectedHeadsDigest);
-  await store.complete(job.key, result);
-  return result;
+  if (job.terminal) throw terminalError(job);
+  try {
+    const envelope = JSON.parse(job.canonicalEnvelope);
+    const result = await service.putSnapshot(job.projectId, envelope, job.expectedHeadsDigest);
+    await completeSnapshot(store, job.key, job.expectedHeadsDigest, result);
+    return result;
+  } catch (error) {
+    if (!isRetryableExactError(error)) await store.markTerminal(job.key, error);
+    throw error;
+  }
 }
 
 function route(handler) {
@@ -92,10 +112,17 @@ function route(handler) {
       await handler(req, res);
     } catch (error) {
       const status = responseStatus(error);
+      const generic = isUnknownServerError(error, status);
+      if (status >= 500) {
+        console.error('[exact-state-error]', {
+          status,
+          code: generic ? 'internal-server-error' : error.code,
+        });
+      }
       res.status(status).json({
         success: false,
-        error: error.code || error.message || 'exact-state-error',
-        ...(error.details === undefined ? {} : { details: error.details }),
+        error: generic ? 'internal-server-error' : error.code || error.message || 'exact-state-error',
+        ...(generic || error.details === undefined ? {} : { details: error.details }),
       });
     }
   };
@@ -116,11 +143,24 @@ function httpError(code, status) {
   return error;
 }
 
-function isRetryableExactError(error) {
-  if (error?.retryable) return true;
-  if (Number(error?.status) >= 500) return true;
-  return !error?.status && !String(error?.code || '').startsWith('snapshot-')
-    && !['stale-heads', 'head-limit', 'project-byte-limit', 'project-id-mismatch'].includes(error?.code);
+export function isRetryableExactError(error) {
+  if (error?.retryable === true) return true;
+  return [502, 503, 504].includes(Number(error?.status));
+}
+
+function completeSnapshot(store, key, expectedHeadsDigest, result) {
+  return store.complete(key, {
+    ...result,
+    expected_heads_digest: expectedHeadsDigest,
+  });
+}
+
+function terminalError(job) {
+  return httpError(job.terminalError?.code || 'exact-state-terminal', job.terminalError?.status || 409);
+}
+
+function isUnknownServerError(error, status) {
+  return status >= 500 && !['project-byte-limit', 'snapshot-index-limit'].includes(error?.code);
 }
 
 function queuedSnapshot(job) {

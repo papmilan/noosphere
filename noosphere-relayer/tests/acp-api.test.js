@@ -8,6 +8,7 @@ import express from 'express';
 import { ACP_LIMITS } from '@noosphere/acp-protocol';
 import {
   createExactRouter,
+  isRetryableExactError,
   parseBoundedHistoryLimit,
   processAcpSnapshotJob,
   submitExactSnapshot,
@@ -31,6 +32,22 @@ describe('ACP exact-state HTTP boundary', () => {
   it('advertises exact-state topology and normative limits', async () => { const response = await fetch(`${baseUrl}/acp/capabilities`); const body = await response.json(); assert.equal(response.status, 200); assert.equal(body.cross_machine_recoverable, false); assert.deepEqual(body.limits, ACP_LIMITS); });
   it('maps create, replay, ETag, empty heads, and bounded history', async () => { const post = (envelope) => fetch(`${baseUrl}/projects/p/acp/snapshots`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ envelope, expected_heads_digest: 'empty' }) }); assert.equal((await post({ created: true })).status, 201); assert.equal((await post({ created: false })).status, 200); const snapshot = await fetch(`${baseUrl}/projects/p/acp/snapshots/${snapshotId}`); assert.equal(snapshot.headers.get('etag'), `"${snapshotId}"`); assert.equal(await snapshot.text(), '{"canonical":true}'); assert.deepEqual((await (await fetch(`${baseUrl}/projects/p/acp/heads`)).json()).heads, []); assert.deepEqual((await (await fetch(`${baseUrl}/projects/p/acp/history?head=${snapshotId}&limit=1`)).json()).history, [{ head: snapshotId, limit: 1 }]); });
   it('maps exact-state failures without leaking payloads', async () => { for (const [code, status] of [['stale-heads', 409], ['head-limit', 409], ['snapshot-too-large', 413], ['invalid-envelope', 422], ['project-byte-limit', 507]]) { const response = await fetch(`${baseUrl}/projects/p/acp/snapshots`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ envelope: { fail: code, status, secret: 'do-not-log' } }) }); const body = await response.json(); assert.equal(response.status, status); assert.equal(body.error, code); assert.equal(JSON.stringify(body).includes('do-not-log'), false); } });
+  it('genericizes unknown server failures and redacts server logs', async () => {
+    const original = console.error;
+    const logs = [];
+    console.error = (...values) => logs.push(values);
+    try {
+      const response = await fetch(`${baseUrl}/projects/p/acp/snapshots`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ envelope: { fail: 'secret-backend-path', status: 500 } }),
+      });
+      assert.equal(response.status, 500);
+      assert.deepEqual(await response.json(), { success: false, error: 'internal-server-error' });
+      assert.equal(JSON.stringify(logs).includes('secret-backend-path'), false);
+    } finally {
+      console.error = original;
+    }
+  });
   it('rejects invalid history limits', () => { for (const value of ['0', '201', '1.5', 'no']) assert.throws(() => parseBoundedHistoryLimit(value, 1, 200), /history-limit/); assert.equal(parseBoundedHistoryLimit(undefined, 1, 200), 200); });
   it('inherits bearer authentication at the mounted API boundary', async () => {
     const secured = express();
@@ -88,5 +105,82 @@ describe('ACP durable queue ordering', () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it('preserves CAS inputs across pending and completed replay', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'noosphere-acp-cas-'));
+    try {
+      const store = new DurableStore({ filePath: path.join(directory, 'state.json') });
+      const envelope = { snapshot_id: `sha256:${'d'.repeat(64)}` };
+      let offline = true;
+      const service = {
+        async putSnapshot(_project, _envelope, expected) {
+          if (offline) throw Object.assign(new Error('offline'), { retryable: true });
+          return { created: true, snapshot_id: envelope.snapshot_id, expected };
+        },
+      };
+      const args = { projectId: 'p', envelope, canonicalEnvelope: JSON.stringify(envelope), service, store };
+      assert.equal((await submitExactSnapshot({ ...args, expectedHeadsDigest: 'heads-a' })).status, 202);
+      await assert.rejects(
+        submitExactSnapshot({ ...args, expectedHeadsDigest: 'heads-b' }),
+        /snapshot-submission-conflict/,
+      );
+      offline = false;
+      const [job] = await store.listPending();
+      await processAcpSnapshotJob(job, { service, store });
+      const replay = await submitExactSnapshot({ ...args, expectedHeadsDigest: 'heads-a' });
+      assert.equal(replay.result.deduplicated, true);
+      await assert.rejects(
+        submitExactSnapshot({ ...args, expectedHeadsDigest: 'heads-b' }),
+        /stale-heads/,
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('does not queue normative quota failures', async () => {
+    const store = new DurableStore({ persist: false });
+    const envelope = { snapshot_id: `sha256:${'e'.repeat(64)}` };
+    const service = { async putSnapshot() { throw exactError('project-byte-limit', 507); } };
+    await assert.rejects(submitExactSnapshot({
+      projectId: 'p', envelope, canonicalEnvelope: JSON.stringify(envelope),
+      expectedHeadsDigest: 'empty', service, store,
+    }), /project-byte-limit/);
+    assert.deepEqual(await store.listPending(), []);
+  });
+
+  it('classifies only explicit or transient backend failures as retryable', () => {
+    assert.equal(isRetryableExactError(Object.assign(new Error('offline'), { retryable: true })), true);
+    assert.equal(isRetryableExactError(exactError('backend-unavailable', 503)), true);
+    for (const [code, status] of [
+      ['stale-heads', 409], ['head-limit', 409], ['project-byte-limit', 507],
+      ['snapshot-index-limit', 507], ['invalid-protocol', 422],
+    ]) assert.equal(isRetryableExactError(exactError(code, status)), false, code);
+  });
+
+  it('persists terminal ACP recovery failures and does not attempt them again', async () => {
+    const store = new DurableStore({ persist: false });
+    const envelope = { snapshot_id: `sha256:${'f'.repeat(64)}` };
+    let calls = 0;
+    const service = {
+      async putSnapshot() {
+        calls += 1;
+        if (calls === 1) throw Object.assign(new Error('offline'), { retryable: true });
+        throw exactError('stale-heads', 409);
+      },
+    };
+    await submitExactSnapshot({
+      projectId: 'p', envelope, canonicalEnvelope: JSON.stringify(envelope),
+      expectedHeadsDigest: 'empty', service, store,
+    });
+    const [job] = await store.listPending();
+    await assert.rejects(processAcpSnapshotJob(job, { service, store }), /stale-heads/);
+    const terminal = await store.getPending(job.key);
+    assert.equal(terminal.terminal, true);
+    assert.deepEqual(terminal.terminalError, { code: 'stale-heads', status: 409 });
+    assert.equal(terminal.lastError, 'stale-heads');
+    await assert.rejects(processAcpSnapshotJob(terminal, { service, store }), /stale-heads/);
+    assert.equal(calls, 2);
   });
 });

@@ -115,6 +115,22 @@ export class DurableStore {
     return pending;
   }
 
+  async markTerminal(key, error) {
+    await this.initialize();
+    const pending = this.state.pending[key];
+    if (!pending) return null;
+    pending.terminal = true;
+    pending.terminalError = {
+      code: error?.code || 'exact-state-error',
+      status: Number(error?.status) || 500,
+    };
+    pending.lastError = pending.terminalError.code;
+    pending.lastAttemptAt = this.now();
+    pending.nextAttemptAt = null;
+    await this.save();
+    return pending;
+  }
+
   async complete(key, value) {
     await this.initialize();
     delete this.state.pending[key];
