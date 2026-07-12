@@ -16,12 +16,15 @@ import { after, before, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { waitForChild } from './child-process.js';
+
 const execFileAsync = promisify(execFile);
 const packageRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
 );
 const cli = path.join(packageRoot, 'continuity', 'index.js');
+const CLI_TIMEOUT_MS = 8_000;
 
 let server;
 let serverUrl;
@@ -678,9 +681,9 @@ describe('Noosphere continuity CLI', () => {
       });
       const stderrChunks = [];
       child.stderr.on('data', (chunk) => stderrChunks.push(chunk));
-      const code = await new Promise((resolve) =>
-        child.once('close', resolve),
-      );
+      const code = await waitForChild(child, ['restore'], {
+        timeoutMs: CLI_TIMEOUT_MS,
+      });
       const stderr = Buffer.concat(stderrChunks).toString();
       assert.notEqual(code, 0, 'restore must fail when the relayer is down');
       assert.match(stderr, /Cannot reach the Noosphere relayer/);
@@ -896,7 +899,7 @@ async function runCli(args, cwd = projectDir) {
   const stderr = [];
   child.stdout.on('data', (chunk) => stdout.push(chunk));
   child.stderr.on('data', (chunk) => stderr.push(chunk));
-  const code = await new Promise((resolve) => child.once('close', resolve));
+  const code = await waitForChild(child, args, { timeoutMs: CLI_TIMEOUT_MS });
   assert.equal(
     code,
     0,
