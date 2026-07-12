@@ -29,6 +29,7 @@ import {
 import { writeHint } from '../lifecycle/ide-bridge.js';
 import { runSetupWizard, runCredentialsCommand } from './credentials-cli.js';
 import { runOllamaSession } from './ollama.js';
+import { workspaceFingerprintHex as workspaceFingerprint } from './acp/git-state.js';
 
 const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -1290,43 +1291,6 @@ async function loadConfig(root) {
       ),
     },
   };
-}
-
-async function workspaceFingerprint(root, includeJournal = false) {
-  const [status, diff, journal] = await Promise.all([
-    git(root, ['status', '--porcelain=v1']),
-    git(root, ['diff', '--no-ext-diff', '--binary', '--', '.']),
-    readFile(path.join(root, '.noosphere', 'journal.md'), 'utf8').catch(
-      () => '',
-    ),
-  ]);
-  const lines = status
-    .split('\n')
-    .filter((line) => line && !line.includes('.noosphere/'));
-  const untracked = lines
-    .filter((line) => line.startsWith('?? '))
-    .map((line) => line.slice(3));
-  const untrackedState = [];
-
-  for (const file of untracked.slice(0, 200)) {
-    try {
-      const details = await stat(path.join(root, file));
-      untrackedState.push(
-        `${file}:${details.size}:${details.mtimeMs}`,
-      );
-    } catch {
-      untrackedState.push(`${file}:missing`);
-    }
-  }
-
-  return hash(
-    JSON.stringify({
-      status: lines,
-      diff,
-      untracked: untrackedState,
-      journal: includeJournal ? journal : '',
-    }),
-  );
 }
 
 function formatCheckpoint(snapshot) {
