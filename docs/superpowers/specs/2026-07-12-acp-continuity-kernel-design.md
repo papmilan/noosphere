@@ -1,7 +1,11 @@
 # ACP Continuity Kernel Design
 
 **Date:** 2026-07-12
-**Status:** Approved direction; written specification awaiting user review
+**Status:** Approved direction; revised specification awaiting user review
+
+The internal architecture decision is recorded in
+`docs/adr/0001-acp-runtime-project-state.md`. That ADR is normative for the
+wire/domain boundary, Project State invariants, and determinism.
 
 ## Purpose
 
@@ -92,8 +96,10 @@ Noosphere. They are not silently committed to a user's repository.
 The continuity package adds focused modules:
 
 - `noosphere-mcp/continuity/acp/schema.json`: portable JSON Schema;
-- `noosphere-mcp/continuity/acp/envelope.js`: normalization, validation,
-  canonicalization, digesting, and migration;
+- `noosphere-mcp/continuity/acp/wire.js`: JSON decoding, schema validation,
+  version migration, canonical encoding, and digesting;
+- `noosphere-mcp/continuity/acp/project-state.js`: immutable runtime domain
+  constructors, cross-field invariants, and derived indexes;
 - `noosphere-mcp/continuity/acp/git-state.js`: repository identity and
   compatibility classification;
 - `noosphere-mcp/continuity/acp/merge.js`: optimistic update and explicit
@@ -114,11 +120,18 @@ not accept chain-of-thought. The CLI independently captures current Git state,
 validates the candidate, merges it against the current envelope, writes both
 files atomically, and prints conflicts or freshness warnings.
 
+Parsed JSON never enters merge or rendering directly. `wire.js` converts an
+untrusted WireEnvelope into a validated runtime ProjectState. Domain
+operations accept only ProjectState values and explicit repository, clock,
+and policy inputs. ProjectState is an internal immutable model; it is not a
+serializable class and its derived indexes never appear in the envelope.
+
 ## Project State Envelope
 
 The canonical envelope uses `acp.project-state-envelope` and schema version
 `1.0.0`. Unknown fields are rejected within v1 objects. Future extensions use
-namespaced entries under `extensions`.
+namespaced entries under `extensions` and pass the same recursive privacy and
+size validation as core fields.
 
 ```json
 {
@@ -250,8 +263,10 @@ state is rejected. `unknown` state remains visible but unverified.
 
 Every update carries `parent_snapshot_id`. If it matches the current snapshot,
 Noosphere applies an optimistic update. If it does not match, Noosphere
-performs a deterministic three-way comparison using the common parent when
-available.
+does not claim to have a three-way merge base: v1 stores only the current
+snapshot. It conservatively merges safe append-only additions and creates
+conflicts for competing modifications. A future append-only snapshot store
+may add true three-way merge without changing the envelope contract.
 
 The first slice auto-merges only:
 
@@ -343,6 +358,24 @@ folded into ACP state by migration.
 - Recalled memories cannot overwrite current state without a validated ACP
   update.
 
+The complete boundary between Project State and excluded data, including raw
+chat, provider session state, complete source material, derived indexes, and
+unfiltered recall output, is normative in ADR 0001.
+
+## Determinism
+
+ACP guarantees deterministic mechanics, not identical judgment from different
+agents. Given the same validated ProjectState, candidate update, observed
+repository, clock, and policy, validation and transition produce the same
+ordered result; encoding produces byte-identical canonical JSON; rendering
+produces byte-identical bounded Markdown.
+
+Runtime operations do not read implicit time, randomness, locale, network, or
+model output. Values use Unicode NFC, LF line endings, normalized UTC
+timestamps, stable-ID sorting for set-like collections, explicit schema order
+for ordered collections, and RFC 8785 canonical JSON semantics for digesting.
+The full determinism contract is normative in ADR 0001.
+
 ## Failure Handling
 
 - Invalid candidate: report every validation error; write nothing.
@@ -367,6 +400,12 @@ folded into ACP state by migration.
 - reject unknown fields and unsupported versions;
 - reject private-reasoning and oversized values;
 - produce stable canonical digests regardless of object key order;
+- reject JSON that passes structural schema checks but violates domain
+  invariants;
+- prove identical runtime inputs produce byte-identical envelopes, kernels,
+  ordered validation errors, and ordered conflicts;
+- prove wall clock, locale, object insertion order, and map insertion order do
+  not affect ACP output;
 - classify exact, advanced, diverged, foreign, and unknown Git states;
 - merge independent assertions;
 - preserve explicit conflicting decisions;
