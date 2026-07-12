@@ -101,8 +101,7 @@ initializes Noosphere if needed, and registers it with the project manager.
 Create `.noosphere-ignore` in a repository to prevent automatic activation.
 `noosphere deactivate` unregisters a project from the background manager.
 
-For a project opened directly in a GUI IDE, add it from the local dashboard at
-`http://127.0.0.1:3001/#projects` or use:
+For a project opened directly in a GUI IDE, register it explicitly:
 
 ```sh
 noosphere register --path /absolute/path/to/repository

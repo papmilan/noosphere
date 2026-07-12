@@ -125,7 +125,6 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: '2mb' }));
-app.use(express.static(path.join(directory, 'public')));
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'Noosphere' });
