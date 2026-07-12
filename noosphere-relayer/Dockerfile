@@ -15,10 +15,9 @@ RUN npm ci --omit=dev --ignore-scripts \
   && npm cache clean --force \
   && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
-COPY --chown=node:node index.js memory.js walrus-memory.js ./
+COPY --chown=node:node index.js memory.js local-memory.js walrus-memory.js ./
 COPY --chown=node:node durable-store.js security.js ./
 COPY --chown=node:node credentials.js local-projects.js ./
-COPY --chown=node:node public ./public
 
 RUN mkdir -p /app/.noosphere-runtime && chown node:node /app/.noosphere-runtime
 
