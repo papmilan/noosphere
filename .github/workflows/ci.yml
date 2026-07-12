@@ -50,7 +50,7 @@ jobs:
         run: docker build -t noosphere-relayer:test noosphere-relayer
 
       - name: Scan production image
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: noosphere-relayer:test
           format: table
