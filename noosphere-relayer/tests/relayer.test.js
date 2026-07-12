@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -110,6 +110,13 @@ describe('Noosphere memory API', () => {
 
   it('normalizes and securely stores credentials from the local setup wizard', async () => {
     const originalService = { ...localCredentialService };
+    const originalEnv = {
+      DEMO_MODE: process.env.DEMO_MODE,
+      NOOSPHERE_MEMORY_BACKEND: process.env.NOOSPHERE_MEMORY_BACKEND,
+      MEMWAL_ACCOUNT_ID: process.env.MEMWAL_ACCOUNT_ID,
+      MEMWAL_PRIVATE_KEY: process.env.MEMWAL_PRIVATE_KEY,
+      MEMWAL_NETWORK: process.env.MEMWAL_NETWORK,
+    };
     const storedPayloads = [];
     let reloaded = false;
     localCredentialService.createStore = () => ({
@@ -147,6 +154,7 @@ describe('Noosphere memory API', () => {
       const result = await response.json();
       assert.equal(response.status, 201);
       assert.equal(result.backend, 'test-keychain');
+      assert.equal(result.memory_backend, 'walrus-memory');
       assert.equal(result.network, 'testnet');
       assert.equal(result.smoke.blob_id, 'blob-setup');
       assert.deepEqual(JSON.parse(storedPayloads[0]), {
@@ -157,6 +165,60 @@ describe('Noosphere memory API', () => {
       assert.equal(reloaded, true);
     } finally {
       Object.assign(localCredentialService, originalService);
+      for (const [key, value] of Object.entries(originalEnv)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+      memoryStore.reloadConfig();
+    }
+  });
+
+  it('selects local-file memory from the local setup wizard without credentials', async () => {
+    const originalService = { ...localCredentialService };
+    const originalEnv = {
+      DEMO_MODE: process.env.DEMO_MODE,
+      NOOSPHERE_MEMORY_BACKEND: process.env.NOOSPHERE_MEMORY_BACKEND,
+    };
+    let reloaded = false;
+    localCredentialService.createStore = () => {
+      assert.fail('Local file setup must not create a credential store');
+    };
+    localCredentialService.validateCredentials = async () => {
+      assert.fail('Local file setup must not validate Walrus credentials');
+    };
+    localCredentialService.reloadMemoryStore = () => {
+      reloaded = true;
+    };
+
+    try {
+      const response = await fetch(`${baseUrl}/v1/local/credentials/setup`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ memory_backend: 'local-file' }),
+      });
+      const result = await response.json();
+      assert.equal(response.status, 201);
+      assert.equal(result.configured, true);
+      assert.equal(result.backend, 'local-file');
+      assert.equal(result.memory_backend, 'local-file');
+      assert.equal(result.account_id, null);
+      assert.equal(result.network, null);
+      assert.equal(process.env.NOOSPHERE_MEMORY_BACKEND, 'local-file');
+      assert.equal(process.env.DEMO_MODE, 'false');
+      assert.equal(reloaded, true);
+    } finally {
+      Object.assign(localCredentialService, originalService);
+      for (const [key, value] of Object.entries(originalEnv)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+      memoryStore.reloadConfig();
     }
   });
 
@@ -354,12 +416,71 @@ describe('Noosphere memory API', () => {
     assert.equal(attempts, 2);
   });
 
-  it('reports demo memory readiness', async () => {
+  it('persists local-file memory under a named backend', async () => {
+    const originalEnv = {
+      DEMO_MODE: process.env.DEMO_MODE,
+      NODE_ENV: process.env.NODE_ENV,
+      NOOSPHERE_MEMORY_BACKEND: process.env.NOOSPHERE_MEMORY_BACKEND,
+      LOCAL_MEMORY_PATH: process.env.LOCAL_MEMORY_PATH,
+    };
+    const stateDirectory = await mkdtemp(
+      path.join(os.tmpdir(), 'noosphere-local-memory-'),
+    );
+    const memoryPath = path.join(stateDirectory, 'memory.json');
+
+    try {
+      delete process.env.DEMO_MODE;
+      process.env.NODE_ENV = 'development';
+      process.env.NOOSPHERE_MEMORY_BACKEND = 'local-file';
+      process.env.LOCAL_MEMORY_PATH = memoryPath;
+
+      const first = new MemoryStore();
+      const health = await first.health();
+      assert.equal(health.mode, 'local-file');
+      assert.equal(health.ready, true);
+      assert.equal(health.persistent, true);
+
+      const stored = await first.remember(
+        'offline-project',
+        serializeMemory({
+          schema: 'noosphere.agent-memory.v2',
+          project_id: 'offline-project',
+          agent_id: 'codex',
+          action_type: 'decision',
+          content: 'Use local file memory when Walrus is not configured.',
+        }),
+      );
+      assert.match(stored.blob_id, /^local-/);
+
+      const persisted = JSON.parse(await readFile(memoryPath, 'utf8'));
+      assert.equal(persisted.projects['offline-project'].length, 1);
+
+      const restarted = new MemoryStore();
+      const recalled = await restarted.recall(
+        'offline-project',
+        'local file memory',
+        5,
+      );
+      assert.equal(recalled.total, 1);
+      assert.match(recalled.results[0].text, /Use local file memory/);
+    } finally {
+      for (const [key, value] of Object.entries(originalEnv)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it('reports local-file memory readiness', async () => {
     const response = await fetch(`${baseUrl}/ready`);
     const body = await response.json();
 
     assert.equal(response.status, 200);
-    assert.equal(body.memory.mode, 'demo');
+    assert.equal(body.memory.mode, 'local-file');
     assert.equal(body.memory.ready, true);
   });
 
@@ -409,8 +530,8 @@ describe('Noosphere memory API', () => {
 
     assert.equal(response.status, 201);
     assert.equal(body.success, true);
-    assert.match(body.blob_id, /^demo-/);
-    assert.equal(body.storage, 'demo');
+    assert.match(body.blob_id, /^local-/);
+    assert.equal(body.storage, 'local-file');
     assert.deepEqual(Object.keys(body).sort(), [
       'action_id',
       'blob_id',

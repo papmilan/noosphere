@@ -141,6 +141,7 @@ describe('credential storage', () => {
     let storedPayload = null;
     let validatedCredentials = null;
     let smokeTestCalled = false;
+    const envPath = path.join(temporaryRoot, 'walrus.env');
     const output = [];
     const originalLog = console.log;
     const originalWarn = console.warn;
@@ -150,6 +151,9 @@ describe('credential storage', () => {
     console.error = (...values) => output.push(values.join(' '));
 
     try {
+      await writeFile(envPath, 'PORT=3001\nDEMO_MODE=true\n', {
+        mode: 0o600,
+      });
       await runSetupWizard({
         args: [
           'node',
@@ -160,6 +164,7 @@ describe('credential storage', () => {
           'testnet',
           '--no-smoke-test',
         ],
+        relayerEnvPath: envPath,
         store: {
           fallbackPath: '/unused',
           setPassword(payload) {
@@ -196,10 +201,56 @@ describe('credential storage', () => {
     });
     assert.deepEqual(JSON.parse(storedPayload), validatedCredentials);
     assert.equal(smokeTestCalled, false);
+    const envContents = await readFile(envPath, 'utf8');
+    assert.match(envContents, /^NOOSPHERE_MEMORY_BACKEND=walrus-memory$/m);
+    assert.match(envContents, /^DEMO_MODE=false$/m);
     assert.ok(output.some((line) => line.includes('Setup complete')));
   });
 
-  it('--demo enables DEMO_MODE in the relayer env without touching credentials', async () => {
+  it('--local enables local-file memory without touching credentials', async () => {
+    const envPath = path.join(temporaryRoot, 'local.env');
+    await writeFile(
+      envPath,
+      [
+        'PORT=3001',
+        'DEMO_MODE=true',
+        'MEMWAL_NETWORK=mainnet',
+        '',
+      ].join('\n'),
+      { mode: 0o600 },
+    );
+    const originalLog = console.log;
+    console.log = () => {};
+    try {
+      await runSetupWizard({
+        args: ['node', 'noosphere', '--local'],
+        relayerEnvPath: envPath,
+        store: {
+          setPassword() {
+            assert.fail('Local file mode must not store credentials');
+          },
+        },
+        promptUser: async () => {
+          assert.fail('Local file mode must not prompt the user');
+        },
+        privateKeyReader: async () => {
+          assert.fail('Local file mode must not read a private key');
+        },
+        validator: async () => {
+          assert.fail('Local file mode must not validate credentials');
+        },
+      });
+    } finally {
+      console.log = originalLog;
+    }
+    const contents = await readFile(envPath, 'utf8');
+    assert.match(contents, /^NOOSPHERE_MEMORY_BACKEND=local-file$/m);
+    assert.match(contents, /^DEMO_MODE=false$/m);
+    assert.match(contents, /PORT=3001/);
+    assert.match(contents, /MEMWAL_NETWORK=mainnet/);
+  });
+
+  it('--demo aliases local-file memory without touching credentials', async () => {
     const envPath = path.join(temporaryRoot, 'demo.env');
     await writeFile(
       envPath,
@@ -231,8 +282,8 @@ describe('credential storage', () => {
       console.log = originalLog;
     }
     const contents = await readFile(envPath, 'utf8');
-    assert.match(contents, /^DEMO_MODE=true$/m);
-    assert.doesNotMatch(contents, /^DEMO_MODE=false$/m);
+    assert.match(contents, /^NOOSPHERE_MEMORY_BACKEND=local-file$/m);
+    assert.match(contents, /^DEMO_MODE=false$/m);
     assert.match(contents, /PORT=3001/);
     assert.match(contents, /MEMWAL_NETWORK=mainnet/);
   });

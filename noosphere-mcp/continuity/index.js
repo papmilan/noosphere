@@ -1520,7 +1520,7 @@ async function restoreFromWalrus(root) {
         '  noosphere credentials status',
         '',
         'Or switch to local-only mode without Walrus:',
-        '  noosphere setup --demo',
+        '  noosphere setup --local',
       ].join('\n'),
     );
   }
@@ -2184,7 +2184,7 @@ function relayerDownError(url) {
       'NOOSPHERE_RELAYER_URL or relayer_url in .noosphere/config.json.',
       '',
       'To try Noosphere without Walrus credentials, run:',
-      '  noosphere setup --demo',
+      '  noosphere setup --local',
     ].join('\n'),
   );
 }
@@ -2390,7 +2390,7 @@ Commands:
   install     Install Noosphere and automatic user startup
   uninstall   Remove the user installation and background services
   doctor      Check the installed lifecycle and credentials
-  setup       First-time setup wizard (add --demo for local-only mode)
+  setup       First-time setup wizard (add --local for local-only mode)
   credentials Inspect, migrate, or rotate Walrus Memory credentials
   run-relayer Run the relayer in the foreground (when background services
               are blocked by AV/UAC)
