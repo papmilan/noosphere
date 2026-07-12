@@ -29,7 +29,11 @@ import {
 import { writeHint } from '../lifecycle/ide-bridge.js';
 import { runSetupWizard, runCredentialsCommand } from './credentials-cli.js';
 import { runOllamaSession } from './ollama.js';
-import { workspaceFingerprintHex as workspaceFingerprint } from './acp/git-state.js';
+import { workspaceFingerprintHex as workspaceFingerprint, observeRepository, classifyCompatibility } from './acp/git-state.js';
+import { readState, writeState, validateState, buildInitialState } from './acp/store.js';
+import { decodeEnvelope } from './acp/wire.js';
+import { applyUpdate } from './acp/merge.js';
+import { renderKernel } from './acp/render.js';
 
 const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -144,6 +148,12 @@ try {
       break;
     case 'restore':
       await restoreFromWalrus(projectDir);
+      break;
+    case 'handoff':
+      await handoffFromCli(projectDir);
+      break;
+    case 'state':
+      await stateFromCli(projectDir);
       break;
     case 'setup':
       await runSetupWizard();
@@ -1403,6 +1413,74 @@ async function masterPromptFromCli(root) {
   printMasterPromptResult(result);
 }
 
+async function handoffFromCli(root) {
+  await assertGitRepository(root);
+  const clock = new Date().toISOString();
+  const raw = await readHandoffSource();
+  const update = decodeEnvelope(raw, { clock });
+  if (!update.ok) {
+    throw new Error(`Invalid ACP handoff: ${formatAcpErrors(update.errors)}`);
+  }
+  const current = await readState(root, { clock });
+  let next;
+  if (current && current.ok) {
+    const merged = applyUpdate(current.state, update.state, { clock });
+    if (!merged.ok) throw new Error(`Cannot merge handoff: ${formatAcpErrors(merged.errors)}`);
+    next = merged;
+  } else {
+    next = { state: update.state, conflicts: update.state.runtime.conflicts };
+  }
+  const written = await writeState(root, next.state, { clock });
+  const conflicts = next.conflicts ?? [];
+  console.log(`ACP handoff stored (${written.envelope.snapshot_id}).`);
+  if (conflicts.length) {
+    console.log(`${conflicts.length} unresolved conflict(s); run \`noosphere state --json\` to review.`);
+  }
+}
+
+async function stateFromCli(root) {
+  await assertGitRepository(root);
+  const clock = new Date().toISOString();
+  const mode = process.argv[3];
+  if (mode === 'validate') {
+    const result = await validateState(root, { clock });
+    if (result.ok) {
+      console.log('ACP state is valid.');
+      return;
+    }
+    console.error(`ACP state invalid: ${formatAcpErrors(result.errors)}`);
+    process.exitCode = 1;
+    return;
+  }
+  const existing = await readState(root, { clock });
+  const decoded = existing && existing.ok ? existing : await buildInitialState(root, { clock });
+  if (!decoded.ok) throw new Error(`Cannot build ACP state: ${formatAcpErrors(decoded.errors)}`);
+  if (process.argv.includes('--json')) {
+    console.log(JSON.stringify(existing && existing.ok ? existing.state.envelope : decoded.state.envelope, null, 2));
+    return;
+  }
+  const compatibility = classifyCompatibility(decoded.state, await observeRepository(root));
+  console.log(renderKernel(decoded.state, { compatibility, snapshotId: decoded.state.envelope.snapshot_id }));
+}
+
+async function readHandoffSource() {
+  const file = readOption('--file');
+  const useStdin = process.argv.includes('--stdin');
+  if (file && useStdin) throw new Error('Provide exactly one of --file or --stdin.');
+  if (file) return readFile(path.resolve(file), 'utf8');
+  if (useStdin || !process.stdin.isTTY) {
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    const piped = Buffer.concat(chunks).toString('utf8');
+    if (piped.trim()) return piped;
+  }
+  throw new Error('Provide an ACP handoff with --file <path> or --stdin.');
+}
+
+function formatAcpErrors(errors) {
+  return (errors ?? []).map((error) => `${error.path} ${error.code}`).join('; ') || 'unknown error';
+}
+
 async function restoreFromWalrus(root) {
   const config = await loadConfig(root);
   console.log(`Restoring project state from Walrus for ${config.project_id}...`);
@@ -2321,6 +2399,9 @@ Commands:
               Print or explicitly store the exact pinned project prompt
   ollama      Run any Ollama model with shared project memory
   protocol    Print the universal agent protocol
+  state       Print the ACP continuity kernel (--json for the envelope,
+              validate to verify the persisted state)
+  handoff     Merge a structured ACP handoff (--file <path> or --stdin)
 
 Ollama examples:
   noosphere ollama qwen3-coder
