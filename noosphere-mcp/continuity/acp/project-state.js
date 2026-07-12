@@ -25,10 +25,10 @@ export const defaultPolicy = Object.freeze({
 });
 
 export function createProjectState(envelope, { clock, policy = defaultPolicy } = {}) {
-  const errors = validateEnvelope(envelope, policy);
+  const normalized = normalizeEnvelope(envelope);
+  const errors = validateEnvelope(normalized, policy);
   if (errors.length) return { ok: false, errors: orderErrors(errors) };
 
-  const normalized = normalizeEnvelope(envelope);
   const runtime = buildIndexes(normalized, clock);
   if (runtime.errors.length) return { ok: false, errors: orderErrors(runtime.errors) };
 
@@ -190,27 +190,36 @@ function validateExtensions(value, errors, limits) {
   if (!isObject(value)) return error(errors, '$.extensions', 'invalid-type', 'must be an object');
   const keys = Object.keys(value);
   if (keys.length > limits.maxExtensionKeys) error(errors, '$.extensions', 'collection-too-large', 'extensions exceed policy limit');
+  const pending = [];
   for (const key of keys) {
     if (!EXTENSION_KEY.test(key)) error(errors, `$.extensions.${key}`, 'invalid-extension-key', 'extension keys must be namespaced');
-    validateExtensionValue(value[key], `$.extensions.${key}`, errors, limits, 1);
+    pending.push({ value: value[key], path: `$.extensions.${key}`, depth: 1 });
   }
-}
-
-function validateExtensionValue(value, path, errors, limits, depth) {
-  if (depth > limits.maxExtensionDepth) return error(errors, path, 'extension-too-deep', 'extension nesting exceeds policy limit');
-  if (typeof value === 'string') {
-    if (value.length > limits.maxTextLength) error(errors, path, 'text-too-large', 'text exceeds policy limit');
-    return;
+  while (pending.length) {
+    const { value: current, path, depth } = pending.pop();
+    if (depth > limits.maxExtensionDepth) {
+      error(errors, path, 'extension-too-deep', 'extension nesting exceeds policy limit');
+      continue;
+    }
+    if (typeof current === 'string') {
+      if (current.length > limits.maxTextLength) error(errors, path, 'text-too-large', 'text exceeds policy limit');
+      if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(current)) error(errors, path, 'control-character', 'text contains a forbidden control character');
+      continue;
+    }
+    if (Array.isArray(current)) {
+      if (current.length > limits.maxCollectionSize) error(errors, path, 'collection-too-large', 'collection exceeds policy limit');
+      for (let index = current.length - 1; index >= 0; index -= 1) pending.push({ value: current[index], path: `${path}[${index}]`, depth: depth + 1 });
+      continue;
+    }
+    if (!isObject(current)) continue;
+    const objectKeys = Object.keys(current);
+    if (objectKeys.length > limits.maxExtensionKeys) error(errors, path, 'collection-too-large', 'extension object exceeds policy limit');
+    for (let index = objectKeys.length - 1; index >= 0; index -= 1) {
+      const key = objectKeys[index];
+      if (key === '__proto__' || key === 'prototype' || key === 'constructor' || FORBIDDEN_KEY.test(key)) error(errors, `${path}.${key}`, 'forbidden-key', 'forbidden field in ACP project state');
+      pending.push({ value: current[key], path: `${path}.${key}`, depth: depth + 1 });
+    }
   }
-  if (Array.isArray(value)) {
-    if (value.length > limits.maxCollectionSize) error(errors, path, 'collection-too-large', 'collection exceeds policy limit');
-    value.forEach((item, index) => validateExtensionValue(item, `${path}[${index}]`, errors, limits, depth + 1));
-    return;
-  }
-  if (!isObject(value)) return;
-  const keys = Object.keys(value);
-  if (keys.length > limits.maxExtensionKeys) error(errors, path, 'collection-too-large', 'extension object exceeds policy limit');
-  for (const key of keys) validateExtensionValue(value[key], `${path}.${key}`, errors, limits, depth + 1);
 }
 
 function validateConflicts(items, errors, limits) {
@@ -331,9 +340,27 @@ function conflictCandidate(item, trust) {
 }
 
 function normalizeEnvelope(value) {
-  if (Array.isArray(value)) return value.map(normalizeEnvelope);
-  if (!isObject(value)) return typeof value === 'string' ? value.replace(/\r\n?/g, '\n').normalize('NFC') : value;
-  return Object.fromEntries(Object.keys(value).sort().map((key) => [key.normalize('NFC'), normalizeEnvelope(value[key]) ]));
+  const root = normalizedValue(value);
+  if (!root.container) return root.value;
+  const pending = [{ source: value, target: root.value }];
+  while (pending.length) {
+    const { source, target } = pending.pop();
+    const entries = Array.isArray(source)
+      ? source.map((child, index) => [index, child])
+      : Object.keys(source).sort().map((key) => [key.normalize('NFC'), source[key]]);
+    for (const [key, child] of entries) {
+      const normalized = normalizedValue(child);
+      Object.defineProperty(target, key, { value: normalized.value, enumerable: true, configurable: true, writable: true });
+      if (normalized.container) pending.push({ source: child, target: normalized.value });
+    }
+  }
+  return root.value;
+}
+
+function normalizedValue(value) {
+  if (Array.isArray(value)) return { value: [], container: true };
+  if (isObject(value)) return { value: {}, container: true };
+  return { value: typeof value === 'string' ? value.replace(/\r\n?/g, '\n').normalize('NFC') : value, container: false };
 }
 
 function deepFreeze(value) {
@@ -360,16 +387,26 @@ function assertionStatuses(type) {
 }
 
 function validateForbiddenKeys(value, path, errors, limits) {
-  if (typeof value === 'string') {
-    if (value.length > limits.maxTextLength) error(errors, path, 'text-too-large', 'text exceeds policy limit');
-    if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(value)) error(errors, path, 'control-character', 'text contains a forbidden control character');
-    return;
-  }
-  if (Array.isArray(value)) return value.forEach((item, index) => validateForbiddenKeys(item, `${path}[${index}]`, errors, limits));
-  if (!isObject(value)) return;
-  for (const [key, child] of Object.entries(value)) {
-    if (key === '__proto__' || key === 'prototype' || key === 'constructor' || FORBIDDEN_KEY.test(key)) error(errors, `${path}.${key}`, 'forbidden-key', 'forbidden field in ACP project state');
-    validateForbiddenKeys(child, `${path}.${key}`, errors, limits);
+  const pending = [{ value, path }];
+  while (pending.length) {
+    const { value: current, path: currentPath } = pending.pop();
+    if (typeof current === 'string') {
+      if (current.length > limits.maxTextLength) error(errors, currentPath, 'text-too-large', 'text exceeds policy limit');
+      if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(current)) error(errors, currentPath, 'control-character', 'text contains a forbidden control character');
+      continue;
+    }
+    if (Array.isArray(current)) {
+      for (let index = current.length - 1; index >= 0; index -= 1) pending.push({ value: current[index], path: `${currentPath}[${index}]` });
+      continue;
+    }
+    if (!isObject(current)) continue;
+    const entries = Object.entries(current);
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const [key, child] = entries[index];
+      if (key === '__proto__' || key === 'prototype' || key === 'constructor' || FORBIDDEN_KEY.test(key)) error(errors, `${currentPath}.${key}`, 'forbidden-key', 'forbidden field in ACP project state');
+      if (currentPath === '$' && key === 'extensions') continue;
+      pending.push({ value: child, path: `${currentPath}.${key}` });
+    }
   }
 }
 

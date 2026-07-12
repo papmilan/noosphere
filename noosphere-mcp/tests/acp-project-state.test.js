@@ -113,6 +113,22 @@ describe('createProjectState', () => {
     assert.equal(result.errors[0].code, 'duplicate-id');
   });
 
+  it('rejects canonically equivalent IDs before building runtime state', () => {
+    const input = validEnvelope({
+      references: [{ id: 'r1', kind: 'file', locator: 'README.md' }],
+      decisions: [
+        decision('Cafe\u0301\r\nchoice', 'SQLite'),
+        decision('Café\nchoice', 'Postgres'),
+      ],
+    });
+
+    const result = createProjectState(input, { clock: input.created_at });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.errors.some(({ code }) => code === 'duplicate-id'), true);
+    assert.equal('state' in result, false);
+  });
+
   it('creates an unresolved conflict for active decisions in one domain', () => {
     const input = validEnvelope({
       references: [{ id: 'r1', kind: 'file', locator: 'README.md' }],
@@ -266,6 +282,17 @@ describe('createProjectState', () => {
     assert.equal(createProjectState(oversizedArray, { clock: CREATED_AT }).ok, false);
   });
 
+  it('rejects a 20,000-level extension without throwing', () => {
+    let nested = 'leaf';
+    for (let index = 0; index < 20_000; index += 1) nested = { nested };
+    const input = validEnvelope({ extensions: { 'example.com.payload': nested } });
+
+    const result = createProjectState(input, { clock: CREATED_AT });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.errors.some(({ code }) => code === 'extension-too-deep'), true);
+  });
+
   it('normalizes runtime string values from CRLF or CR to LF before NFC', () => {
     const input = validEnvelope({
       goal: {
@@ -287,5 +314,27 @@ describe('createProjectState', () => {
     assert.deepEqual(schema.$defs.assertion.properties.status.enum, ['active', 'resolved', 'superseded', 'rejected']);
     assert.deepEqual(schema.$defs.planAssertion.properties.status.enum, ['planned', 'in_progress', 'completed', 'blocked', 'superseded']);
     assert.deepEqual(schema.$defs.conflict.properties.status.enum, ['unresolved', 'resolved']);
+  });
+
+  it('uses finite schema levels that match runtime extension bounds', () => {
+    const schema = JSON.parse(readFileSync(new URL('../continuity/acp/schema.json', import.meta.url), 'utf8'));
+    const extension = schema.$defs.extensions;
+
+    assert.equal(extension.additionalProperties.$ref, '#/$defs/extensionValue1');
+    for (let depth = 1; depth < 10; depth += 1) {
+      const level = schema.$defs[`extensionValue${depth}`];
+      assert.equal(level.anyOf[1].maxItems, 100);
+      assert.equal(level.anyOf[1].items.$ref, `#/$defs/extensionValue${depth + 1}`);
+      assert.equal(level.anyOf[2].maxProperties, 20);
+      assert.equal(level.anyOf[2].additionalProperties.$ref, `#/$defs/extensionValue${depth + 1}`);
+    }
+    assert.equal(schema.$defs.extensionValue10.$ref, '#/$defs/extensionScalar');
+    assert.equal(schema.$defs.extensionScalar.anyOf.length, 4);
+    assert.equal(schema.$defs.extensionText.maxLength, 4000);
+
+    const oversized = validEnvelope({ extensions: { 'example.com.payload': 'x'.repeat(4_001) } });
+    const overDepth = validEnvelope({ extensions: { 'example.com.payload': { nested: { nested: { nested: { nested: { nested: { nested: { nested: { nested: { nested: { nested: 'leaf' } } } } } } } } } } } });
+    assert.equal(createProjectState(oversized, { clock: CREATED_AT }).ok, false);
+    assert.equal(createProjectState(overDepth, { clock: CREATED_AT }).ok, false);
   });
 });
