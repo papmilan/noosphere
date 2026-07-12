@@ -1,0 +1,212 @@
+{
+  "clock": "2026-07-12T00:00:00.000Z",
+  "render_options": {
+    "compatibility": {
+      "status": "compatible",
+      "trustDowngrade": 1,
+      "actionable": true,
+      "reasons": [
+        "working tree changed since the snapshot"
+      ]
+    }
+  },
+  "required_kernel_fragments": [
+    "Ship the ACP continuity kernel",
+    "Persist canonical JSON",
+    "Never store hidden reasoning",
+    "UNRESOLVED CONFLICT",
+    "Run npm --prefix noosphere-mcp run check"
+  ],
+  "envelope": {
+    "protocol": "acp.project-state-envelope",
+    "schema_version": "1.0.0",
+    "snapshot_id": "sha256:f183a4378b24336429391079849cba810517d1aa7221459d2fc9577664f1889c",
+    "parent_snapshot_id": null,
+    "created_at": "2026-07-12T00:00:00.000Z",
+    "expires_at": null,
+    "origin": {
+      "agent_id": "codex",
+      "client": "codex-desktop",
+      "session_id": null
+    },
+    "integrity": {
+      "algorithm": "sha256",
+      "digest": "f183a4378b24336429391079849cba810517d1aa7221459d2fc9577664f1889c",
+      "signature": {
+        "status": "unsigned",
+        "algorithm": null,
+        "key_id": null,
+        "value": null
+      }
+    },
+    "permission_scope": "project",
+    "trust": {
+      "level": "local-unverified",
+      "reasons": [
+        "unsigned local envelope"
+      ]
+    },
+    "repository": {
+      "project_id": "noosphere",
+      "root_identity": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head": "a5938e9c0000000000000000000000000000abcd",
+      "branch": "codex/acp-continuity-kernel",
+      "merge_base": null,
+      "dirty": true,
+      "workspace_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "phase": "implementation",
+    "goal": {
+      "project": "Reliable cross-agent project continuity.",
+      "current_objective": "Ship the ACP continuity kernel behind the noosphere state command.",
+      "success_conditions": [
+        "A fresh agent resumes without re-reading the whole journal."
+      ]
+    },
+    "plan": [],
+    "completed_work": [
+      {
+        "id": "c1",
+        "text": "Canonical wire envelopes and Git compatibility classification landed.",
+        "status": "active",
+        "confidence": "high",
+        "provenance": [
+          "r1"
+        ],
+        "created_at": "2026-07-12T00:00:00.000Z",
+        "expires_at": null,
+        "repository_fingerprint": null,
+        "supersedes": []
+      }
+    ],
+    "decisions": [
+      {
+        "id": "d1",
+        "text": "Persist canonical JSON plus a derived Markdown kernel.",
+        "status": "active",
+        "confidence": "high",
+        "provenance": [
+          "e1"
+        ],
+        "created_at": "2026-07-12T00:00:00.000Z",
+        "expires_at": null,
+        "repository_fingerprint": null,
+        "supersedes": [],
+        "domain": "storage"
+      },
+      {
+        "id": "d2",
+        "text": "Expose ACP over loopback HTTP.",
+        "status": "active",
+        "confidence": "high",
+        "provenance": [
+          "r1"
+        ],
+        "created_at": "2026-07-12T00:00:00.000Z",
+        "expires_at": null,
+        "repository_fingerprint": null,
+        "supersedes": [],
+        "domain": "transport"
+      },
+      {
+        "id": "d3",
+        "text": "Expose ACP over local stdio.",
+        "status": "active",
+        "confidence": "high",
+        "provenance": [
+          "r1"
+        ],
+        "created_at": "2026-07-12T00:00:00.000Z",
+        "expires_at": null,
+        "repository_fingerprint": null,
+        "supersedes": [],
+        "domain": "transport"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "text": "Store tests confirm continuity.json and continuity.md round-trip.",
+        "status": "active",
+        "confidence": "high",
+        "provenance": [
+          "r1"
+        ],
+        "created_at": "2026-07-12T00:00:00.000Z",
+        "expires_at": null,
+        "repository_fingerprint": null,
+        "supersedes": []
+      }
+    ],
+    "assumptions": [
+      {
+        "id": "a1",
+        "text": "The 1,800-byte kernel budget is enough for most projects.",
+        "status": "active",
+        "confidence": "low",
+        "provenance": [
+          "r1"
+        ],
+        "created_at": "2026-07-12T00:00:00.000Z",
+        "expires_at": null,
+        "repository_fingerprint": null,
+        "supersedes": []
+      }
+    ],
+    "rejected_approaches": [],
+    "unknowns": [],
+    "blockers": [],
+    "risks": [
+      {
+        "id": "k1",
+        "text": "Never store hidden reasoning, secrets, or raw chat in ACP state.",
+        "status": "active",
+        "confidence": "high",
+        "provenance": [
+          "r1"
+        ],
+        "created_at": "2026-07-12T00:00:00.000Z",
+        "expires_at": null,
+        "repository_fingerprint": null,
+        "supersedes": []
+      }
+    ],
+    "conflicts": [],
+    "working_stance": {
+      "confidence": "medium",
+      "momentum": "progressing",
+      "risk_posture": "verify-before-change",
+      "attention": [
+        "Keep the kernel deterministic."
+      ],
+      "dissatisfaction": [],
+      "successor_behavior": [
+        "Resolve the transport conflict before shipping."
+      ]
+    },
+    "next_actions": [
+      {
+        "id": "n1",
+        "text": "Run npm --prefix noosphere-mcp run check.",
+        "status": "planned",
+        "confidence": "high",
+        "provenance": [
+          "r1"
+        ],
+        "created_at": "2026-07-12T00:00:00.000Z",
+        "expires_at": null,
+        "repository_fingerprint": null,
+        "supersedes": [],
+        "priority": 1
+      }
+    ],
+    "references": [
+      {
+        "id": "r1",
+        "kind": "file",
+        "locator": "noosphere-mcp/continuity/acp/render.js"
+      }
+    ],
+    "extensions": {}
+  }
+}

@@ -212,11 +212,31 @@ noosphere baseline
 noosphere checkpoint
 noosphere refresh
 noosphere status
+noosphere state
+noosphere state --json
+noosphere state validate
+noosphere handoff --file handoff.json
 noosphere uninstall
 ```
 
 `noosphere activate` may also be used explicitly from an IDE terminal. It
 works from any nested folder inside the repository.
+
+### ACP continuity kernel
+
+`noosphere state` renders a deterministic, at-most-1,800-byte continuity kernel
+from a local-first ACP project-state envelope. It captures externally shareable
+state only — objective, decisions, evidence, assumptions, conflicts, blockers,
+risks, and next actions — never hidden reasoning, secrets, or raw chat. The
+canonical envelope lives in `.noosphere/continuity.json` and its derived kernel
+in `.noosphere/continuity.md`.
+
+`noosphere handoff` merges a structured handoff from `--file <path>` or
+`--stdin`. The merge is conservative: a stale update appends only new distinct
+assertions, and any change to an existing assertion, contested supersession, or
+competing priority-1 action becomes an explicit unresolved conflict rather than
+silently overwriting prior work. `noosphere state validate` verifies the
+envelope digest, schema, kernel projection, and repository compatibility.
 
 The Claude Code SessionEnd hook remains available for richer reasoning
 summaries. File checkpoints preserve work state; the hook preserves intent.
