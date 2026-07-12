@@ -65,9 +65,9 @@ function makeEnvelope({ parent = null, objective = 'do the thing', expiresAt = n
   return { envelope, id: envelope.snapshot_id, bytes: Buffer.from(canonicalize(envelope), 'utf8') };
 }
 
-async function fixture({ limits, shared = false } = {}) {
+async function fixture({ limits, shared = false, indexShared = false } = {}) {
   const dir = await tmpDir();
-  const index = new DurableStore({ filePath: path.join(dir, 'state.json') });
+  const index = new DurableStore({ filePath: path.join(dir, 'state.json'), shared: indexShared });
   const backend = new FileSnapshotBackend({ root: path.join(dir, 'snapshots'), shared });
   const service = new ExactStateService({ backend, index, limits });
   return { dir, index, backend, service };
@@ -96,10 +96,21 @@ describe('FileSnapshotBackend', () => {
 });
 
 describe('ExactStateService head index', () => {
+  it('uses the relayer envelope boundary before storing exact bytes', async () => {
+    const { service } = await fixture();
+    const malformed = makeEnvelope().envelope;
+    delete malformed.goal;
+    const resigned = encodeEnvelope({ envelope: malformed });
+    await assert.rejects(
+      service.putSnapshot(PROJECT, resigned, EMPTY_HEAD_DIGEST),
+      /missing-required-field/,
+    );
+  });
+
   it('starts with the canonical empty digest and sorts independent heads', async () => {
     const { service } = await fixture();
     assert.deepEqual(await service.getHeads(PROJECT), {
-      heads: [], heads_digest: EMPTY_HEAD_DIGEST, complete: true,
+      heads: [], head_records: [], heads_digest: EMPTY_HEAD_DIGEST, complete: true,
     });
     const z = makeEnvelope({ objective: 'z' });
     const a = makeEnvelope({ objective: 'a' });
@@ -141,6 +152,23 @@ describe('ExactStateService head index', () => {
     assert.equal(first.created, true);
     assert.equal(replay.created, false);
     assert.deepEqual(replay.storage, first.storage);
+  });
+
+  it('does not upload an identical replay twice but still detects stored byte conflicts', async () => {
+    const value = await fixture();
+    let uploads = 0;
+    const adapter = { async put() { uploads += 1; return { blobId: 'blob-1' }; } };
+    const backend = new WalrusSnapshotBackend({ adapter, exactCopy: value.backend });
+    const service = new ExactStateService({ backend, index: value.index });
+    const snapshot = makeEnvelope();
+    const first = await service.putSnapshot(PROJECT, snapshot.envelope, EMPTY_HEAD_DIGEST);
+    await service.putSnapshot(PROJECT, snapshot.envelope, first.heads_digest);
+    assert.equal(uploads, 1);
+    await writeFile(value.backend.pathFor(PROJECT, snapshot.id), Buffer.concat([snapshot.bytes, Buffer.from('x')]));
+    await assert.rejects(
+      service.putSnapshot(PROJECT, snapshot.envelope, first.heads_digest),
+      /snapshot-integrity-conflict/,
+    );
   });
 
   it('creates two heads for concurrent children of one parent', async () => {
@@ -203,6 +231,11 @@ describe('ExactStateService head index', () => {
     assert.equal(stored.actionable, false);
     assert.deepEqual((await service.getSnapshot(PROJECT, expired.id)).bytes, expired.bytes);
     assert.equal((await service.getHistory(PROJECT, { head: expired.id }))[0].snapshot_id, expired.id);
+    assert.deepEqual((await service.getHeads(PROJECT)).head_records, [{
+      snapshot_id: expired.id,
+      expires_at: '2000-01-01T00:00:00.000Z',
+      actionable: false,
+    }]);
   });
 
   it('rejects the 33rd independent head without publishing index metadata', async () => {
@@ -238,8 +271,10 @@ describe('ExactStateService head index', () => {
     assert.equal(first.cross_machine_recoverable, false);
     const restarted = new DurableStore({ filePath: path.join(local.dir, 'state.json') });
     assert.equal(await restarted.exactStateIdentity(), first.relayer_index_id);
-    const shared = await fixture({ shared: true });
-    assert.equal((await shared.service.getCapabilities()).cross_machine_recoverable, true);
+    const sharedBytesOnly = await fixture({ shared: true });
+    assert.equal((await sharedBytesOnly.service.getCapabilities()).cross_machine_recoverable, false);
+    const explicitShared = await fixture({ shared: true, indexShared: true });
+    assert.equal((await explicitShared.service.getCapabilities()).cross_machine_recoverable, true);
   });
 });
 
@@ -259,7 +294,7 @@ describe('WalrusSnapshotBackend', () => {
     assert.deepEqual(await backend.health(), {
       ready: true, durable: true, shared: true,
       deployment_mode: 'walrus-backed/relayer-indexed', exact_bytes_durable: true,
-      index_durable: true, cross_machine_recoverable: true, walrus_exact_read: false,
+      index_durable: true, cross_machine_recoverable: false, walrus_exact_read: false,
     });
   });
 
@@ -273,6 +308,32 @@ describe('WalrusSnapshotBackend', () => {
     });
     const service = new ExactStateService({ backend, index: fixtureValue.index });
     assert.equal((await service.getCapabilities()).deployment_mode, 'walrus-backed/relayer-indexed');
+    assert.equal((await service.getCapabilities()).cross_machine_recoverable, false);
+  });
+
+  it('uses the persisted Walrus locator after restart and falls back to the exact copy', async () => {
+    const value = await fixture();
+    const snapshot = makeEnvelope();
+    const adapter = {
+      async put() { return { blobId: 'durable-blob' }; },
+      async getByBlobId(locator) {
+        assert.equal(locator, 'durable-blob');
+        return snapshot.bytes;
+      },
+    };
+    const first = new ExactStateService({
+      backend: new WalrusSnapshotBackend({ adapter, exactCopy: value.backend }),
+      index: value.index,
+    });
+    await first.putSnapshot(PROJECT, snapshot.envelope, EMPTY_HEAD_DIGEST);
+    const restarted = new ExactStateService({
+      backend: new WalrusSnapshotBackend({ adapter, exactCopy: value.backend }),
+      index: new DurableStore({ filePath: path.join(value.dir, 'state.json') }),
+    });
+    assert.deepEqual((await restarted.getSnapshot(PROJECT, snapshot.id)).bytes, snapshot.bytes);
+
+    adapter.getByBlobId = async () => { throw new Error('Walrus unavailable'); };
+    assert.deepEqual((await restarted.getSnapshot(PROJECT, snapshot.id)).bytes, snapshot.bytes);
   });
 });
 

@@ -3,6 +3,7 @@ import {
   access,
   constants,
   mkdir,
+  open,
   readFile,
   rename,
   unlink,
@@ -18,19 +19,27 @@ export class DurableStore {
     persist = true,
     receiptTtlMs = DEFAULT_RECEIPT_TTL_MS,
     now = () => Date.now(),
+    shared = false,
   }) {
     this.filePath = filePath;
     this.persist = persist;
     this.receiptTtlMs = receiptTtlMs;
     this.now = now;
+    this.shared = shared;
     this.state = this.emptyState();
     this.loaded = false;
+    this.initializationPromise = null;
     this.writeChain = Promise.resolve();
   }
 
   async initialize() {
     if (this.loaded) return;
-    this.loaded = true;
+    if (this.initializationPromise) return this.initializationPromise;
+    this.initializationPromise = this.load();
+    return this.initializationPromise;
+  }
+
+  async load() {
     if (!this.persist) return;
 
     try {
@@ -49,6 +58,7 @@ export class DurableStore {
       }
     }
     await this.prune();
+    this.loaded = true;
   }
 
   async getReceipt(key) {
@@ -123,13 +133,13 @@ export class DurableStore {
 
   async health() {
     await this.initialize();
-    if (!this.persist) return { ready: true, durable: false };
+    if (!this.persist) return { ready: true, durable: false, shared: false };
     await mkdir(path.dirname(this.filePath), {
       recursive: true,
       mode: 0o700,
     });
     await access(path.dirname(this.filePath), constants.W_OK);
-    return { ready: true, durable: true };
+    return { ready: true, durable: true, shared: this.shared };
   }
 
   async readExactProject(projectId) {
@@ -187,7 +197,9 @@ export class DurableStore {
       `${JSON.stringify(this.state, null, 2)}\n`,
       { encoding: 'utf8', mode: 0o600 },
     );
+    await syncPath(temporary);
     await rename(temporary, this.filePath);
+    await syncPath(path.dirname(this.filePath));
   }
 
   async clear() {
@@ -216,6 +228,11 @@ export class DurableStore {
       exact_state: this.emptyExactState(),
     };
   }
+}
+
+async function syncPath(target) {
+  const handle = await open(target, 'r');
+  try { await handle.sync(); } finally { await handle.close(); }
 }
 
 function emptyProjectRecord() {

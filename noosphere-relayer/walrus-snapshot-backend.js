@@ -17,11 +17,15 @@ export class WalrusSnapshotBackend {
     return { backend: 'walrus', locator, bytes: canonicalBytes.length, exact_copy: exact };
   }
 
-  async get(projectId, snapshotId) {
-    const locator = this.locators.get(`${projectId}\0${snapshotId}`);
+  async get(projectId, snapshotId, storage = null) {
+    const locator = storage?.locator || this.locators.get(`${projectId}\0${snapshotId}`);
     if (locator && typeof this.adapter.getByBlobId === 'function') {
-      const result = await this.adapter.getByBlobId(locator);
-      return Buffer.from(result?.bytes ?? result);
+      try {
+        const result = await this.adapter.getByBlobId(locator);
+        return Buffer.from(result?.bytes ?? result);
+      } catch {
+        // The exact local copy is authoritative when the shared replica is unavailable.
+      }
     }
     return this.exactCopy.get(projectId, snapshotId);
   }
@@ -36,7 +40,8 @@ export class WalrusSnapshotBackend {
       deployment_mode: 'walrus-backed/relayer-indexed',
       exact_bytes_durable: Boolean(fileHealth.durable),
       index_durable: Boolean(indexHealth.durable),
-      cross_machine_recoverable: this.shared && Boolean(fileHealth.durable) && Boolean(indexHealth.durable),
+      cross_machine_recoverable: this.shared && Boolean(fileHealth.durable)
+        && Boolean(indexHealth.shared) && Boolean(indexHealth.durable),
       walrus_exact_read: exactWalrusRead,
     };
   }

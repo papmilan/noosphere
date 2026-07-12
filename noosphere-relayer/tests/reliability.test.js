@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -101,5 +101,23 @@ describe('relayer reliability', () => {
     const pending = await restarted.getPending('project:delayed');
     assert.equal(pending.attempts, 1);
     assert.equal(pending.nextAttemptAt, 123_456);
+  });
+
+  it('shares one initialization promise so concurrent callers cannot overwrite restarted state', async () => {
+    const filePath = path.join(temporaryRoot, 'initialization-race.json');
+    await writeFile(filePath, JSON.stringify({
+      version: 1,
+      receipts: {},
+      pending: { existing: { key: 'existing', projectId: 'saved' } },
+    }));
+    const store = new DurableStore({ filePath });
+
+    const [, existing] = await Promise.all([
+      store.enqueue('new', { projectId: 'new' }),
+      store.getPending('existing'),
+    ]);
+
+    assert.equal(existing.projectId, 'saved');
+    assert.equal((await new DurableStore({ filePath }).getPending('existing')).projectId, 'saved');
   });
 });

@@ -3,9 +3,9 @@ import {
   RECONCILIATION_POLICY_VERSION,
   SYNC_PROTOCOL_VERSION,
   canonicalize,
-  decodeEnvelope,
   digestHeadSet,
 } from '@noosphere/acp-protocol';
+import { decodeProjectStateEnvelope } from './acp-protocol.js';
 import { assertCanonicalId, exactError } from './snapshot-backend.js';
 
 export class ExactStateService {
@@ -17,21 +17,34 @@ export class ExactStateService {
   }
 
   async putSnapshot(projectId, envelope, expectedHeadsDigest, options = {}) {
-    const decoded = decodeEnvelope(envelope);
+    const decoded = decodeProjectStateEnvelope(envelope);
     if (!decoded.ok) throw exactError(decoded.errors[0].code, 400, decoded.errors);
     if (decoded.envelope.repository?.project_id !== projectId) throw exactError('project-id-mismatch', 400);
     const bytes = Buffer.from(canonicalize(decoded.envelope), 'utf8');
     if (bytes.length > this.limits.snapshotBytes) throw exactError('snapshot-too-large', 413);
     const snapshotId = decoded.envelope.snapshot_id;
     assertCanonicalId(snapshotId);
-    const receipt = await this.backend.put(projectId, snapshotId, bytes);
     const clock = options.now || this.now;
+    const before = normalizeRecord(await this.index.readExactProject(projectId));
+    const existing = before.snapshots[snapshotId];
+    if (existing) {
+      if (before.heads_digest !== expectedHeadsDigest) {
+        throw exactError('stale-heads', 409, headsView(before, clock()));
+      }
+      const storedBytes = await this.backend.get(projectId, snapshotId, existing.storage);
+      if (!Buffer.from(storedBytes).equals(bytes)) throw exactError('snapshot-integrity-conflict');
+      return {
+        ...headsView(before, clock()), snapshot_id: snapshotId, created: false,
+        storage: existing.storage, actionable: isActionable(existing, clock()),
+      };
+    }
+    const receipt = await this.backend.put(projectId, snapshotId, bytes);
     const storedAt = new Date(clock()).toISOString();
     let created = false;
     const record = await this.index.updateExactProject(projectId, (current) => {
       current = normalizeRecord(current);
       if (current.heads_digest !== expectedHeadsDigest) {
-        throw exactError('stale-heads', 409, headsView(current));
+        throw exactError('stale-heads', 409, headsView(current, clock()));
       }
       const existing = current.snapshots[snapshotId];
       if (!existing) {
@@ -59,16 +72,16 @@ export class ExactStateService {
       return next;
     });
     const item = record.snapshots[snapshotId];
-    return { ...headsView(record), snapshot_id: snapshotId, created, storage: item.storage, actionable: isActionable(item, clock()) };
+    return { ...headsView(record, clock()), snapshot_id: snapshotId, created, storage: item.storage, actionable: isActionable(item, clock()) };
   }
 
   async getSnapshot(projectId, snapshotId) {
     assertCanonicalId(snapshotId);
     const record = normalizeRecord(await this.index.readExactProject(projectId));
     if (!record.snapshots[snapshotId]) throw exactError('snapshot-not-found', 404);
-    const bytes = await this.backend.get(projectId, snapshotId);
+    const bytes = await this.backend.get(projectId, snapshotId, record.snapshots[snapshotId].storage);
     const text = bytes.toString('utf8');
-    const decoded = decodeEnvelope(text);
+    const decoded = decodeProjectStateEnvelope(text);
     if (!decoded.ok || decoded.envelope.snapshot_id !== snapshotId || canonicalize(decoded.envelope) !== text) {
       throw exactError('snapshot-integrity-conflict');
     }
@@ -76,7 +89,7 @@ export class ExactStateService {
   }
 
   async getHeads(projectId) {
-    return headsView(normalizeRecord(await this.index.readExactProject(projectId)));
+    return headsView(normalizeRecord(await this.index.readExactProject(projectId)), this.now());
   }
 
   async getHistory(projectId, { head, limit = this.limits.ancestryEnvelopes } = {}) {
@@ -104,7 +117,7 @@ export class ExactStateService {
     const [backendHealth, indexHealth, relayerIndexId] = await Promise.all([
       this.backend.health(), this.index.health(), this.index.exactStateIdentity(),
     ]);
-    const shared = Boolean(backendHealth.shared);
+    const shared = Boolean(backendHealth.shared) && Boolean(indexHealth.shared);
     return {
       deployment_mode: backendHealth.deployment_mode || (shared ? 'shared-relayer' : 'local-only'),
       exact_bytes_durable: Boolean(backendHealth.durable),
@@ -137,8 +150,16 @@ function normalizeRecord(record) {
   return recomputeProject({ snapshots: {}, indexed_bytes: 0, ...record });
 }
 
-function headsView(record) {
-  return { heads: [...record.heads], heads_digest: record.heads_digest, complete: record.complete };
+function headsView(record, now) {
+  return {
+    heads: [...record.heads],
+    head_records: record.heads.map((snapshotId) => {
+      const item = record.snapshots[snapshotId];
+      return { snapshot_id: snapshotId, expires_at: item.expires_at, actionable: isActionable(item, now) };
+    }),
+    heads_digest: record.heads_digest,
+    complete: record.complete,
+  };
 }
 
 function isActionable(item, now) {
