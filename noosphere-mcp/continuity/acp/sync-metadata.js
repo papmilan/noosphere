@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import {
-  chmod, constants, lstat, mkdir, open, readFile, rename, rm, writeFile,
-} from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { chmod, lstat, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { canonicalize } from '@noosphere/acp-protocol';
 import { RECONCILIATION_POLICY_VERSION, SYNC_PROTOCOL_VERSION } from '@noosphere/acp-protocol';
 
@@ -121,7 +121,7 @@ async function consumeConfirmationLocked(root, confirmationId, clock) {
   return structuredClone(confirmation);
 }
 
-export async function quarantineBytes(root, receivedSnapshotId, receivedBytes) {
+export async function quarantineBytes(root, receivedSnapshotId, receivedBytes, options = {}) {
   const bytes = Buffer.from(receivedBytes);
   const noosphere = path.join(root, '.noosphere');
   const directory = path.join(noosphere, 'quarantine');
@@ -136,37 +136,17 @@ export async function quarantineBytes(root, receivedSnapshotId, receivedBytes) {
   if (existingDirectory && !existingDirectory.isDirectory()) throw syncError('quarantine-symlink');
   if (!existingDirectory) await mkdir(directory, { mode: 0o700 });
   await chmod(directory, 0o700);
-  const directoryHandle = await open(directory, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
-  try {
-    if (!(await directoryHandle.stat()).isDirectory()) throw syncError('quarantine-symlink');
-    const safeId = SNAPSHOT_ID.test(receivedSnapshotId) ? receivedSnapshotId.slice(7) : hashHex(bytes);
-    const filename = `sha256-${safeId}.json`;
-    const descriptorRoot = await descriptorDirectory(directoryHandle.fd);
-    if (descriptorRoot === null) throw syncError('quarantine-unsupported');
-    const target = path.join(directory, filename);
-    const safeTarget = path.join(descriptorRoot, filename);
-    let handle;
-    try {
-      handle = await open(safeTarget, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW || 0), 0o600);
-    } catch (error) {
-      if (error.code === 'ELOOP') throw syncError('quarantine-symlink', error);
-      if (error.code === 'EEXIST') {
-        if ((await lstat(target)).isSymbolicLink()) throw syncError('quarantine-symlink');
-        throw syncError('quarantine-exists');
-      }
-      throw error;
-    }
-    try {
-      await handle.writeFile(bytes);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await directoryHandle.sync();
-    return { path: target, snapshot_id: SNAPSHOT_ID.test(receivedSnapshotId) ? receivedSnapshotId : null };
-  } finally {
-    await directoryHandle.close();
-  }
+  const identity = await lstat(directory);
+  const safeId = SNAPSHOT_ID.test(receivedSnapshotId) ? receivedSnapshotId.slice(7) : hashHex(bytes);
+  const filename = `sha256-${safeId}.json`;
+  await options.beforeSpawn?.(directory);
+  await runQuarantineWriter(directory, filename, identity, bytes);
+  const after = await lstat(directory).catch(() => null);
+  if (!after || after.dev !== identity.dev || after.ino !== identity.ino) throw syncError('quarantine-directory-mismatch');
+  return {
+    path: path.join(directory, filename),
+    snapshot_id: SNAPSHOT_ID.test(receivedSnapshotId) ? receivedSnapshotId : null,
+  };
 }
 
 function normalizeMetadata(value = {}) {
@@ -262,19 +242,30 @@ async function staleLock(lockPath) {
     const details = await lstat(lockPath).catch(() => null);
     return details !== null && Date.now() - details.mtimeMs > 60_000;
   }
-  try { process.kill(lock.pid, 0); return Date.now() - Number(lock.created_at || 0) > 60_000; }
+  try { process.kill(lock.pid, 0); return false; }
   catch (error) { return error.code === 'ESRCH'; }
 }
 
-async function descriptorDirectory(fd) {
-  for (const base of ['/proc/self/fd', '/dev/fd']) {
-    const candidate = path.join(base, String(fd));
-    try {
-      const details = await lstat(candidate);
-      if (details.isSymbolicLink()) return candidate;
-    } catch {}
-  }
-  return null;
+async function runQuarantineWriter(directory, filename, identity, bytes) {
+  const helper = fileURLToPath(new URL('./quarantine-writer.js', import.meta.url));
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [helper, filename, String(identity.dev), String(identity.ino)], {
+      cwd: directory,
+      stdio: ['pipe', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => { if (stderr.length < 4096) stderr += chunk; });
+    child.on('error', (error) => reject(syncError('quarantine-writer-failed', error)));
+    child.on('close', (code) => {
+      if (code === 0) resolve();
+      else {
+        const known = stderr.match(/quarantine-(?:directory-mismatch|symlink|exists|too-large|writer-failed)/)?.[0];
+        reject(syncError(known || 'quarantine-writer-failed'));
+      }
+    });
+    child.stdin.end(bytes);
+  });
 }
 
 function plainObject(value) { return value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype; }

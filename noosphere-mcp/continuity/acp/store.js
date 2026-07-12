@@ -340,7 +340,7 @@ async function staleStateLock(lockPath) {
     const details = await lstat(lockPath).catch(() => null);
     return details !== null && Date.now() - details.mtimeMs > 60_000;
   }
-  try { process.kill(lock.pid, 0); return Date.now() - Number(lock.created_at || 0) > 60_000; }
+  try { process.kill(lock.pid, 0); return false; }
   catch (error) { return error.code === 'ESRCH'; }
 }
 

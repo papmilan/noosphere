@@ -189,4 +189,15 @@ describe('ACP store and CLI', () => {
       assert.deepEqual(artifacts, []);
     }
   });
+
+  it('never reclaims an old state lock owned by a live PID', async () => {
+    const dir = await makeRepo();
+    await import('node:fs/promises').then(({ mkdir }) => mkdir(path.join(dir, '.noosphere'), { recursive: true }));
+    const lock = path.join(dir, '.noosphere', '.continuity-state.lock');
+    await writeFile(lock, JSON.stringify({ pid: process.pid, token: 'live', created_at: 0 }), { mode: 0o600 });
+    const started = Date.now();
+    setTimeout(() => { void rm(lock, { force: true }); }, 100);
+    assert.equal(await readState(dir, { clock: CREATED_AT }), null);
+    assert.equal(Date.now() - started >= 80, true);
+  });
 });

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -137,19 +137,24 @@ describe('ACP sync metadata confirmations', () => {
     ]);
     assert.equal(Object.keys((await readSyncMetadata(root)).confirmations).length, 16);
   });
+
+  it('never reclaims an old lock owned by a live PID', async () => {
+    const root = await temp();
+    await mkdir(path.join(root, '.noosphere'), { recursive: true });
+    const lock = path.join(root, '.noosphere', 'continuity-sync.lock');
+    await writeFile(lock, JSON.stringify({ pid: process.pid, token: 'live', created_at: 0 }), { mode: 0o600 });
+    const started = Date.now();
+    setTimeout(() => { void rm(lock, { force: true }); }, 100);
+    await issueConfirmation(root, observation(), NOW);
+    assert.equal(Date.now() - started >= 80, true);
+  });
 });
 
 describe('ACP quarantine', () => {
   it('uses only safe names, exclusive owner-only files, and rejects symlink directories or targets', async () => {
     const root = await temp();
     const bytes = Buffer.from('untrusted remote bytes');
-    let hostile;
-    try { hostile = await quarantineBytes(root, '../../secret', bytes); }
-    catch (error) {
-      assert.equal(error.code, 'quarantine-unsupported');
-      assert.equal(process.platform, 'darwin');
-      return;
-    }
+    const hostile = await quarantineBytes(root, '../../secret', bytes);
     assert.match(path.basename(hostile.path), /^sha256-[0-9a-f]{64}\.json$/);
     assert.equal((await stat(hostile.path)).mode & 0o777, 0o600);
     assert.deepEqual(await readFile(hostile.path), bytes);
@@ -170,5 +175,13 @@ describe('ACP quarantine', () => {
     const parentRoot = await temp();
     await symlink(path.join(targetRoot, '.noosphere'), path.join(parentRoot, '.noosphere'));
     await assert.rejects(quarantineBytes(parentRoot, id('c'), bytes), /quarantine-symlink/);
+
+    const swapRoot = await temp();
+    await assert.rejects(quarantineBytes(swapRoot, id('d'), bytes, {
+      beforeSpawn: async (directory) => {
+        await rename(directory, `${directory}.old`);
+        await mkdir(directory, { mode: 0o700 });
+      },
+    }), /quarantine-directory-mismatch/);
   });
 });
