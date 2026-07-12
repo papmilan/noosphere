@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   ACP_LIMITS,
+  ACP_SCHEMA,
   canonicalize,
   digestHeadSet,
   normalizeHeadIds,
@@ -27,5 +28,13 @@ describe('ACP protocol constants and head sets', () => {
   it('sorts and rejects duplicate or malformed head IDs', () => {
     assert.deepEqual(normalizeHeadIds([`sha256:${'b'.repeat(64)}`, `sha256:${'a'.repeat(64)}`]), [`sha256:${'a'.repeat(64)}`, `sha256:${'b'.repeat(64)}`]);
     assert.throws(() => normalizeHeadIds([`sha256:${'a'.repeat(64)}`, `sha256:${'a'.repeat(64)}`]), /duplicate-head/);
+    assert.throws(() => normalizeHeadIds(['sha256:ABC']), /invalid-head-id/);
+    assert.throws(() => normalizeHeadIds('sha256:not-an-array'), /invalid-head-set/);
+  });
+
+  it('exports the packaged schema as the source of fixture requirements', () => {
+    assert.equal(ACP_SCHEMA.properties.protocol.const, 'acp.project-state-envelope');
+    assert.equal(ACP_SCHEMA.properties.schema_version.const, '1.0.0');
+    assert.ok(ACP_SCHEMA.required.includes('integrity'));
   });
 });

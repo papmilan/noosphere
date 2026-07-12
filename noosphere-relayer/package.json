@@ -10,9 +10,10 @@
     "dev": "node --watch index.js",
     "test": "node --experimental-vm-modules --test tests/*.test.js",
     "test:live": "node scripts/live-walrus-smoke.js",
-    "check": "node --check index.js && node --check memory.js && node --check local-memory.js && node --check walrus-memory.js && node --check durable-store.js && node --check security.js && node --check credentials.js && node --check local-projects.js"
+    "check": "node --check index.js && node --check memory.js && node --check local-memory.js && node --check walrus-memory.js && node --check durable-store.js && node --check security.js && node --check credentials.js && node --check local-projects.js && node --check acp-protocol.js"
   },
   "files": [
+    "acp-protocol.js",
     "credentials.js",
     "durable-store.js",
     "index.js",

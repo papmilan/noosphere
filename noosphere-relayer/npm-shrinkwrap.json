@@ -22,6 +22,13 @@
         "node": ">=22"
       }
     },
+    "../noosphere-acp-protocol": {
+      "name": "@noosphere/acp-protocol",
+      "version": "0.1.0",
+      "engines": {
+        "node": ">=22"
+      }
+    },
     "node_modules/@0no-co/graphql.web": {
       "version": "1.2.0",
       "resolved": "https://registry.npmjs.org/@0no-co/graphql.web/-/graphql.web-1.2.0.tgz",
@@ -224,12 +231,8 @@
       }
     },
     "node_modules/@noosphere/acp-protocol": {
-      "version": "0.1.0",
-      "resolved": "file:../noosphere-acp-protocol",
-      "inBundle": true,
-      "engines": {
-        "node": ">=22"
-      }
+      "resolved": "../noosphere-acp-protocol",
+      "link": true
     },
     "node_modules/@protobuf-ts/grpcweb-transport": {
       "version": "2.11.1",

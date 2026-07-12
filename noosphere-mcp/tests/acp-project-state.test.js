@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { ACP_SCHEMA } from '@noosphere/acp-protocol';
 import { describe, it } from 'node:test';
 import {
   ACP_PROTOCOL,
@@ -309,7 +309,7 @@ describe('createProjectState', () => {
   });
 
   it('publishes the lifecycle statuses accepted by the runtime', () => {
-    const schema = JSON.parse(readFileSync(new URL('../continuity/acp/schema.json', import.meta.url), 'utf8'));
+    const schema = ACP_SCHEMA;
 
     assert.deepEqual(schema.$defs.assertion.properties.status.enum, ['active', 'resolved', 'superseded', 'rejected']);
     assert.deepEqual(schema.$defs.planAssertion.properties.status.enum, ['planned', 'in_progress', 'completed', 'blocked', 'superseded']);
@@ -317,7 +317,7 @@ describe('createProjectState', () => {
   });
 
   it('uses finite schema levels that match runtime extension bounds', () => {
-    const schema = JSON.parse(readFileSync(new URL('../continuity/acp/schema.json', import.meta.url), 'utf8'));
+    const schema = ACP_SCHEMA;
     const extension = schema.$defs.extensions;
 
     assert.equal(extension.additionalProperties.$ref, '#/$defs/extensionValue1');
