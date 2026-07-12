@@ -113,7 +113,7 @@ export class WalrusMemoryAdapter {
   assertConfigured() {
     if (!this.config.configured) {
       const error = new Error(
-        'Walrus Memory is not configured. Set MEMWAL_PRIVATE_KEY and MEMWAL_ACCOUNT_ID, or run npm run demo.',
+        'Walrus Memory is not configured. Set MEMWAL_PRIVATE_KEY and MEMWAL_ACCOUNT_ID, or run noosphere setup --local for local-file memory.',
       );
       error.status = 503;
       throw error;

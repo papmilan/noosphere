@@ -22,6 +22,7 @@ const packageRoot = path.resolve(
   '..',
 );
 const cli = path.join(packageRoot, 'continuity', 'index.js');
+const CLI_TIMEOUT_MS = 8_000;
 
 let server;
 let serverUrl;
@@ -684,7 +685,7 @@ describe('Noosphere continuity CLI', () => {
       const stderr = Buffer.concat(stderrChunks).toString();
       assert.notEqual(code, 0, 'restore must fail when the relayer is down');
       assert.match(stderr, /Cannot reach the Noosphere relayer/);
-      assert.match(stderr, /noosphere setup --demo/);
+      assert.match(stderr, /noosphere setup --local/);
     } finally {
       await rm(restoreDir, { recursive: true, force: true });
     }
@@ -896,13 +897,34 @@ async function runCli(args, cwd = projectDir) {
   const stderr = [];
   child.stdout.on('data', (chunk) => stdout.push(chunk));
   child.stderr.on('data', (chunk) => stderr.push(chunk));
-  const code = await new Promise((resolve) => child.once('close', resolve));
+  const code = await waitForChild(child, args);
   assert.equal(
     code,
     0,
     `${Buffer.concat(stderr).toString()}\n${Buffer.concat(stdout).toString()}`,
   );
   return Buffer.concat(stdout).toString();
+}
+
+function waitForChild(child, args) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(
+        new Error(
+          `Timed out after ${CLI_TIMEOUT_MS}ms running noosphere ${args.join(' ')}`,
+        ),
+      );
+    }, CLI_TIMEOUT_MS);
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      resolve(code);
+    });
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
 }
 
 function respondJson(res, status, value) {

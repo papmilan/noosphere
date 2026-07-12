@@ -1,39 +1,33 @@
-import { randomUUID } from 'node:crypto';
-import {
-  mkdir,
-  readFile,
-  rename,
-  writeFile,
-} from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { LocalMemoryStore } from './local-memory.js';
 import { WalrusMemoryAdapter } from './walrus-memory.js';
 
 const MEMORY_PREFIX = 'NOOSPHERE_AGENT_MEMORY_V2\n';
 const DEFAULT_NAMESPACE_PREFIX = 'noosphere';
+export const MEMORY_BACKENDS = {
+  LOCAL_FILE: 'local-file',
+  WALRUS: 'walrus-memory',
+};
 const directory = path.dirname(fileURLToPath(import.meta.url));
+const defaultLocalMemoryPath = path.join(
+  directory,
+  '.noosphere-local-memory.json',
+);
 
 export class MemoryStore {
-  constructor() {
-    this.mode = process.env.DEMO_MODE === 'true' ? 'demo' : 'walrus-memory';
-    this.demoMemories = new Map();
-    this.demoLoaded = false;
-    this.persistDemo = process.env.NODE_ENV !== 'test';
-    this.demoPath =
-      process.env.LOCAL_MEMORY_PATH ||
-      path.join(directory, '.noosphere-local-memory.json');
-    this._writeChain = Promise.resolve();
-    this.walrus = new WalrusMemoryAdapter();
+  constructor(env = process.env) {
+    this.mode = resolveMemoryBackend(env);
+    this.local = new LocalMemoryStore(env, {
+      defaultPath: defaultLocalMemoryPath,
+    });
+    this.walrus = new WalrusMemoryAdapter(env);
   }
 
   async health() {
-    if (this.mode === 'demo') {
-      return {
-        ready: true,
-        mode: this.mode,
-        persistent: this.persistDemo,
-      };
+    if (this.mode === MEMORY_BACKENDS.LOCAL_FILE) {
+      return this.local.health(this.mode);
     }
 
     return this.walrus.health();
@@ -41,19 +35,8 @@ export class MemoryStore {
 
   async remember(projectId, text) {
     const namespace = projectNamespace(projectId);
-    if (this.mode === 'demo') {
-      await this.loadDemo();
-      const memory = {
-        id: randomUUID(),
-        blob_id: `demo-${randomUUID()}`,
-        namespace,
-        text,
-      };
-      const project = this.demoMemories.get(projectId) || [];
-      project.push(memory);
-      this.demoMemories.set(projectId, project);
-      await this.persistDemoMemories();
-      return memory;
+    if (this.mode === MEMORY_BACKENDS.LOCAL_FILE) {
+      return this.local.remember(projectId, namespace, text);
     }
 
     return this.walrus.remember(text, namespace);
@@ -61,77 +44,121 @@ export class MemoryStore {
 
   async recall(projectId, query, limit = 10) {
     const namespace = projectNamespace(projectId);
-    if (this.mode === 'demo') {
-      await this.loadDemo();
-      const results = (this.demoMemories.get(projectId) || [])
-        .slice(-limit)
-        .reverse()
-        .map((memory, index) => ({
-          blob_id: memory.blob_id,
-          text: memory.text,
-          distance: Math.min(0.99, index * 0.01),
-        }));
-      return { results, total: results.length };
+    if (this.mode === MEMORY_BACKENDS.LOCAL_FILE) {
+      return this.local.recall(projectId, limit);
     }
 
     return this.walrus.recall(query, limit, namespace);
   }
 
+  async resetLocal() {
+    await this.local.reset();
+  }
+
   async resetDemo() {
-    this.demoMemories.clear();
-    this.demoLoaded = true;
-    await this.persistDemoMemories();
+    await this.resetLocal();
   }
 
-  reloadRemoteConfig() {
-    if (this.mode === 'demo') return;
-    this.walrus = new WalrusMemoryAdapter();
-  }
-
-  async loadDemo() {
-    if (this.demoLoaded) return;
-    this.demoLoaded = true;
-    if (!this.persistDemo) return;
-
-    try {
-      const stored = JSON.parse(await readFile(this.demoPath, 'utf8'));
-      for (const [projectId, memories] of Object.entries(
-        stored.projects || {},
-      )) {
-        this.demoMemories.set(projectId, memories);
-      }
-    } catch (error) {
-      if (error.code !== 'ENOENT') {
-        console.warn(`[memory] Could not load local memory: ${error.message}`);
-      }
+  reloadConfig(env = process.env) {
+    const nextMode = resolveMemoryBackend(env);
+    this.mode = nextMode;
+    this.local.reload(env, { defaultPath: defaultLocalMemoryPath });
+    if (nextMode === MEMORY_BACKENDS.WALRUS) {
+      this.walrus = new WalrusMemoryAdapter(env);
     }
   }
 
+  reloadRemoteConfig() {
+    this.reloadConfig();
+  }
+
+  async loadLocal() {
+    return this.local.load();
+  }
+
+  async persistLocalMemories() {
+    return this.local.persist(() => this._writeLocalToDisk());
+  }
+
   async persistDemoMemories() {
-    if (!this.persistDemo) return;
-    this._writeChain = this._writeChain
-      .catch(() => undefined)
-      .then(() => this._writeDemoToDisk());
-    return this._writeChain;
+    return this.local.persist(() => this._writeDemoToDisk());
+  }
+
+  async loadDemo() {
+    return this.loadLocal();
+  }
+
+  async _writeLocalToDisk() {
+    return this.local.writeToDisk();
   }
 
   async _writeDemoToDisk() {
-    const temporary = `${this.demoPath}.${randomUUID()}.tmp`;
-    await mkdir(path.dirname(this.demoPath), { recursive: true });
-    await writeFile(
-      temporary,
-      `${JSON.stringify(
-        { projects: Object.fromEntries(this.demoMemories) },
-        null,
-        2,
-      )}\n`,
-      { encoding: 'utf8', mode: 0o600 },
-    );
-    await rename(temporary, this.demoPath);
+    return this._writeLocalToDisk();
+  }
+
+  get demoMemories() {
+    return this.local.memories;
+  }
+
+  set demoMemories(value) {
+    this.local.memories = value;
+  }
+
+  get demoLoaded() {
+    return this.local.loaded;
+  }
+
+  set demoLoaded(value) {
+    this.local.loaded = value;
+  }
+
+  get persistDemo() {
+    return this.local.persistent;
+  }
+
+  set persistDemo(value) {
+    this.local.persistent = value;
+  }
+
+  get demoPath() {
+    return this.local.filePath;
+  }
+
+  set demoPath(value) {
+    this.local.filePath = value;
   }
 }
 
 export const memoryStore = new MemoryStore();
+
+export function resolveMemoryBackend(env = process.env) {
+  const explicit = String(env.NOOSPHERE_MEMORY_BACKEND || '')
+    .trim()
+    .toLowerCase();
+  if (explicit) {
+    return normalizeMemoryBackend(explicit);
+  }
+  if (env.DEMO_MODE === 'true') {
+    return MEMORY_BACKENDS.LOCAL_FILE;
+  }
+  return MEMORY_BACKENDS.WALRUS;
+}
+
+export function normalizeMemoryBackend(value) {
+  switch (String(value || '').trim().toLowerCase()) {
+    case 'local':
+    case 'local-file':
+    case 'file':
+      return MEMORY_BACKENDS.LOCAL_FILE;
+    case 'walrus':
+    case 'walrus-memory':
+      return MEMORY_BACKENDS.WALRUS;
+    default:
+      throw new Error(
+        'NOOSPHERE_MEMORY_BACKEND must be "local-file" or "walrus-memory"',
+      );
+  }
+}
 
 export function serializeMemory(record) {
   try {
