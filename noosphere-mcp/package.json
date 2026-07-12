@@ -15,8 +15,8 @@
     "continuity:watch": "node continuity/index.js watch",
     "continuity:checkpoint": "node continuity/index.js checkpoint",
     "continuity:refresh": "node continuity/index.js refresh",
-    "check": "node --check continuity/index.js && node --check continuity/ollama.js && node --check continuity/credentials-cli.js && node --check continuity/acp/project-state.js && node --check continuity/acp/wire.js && node --check continuity/acp/git-state.js && node --check continuity/acp/merge.js && node --check continuity/acp/render.js && node --check continuity/acp/store.js && node --check lifecycle/credentials.js && node --check lifecycle/registry.js && node --check lifecycle/manager.js && node --check lifecycle/install.js && node --test --test-concurrency=1 tests/*.test.js",
-    "test": "node --test --test-concurrency=1 tests/*.test.js"
+    "check": "node --check continuity/index.js && node --check continuity/ollama.js && node --check continuity/credentials-cli.js && node --check continuity/acp/project-state.js && node --check continuity/acp/wire.js && node --check continuity/acp/git-state.js && node --check continuity/acp/merge.js && node --check continuity/acp/render.js && node --check continuity/acp/store.js && node --check lifecycle/credentials.js && node --check lifecycle/registry.js && node --check lifecycle/manager.js && node --check lifecycle/install.js && node --test --test-concurrency=1 --test-timeout=30000 tests/*.test.js",
+    "test": "node --test --test-concurrency=1 --test-timeout=30000 tests/*.test.js"
   },
   "files": [
     "continuity/",
