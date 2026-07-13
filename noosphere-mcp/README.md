@@ -266,7 +266,8 @@ render `CONTENTION` before candidate next-step guidance. Age uses CLI-observed
 creation time plus the 72-hour policy TTL (30-day retention), never submitted
 expiry. `exec clear` requires `--current`, `--agent <id>`, or
 `--all --confirm-all`. Rebased salvage uses only the direct retained validated
-parent and is therefore conservative and limited.
+parent and is therefore conservative and limited. `depends_on_files` is
+deferred rather than inferred unsafely in v1.
 
 ### ACP exact-state synchronization
 

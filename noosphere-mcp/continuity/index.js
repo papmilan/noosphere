@@ -73,7 +73,7 @@ const DEFAULT_BASELINE_HISTORY_COMMITS = 50;
 const MAX_BASELINE_HISTORY_COMMITS = 200;
 const MAX_HANDOFF_BYTES = 1_048_576;
 const EXECUTION_DEFAULT_TTL_MS = 72 * 60 * 60 * 1000;
-const EXECUTION_MAX_TARGET_BYTES = 4 * 1024 * 1024;
+const EXECUTION_MAX_TARGET_BYTES = positiveIntegerEnv('NOOSPHERE_EXEC_MAX_TARGET_BYTES', 4 * 1024 * 1024);
 const MANAGED_START = '<!-- noosphere:continuity:start -->';
 const MANAGED_END = '<!-- noosphere:continuity:end -->';
 const ALL_ADAPTERS = ['codex', 'claude', 'gemini', 'cursor', 'mcp'];
@@ -1621,6 +1621,11 @@ async function execShow(root, now) {
 
 function currentExecutionAgent() {
   return process.env.NOOSPHERE_AGENT_ID || 'default';
+}
+
+function positiveIntegerEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
 async function selectExecutionAgent(root, now) {

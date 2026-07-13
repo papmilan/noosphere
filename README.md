@@ -112,6 +112,7 @@ snapshot, diverged Git); each target is classified honestly as
 `target-unchanged`, `target-changed`, `target-missing`, or `unknown`.
 `target-unchanged` only proves the target bytes match: assumptions and
 dependencies still require validation, so no step is automatically actionable.
+`depends_on_files` is deferred rather than inferred unsafely in v1.
 Age demotes past the 72-hour policy boundary and retention is 30 days; neither
 value is accepted from checkpoint input. Checkpoints are per canonical agent in
 `.noosphere/execution/<agent>.json|md`; overlapping live targets render a
