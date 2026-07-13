@@ -9,6 +9,8 @@ import {
   readExecutionState,
   writeExecutionState,
   executionPaths,
+  clearExecutionState,
+  executionGeneration,
 } from '../continuity/acp/execution-store.js';
 import { EXECUTION_PROTOCOL } from '../continuity/acp/execution-state.js';
 import { workspaceFingerprintHex } from '../continuity/acp/git-state.js';
@@ -154,5 +156,35 @@ describe('ACP execution store', () => {
     const before = await workspaceFingerprintHex(fresh);
     await writeExecutionState(fresh, envelope(), { now: '2026-07-13T10:00:00.000Z' });
     assert.equal(await workspaceFingerprintHex(fresh), before);
+  });
+
+  it('rejects a case-colliding agent identity instead of overwriting it', async () => {
+    const fresh = await makeRepo();
+    const first = envelope();
+    first.origin.agent_id = 'Agent-A';
+    await writeExecutionState(fresh, first, { agentId: 'Agent-A', now: '2026-07-13T10:00:00.000Z' });
+    const colliding = envelope();
+    colliding.origin.agent_id = 'agent-a';
+    await assert.rejects(writeExecutionState(fresh, colliding, { agentId: 'agent-a', now: '2026-07-13T10:00:00.000Z' }), /agent-id-collision/);
+  });
+
+  it('does not let a writer that observed an old generation resurrect a cleared checkpoint', async () => {
+    const fresh = await makeRepo();
+    const generation = await executionGeneration(fresh, 'agent-a');
+    await clearExecutionState(fresh, 'agent-a');
+    await assert.rejects(
+      writeExecutionState(fresh, envelope(), { agentId: 'agent-a', expectedGeneration: generation, now: '2026-07-13T10:00:00.000Z' }),
+      /checkpoint-cleared/,
+    );
+    assert.equal(await readExecutionState(fresh, { agentId: 'agent-a' }), null);
+  });
+
+  it('rejects a concurrent writer for the same canonical agent instead of silently replacing state', async () => {
+    const fresh = await makeRepo();
+    const first = writeExecutionState(fresh, envelope(), { agentId: 'agent-a', now: '2026-07-13T10:00:00.000Z' });
+    const second = writeExecutionState(fresh, envelope(), { agentId: 'agent-a', now: '2026-07-13T10:00:00.000Z' });
+    const results = await Promise.allSettled([first, second]);
+    assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+    assert.match(String(results.find((result) => result.status === 'rejected').reason), /execution-write-in-progress/);
   });
 });

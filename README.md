@@ -104,15 +104,20 @@ the checkpoint can never carry code, diffs, or multi-line payloads.
 noosphere exec checkpoint --file checkpoint.json   # record where work stood
 noosphere exec show                                # validated advisory kernel
 noosphere exec import-plan docs/plan.md            # adopt a checkbox plan
-noosphere exec clear
+noosphere exec clear --current
 ```
 
 On resume the checkpoint is re-validated: evidence voids (superseded
-snapshot, diverged Git, changed file hashes mark steps stale), age only
-demotes (past its 72-hour default boundary a checkpoint loses NEXT-step
-prominence but is never deleted by the clock). The rendered kernel in
-`.noosphere/execution.md` is at most 1,200 bytes, always labeled advisory,
-and always states its own age.
+snapshot, diverged Git); each target is classified honestly as
+`target-unchanged`, `target-changed`, `target-missing`, or `unknown`.
+`target-unchanged` only proves the target bytes match: assumptions and
+dependencies still require validation, so no step is automatically actionable.
+Age demotes past the 72-hour policy boundary and retention is 30 days; neither
+value is accepted from checkpoint input. Checkpoints are per canonical agent in
+`.noosphere/execution/<agent>.json|md`; overlapping live targets render a
+visible `CONTENTION` warning. `exec clear` requires `--current`, `--agent`, or
+`--all --confirm-all`. Local rebased salvage follows only the directly retained
+validated parent, so it is deliberately conservative and limited.
 
 Cross-machine exact synchronization requires every client to use the same
 durable relayer index. Sharing Walrus credentials alone is not sufficient.

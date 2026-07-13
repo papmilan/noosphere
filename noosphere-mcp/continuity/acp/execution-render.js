@@ -40,15 +40,19 @@ export function renderExecutionKernel(execution, { verdict, now, contention = []
 
   const mandatory = [
     HEADER,
-    `Previous agent recorded this ${age} (agent: ${oneLine(envelope.origin.agent_id)}).`,
+    `Previous agent checkpoint: ${age} (agent: ${oneLine(envelope.origin.agent_id)}).`,
     `Binding: ${verdict.binding}${verdict.aged ? ', aged' : ''}${verdict.reasons.length ? ` — ${verdict.reasons.map(oneLine).join('; ')}` : ''}`,
     ...(verdict.aged
       ? ['This checkpoint aged past its boundary; adopt only via `noosphere exec resume --accept-aged`.']
       : []),
     ...(current
-      ? [`Current: ${current.kind} ${oneLine(current.target.file)}${current.target.symbol ? ` ${oneLine(current.target.symbol)}` : ''} — ${oneLine(current.goal)} (cursor: ${envelope.cursor.status})`]
+      ? [
+        `Current: ${current.kind} ${oneLine(current.target.file)}${current.target.symbol ? ` ${oneLine(current.target.symbol)}` : ''} — ${oneLine(current.goal)} (cursor: ${envelope.cursor.status})`,
+        ...(current.verify?.command ? [unverifiedCommand(current.verify.command)] : []),
+      ]
       : []),
-    `Validation: ${envelope.validation.last_result ?? 'none'}${envelope.validation.last_command ? ` (\`${oneLine(envelope.validation.last_command)}\`)` : ''}${envelope.validation.failing_tests.length ? ` failing: ${envelope.validation.failing_tests.map(oneLine).join(', ')}` : ''}`,
+    `Validation record: ${envelope.validation.last_result ?? 'none'}${envelope.validation.failing_tests.length ? ` failing: ${envelope.validation.failing_tests.map(oneLine).join(', ')}` : ''}`,
+    ...(envelope.validation.last_command ? [unverifiedCommand(envelope.validation.last_command)] : []),
     ...contention.map((item) => `CONTENTION: ${oneLine(item.agent_id)} also targets ${oneLine(item.file)} — coordinate before editing.`),
   ].join('\n');
 
@@ -64,15 +68,19 @@ export function renderExecutionKernel(execution, { verdict, now, contention = []
 }
 
 function optionalSections(envelope, verdict, current) {
-  const pendingFresh = envelope.steps.filter(
-    (step) => step.status === 'pending' && verdict.steps[step.id] === 'fresh' && step !== current,
+  const pendingCandidates = envelope.steps.filter(
+    (step) => step.status === 'pending' && step !== current,
   );
   const nextLines = verdict.actionable
-    ? pendingFresh.slice(0, 3).map((step, index) => `${index === 0 ? 'NEXT' : 'THEN'}: ${oneLine(step.goal)} (${step.kind} ${oneLine(step.target.file)}; verify: \`${oneLine(step.verify.command)}\`)`)
+    ? pendingCandidates.slice(0, 3).flatMap((step) => [
+      `Next intended step (advisory; validate assumptions and dependencies): ${oneLine(step.goal)} (${step.kind} ${oneLine(step.target.file)}; ${verdict.steps[step.id] ?? 'unknown'}).`,
+      ...(verdict.steps[step.id] === 'target-unchanged' ? ['Target unchanged; assumptions and dependencies still require validation.'] : []),
+      ...(step.verify?.command ? [unverifiedCommand(step.verify.command)] : []),
+    ])
     : [];
   const staleLines = envelope.steps
-    .filter((step) => verdict.steps[step.id] === 'stale')
-    .map((step) => `STALE (re-verify first): ${step.kind} ${oneLine(step.target.file)} — ${oneLine(step.goal)}`);
+    .filter((step) => !['target-unchanged', undefined].includes(verdict.steps[step.id]))
+    .map((step) => `TARGET ${targetStatus(verdict.steps[step.id])}: ${step.kind} ${oneLine(step.target.file)} — ${oneLine(step.goal)}`);
   const blockedLines = envelope.steps
     .filter((step) => step.status === 'blocked')
     .map((step) => `BLOCKED: ${oneLine(step.goal)} (${oneLine(step.target.file)})`);
@@ -97,6 +105,14 @@ function formatAge(createdAt, now) {
   const hours = Math.floor(minutes / 60);
   if (hours < 48) return `recorded ${hours} h ago`;
   return `recorded ${Math.floor(hours / 24)} d ago`;
+}
+
+function unverifiedCommand(command) {
+  return `UNVERIFIED COMMAND — inspect before running: \`${oneLine(command)}\``;
+}
+
+function targetStatus(status) {
+  return status ?? 'unknown';
 }
 
 function section(lines) {

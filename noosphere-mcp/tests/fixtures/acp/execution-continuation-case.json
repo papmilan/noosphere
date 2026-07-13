@@ -51,8 +51,8 @@
     "Binding: fresh",
     "Current: edit src/parser\\.js parseHeader — Implement the version-field guard\\.",
     "cursor: mid-edit",
-    "NEXT: Run the full check suite\\.",
-    "verify: `npm run check`",
+    "Next intended step \\(advisory; validate assumptions and dependencies\\): Run the full check suite\\.",
+    "UNVERIFIED COMMAND — inspect before running: `npm run check`",
     "RULED OUT: validate in the caller",
     "NOTE: The guard belongs before the charset check\\."
   ]

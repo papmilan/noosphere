@@ -72,7 +72,7 @@ describe('ACP execution CLI', () => {
     const result = await run(['exec', 'checkpoint', '--file', input], repo);
     assert.match(result.stdout, /Execution checkpoint stored/);
 
-    const stored = JSON.parse(await readFile(path.join(repo, '.noosphere', 'execution.json'), 'utf8'));
+    const stored = JSON.parse(await readFile(path.join(repo, '.noosphere', 'execution', 'claude.json'), 'utf8'));
     const appHash = `sha256:${createHash('sha256').update(await readFile(path.join(repo, 'app.js'))).digest('hex')}`;
     assert.equal(stored.steps[0].target.content_hash, appHash);
     assert.notEqual(stored.repository.workspace_fingerprint, `sha256:${'0'.repeat(64)}`);
@@ -95,7 +95,7 @@ describe('ACP execution CLI', () => {
   it('marks the step stale after the target file changes', async () => {
     await writeFile(path.join(repo, 'app.js'), 'export const answer = 43;\n');
     const result = await run(['exec', 'show'], repo);
-    assert.match(result.stdout, /STALE \(re-verify first\): edit app\.js/);
+    assert.match(result.stdout, /TARGET target-changed: edit app\.js/);
     await execFileAsync('git', ['checkout', '--', 'app.js'], { cwd: repo });
   });
 
@@ -117,7 +117,7 @@ describe('ACP execution CLI', () => {
     ].join('\n'));
     const result = await run(['exec', 'import-plan', plan], fresh);
     assert.match(result.stdout, /Imported 3 steps/);
-    const stored = JSON.parse(await readFile(path.join(fresh, '.noosphere', 'execution.json'), 'utf8'));
+    const stored = JSON.parse(await readFile(path.join(fresh, '.noosphere', 'execution', 'plan-import.json'), 'utf8'));
     assert.equal(stored.steps.length, 3);
     assert.equal(stored.steps[0].status, 'done');
     assert.equal(stored.steps[1].status, 'current');
@@ -127,7 +127,7 @@ describe('ACP execution CLI', () => {
   });
 
   it('clears the checkpoint', async () => {
-    const result = await run(['exec', 'clear'], repo);
+    const result = await run(['exec', 'clear', '--agent', 'claude'], repo);
     assert.match(result.stdout, /cleared/i);
     const shown = await run(['exec', 'show'], repo);
     assert.match(shown.stdout, /No execution checkpoint/);

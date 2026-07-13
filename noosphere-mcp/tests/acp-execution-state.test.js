@@ -76,6 +76,14 @@ function errorCodes(result) {
 }
 
 describe('ACP execution state invariants', () => {
+  it('rejects an implausibly future created_at against the injected clock', () => {
+    const future = validEnvelope();
+    future.created_at = '2099-01-01T00:00:00.000Z';
+    future.expires_at = '2099-01-04T00:00:00.000Z';
+    const result = createExecutionState(future, { clock: '2026-07-13T00:00:00.000Z' });
+    assert.equal(result.ok, false);
+    assert.ok(errorCodes(result).includes('future-created-at'));
+  });
   it('constructs and deep-freezes a valid execution state', () => {
     const result = createExecutionState(validEnvelope(), { clock: CREATED_AT });
     assert.equal(result.ok, true, JSON.stringify(result.errors ?? []));

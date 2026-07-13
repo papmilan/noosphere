@@ -257,12 +257,16 @@ an agent cannot claim tests pass or hashes match. Payloads are forbidden:
 fenced code, diff syntax, and multi-line prose are rejected at validation.
 
 `noosphere exec show` re-validates before rendering: envelope digest, binding
-to the current ACP snapshot, Git compatibility, and per-step hash salvage.
-Evidence voids; age demotes (default boundary 72 hours, and the kernel always
-states its age); the clock never deletes. `noosphere exec import-plan` adopts
-a markdown checkbox plan as the execution graph; `noosphere exec clear`
-removes the checkpoint. Files live in `.noosphere/execution.json` and
-`.noosphere/execution.md` and never affect the workspace fingerprint.
+to the current ACP snapshot, Git compatibility, and per-step target status.
+Status is `target-unchanged`, `target-changed`, `target-missing`, or `unknown`;
+a matching hash does not prove a step remains valid, so assumptions and
+dependencies still require validation. Agents are stored separately under
+`.noosphere/execution/<canonical-agent>.json|md`; overlapping non-void targets
+render `CONTENTION` before candidate next-step guidance. Age uses CLI-observed
+creation time plus the 72-hour policy TTL (30-day retention), never submitted
+expiry. `exec clear` requires `--current`, `--agent <id>`, or
+`--all --confirm-all`. Rebased salvage uses only the direct retained validated
+parent and is therefore conservative and limited.
 
 ### ACP exact-state synchronization
 

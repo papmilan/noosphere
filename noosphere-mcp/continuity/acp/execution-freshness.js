@@ -4,7 +4,10 @@
 // compatibility verdict from classifyCompatibility, measured file hashes, and
 // the clock — so equal inputs produce byte-identical verdicts.
 
-const HISTORY_CAP_MS = 30 * 24 * 60 * 60 * 1000;
+export const executionFreshnessPolicy = Object.freeze({
+  ttlMs: 72 * 60 * 60 * 1000,
+  retentionMs: 30 * 24 * 60 * 60 * 1000,
+});
 
 export function classifyExecutionFreshness({
   execution,
@@ -13,6 +16,7 @@ export function classifyExecutionFreshness({
   compatibility,
   fileHashes = {},
   now,
+  policy = executionFreshnessPolicy,
 }) {
   const envelope = execution.envelope;
   const reasons = [];
@@ -36,25 +40,35 @@ export function classifyExecutionFreshness({
     reasons.push(...compatibility.reasons);
   }
 
-  const aged = envelope.expires_at < now;
-  if (aged) reasons.push('checkpoint aged past its expires_at boundary');
-  const historyOnly = Date.parse(now) - Date.parse(envelope.created_at) > HISTORY_CAP_MS;
+  // Expiry is never a model assertion. It is derived from the observed
+  // checkpoint creation time and the local policy, even if an old envelope
+  // contains a forged expires_at value.
+  const createdAt = Date.parse(envelope.created_at);
+  const ageMs = Date.parse(now) - createdAt;
+  const aged = ageMs >= policy.ttlMs;
+  if (aged) reasons.push('checkpoint aged past the policy TTL boundary');
+  const historyOnly = ageMs > policy.retentionMs;
 
   if (binding === 'void') {
     return verdict({ binding, aged, historyOnly, actionable: false, steps: {}, reasons });
   }
 
-  // Per-step salvage: a measured hash that still matches keeps the step
-  // fresh even when the envelope-level context moved; a mismatch marks it
-  // stale; no recorded hash inherits the envelope-level verdict.
-  const inheritFresh = binding === 'fresh'
-    && (compatibility.status === 'exact' || compatibility.status === 'compatible');
+  // A matching target hash only says the target has not changed. It cannot
+  // prove that assumptions, dependencies, or the intended step remain valid.
   const steps = {};
   for (const step of envelope.steps) {
     if (step.target.content_hash == null) {
-      steps[step.id] = inheritFresh ? 'fresh' : 'stale';
+      steps[step.id] = 'unknown';
     } else {
-      steps[step.id] = fileHashes[step.target.file] === step.target.content_hash ? 'fresh' : 'stale';
+      const observed = fileHashes[step.target.file];
+      if (observed === null || observed?.status === 'missing') {
+        steps[step.id] = 'target-missing';
+      } else if (observed?.status === 'unknown' || observed == null) {
+        steps[step.id] = 'unknown';
+      } else {
+        const hash = typeof observed === 'string' ? observed : observed.hash;
+        steps[step.id] = hash === step.target.content_hash ? 'target-unchanged' : 'target-changed';
+      }
     }
   }
 

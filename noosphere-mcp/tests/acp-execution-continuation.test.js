@@ -57,6 +57,6 @@ describe('ACP execution continuation acceptance', () => {
     // honestly instead of pretending the step is still fresh.
     await writeFile(path.join(repo, 'src', 'parser.js'), 'export function parseHeader(header) { return header; }\n');
     const afterEdit = await execFileAsync('node', [CLI, 'exec', 'show', '--path', repo], { timeout: 30_000 });
-    assert.match(afterEdit.stdout, /STALE \(re-verify first\): edit src\/parser\.js/);
+    assert.match(afterEdit.stdout, /TARGET target-changed: edit src\/parser\.js/);
   });
 });

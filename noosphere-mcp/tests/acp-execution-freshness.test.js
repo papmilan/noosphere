@@ -49,7 +49,7 @@ describe('ACP execution freshness classification', () => {
       aged: false,
       historyOnly: false,
       actionable: true,
-      steps: { s1: 'fresh', s2: 'fresh', s3: 'fresh' },
+      steps: { s1: 'target-unchanged', s2: 'target-unchanged', s3: 'unknown' },
       reasons: [],
     });
   });
@@ -63,7 +63,7 @@ describe('ACP execution freshness classification', () => {
     assert.equal(verdict.actionable, false);
     assert.ok(verdict.reasons.some((reason) => /superseded/.test(reason)));
     // Per-step salvage still runs under rebased.
-    assert.equal(verdict.steps.s1, 'fresh');
+    assert.equal(verdict.steps.s1, 'target-unchanged');
   });
 
   it('voids on an unrelated project snapshot', () => {
@@ -86,20 +86,20 @@ describe('ACP execution freshness classification', () => {
       fileHashes: { 'a.js': HASH_FRESH, 'b.js': `sha256:${'f'.repeat(64)}` },
     });
     assert.equal(verdict.binding, 'fresh');
-    assert.equal(verdict.steps.s1, 'fresh');
-    assert.equal(verdict.steps.s2, 'stale');
+    assert.equal(verdict.steps.s1, 'target-unchanged');
+    assert.equal(verdict.steps.s2, 'target-changed');
     // No hash recorded: inherits the envelope-level verdict (advanced → stale).
-    assert.equal(verdict.steps.s3, 'stale');
+    assert.equal(verdict.steps.s3, 'unknown');
   });
 
   it('treats hashless steps as fresh under exact git', () => {
     const verdict = classify();
-    assert.equal(verdict.steps.s3, 'fresh');
+    assert.equal(verdict.steps.s3, 'unknown');
   });
 
-  it('marks a hash mismatch stale even under exact git', () => {
+  it('classifies a hash mismatch as target-changed even under exact git', () => {
     const verdict = classify({ fileHashes: { 'a.js': HASH_FRESH, 'b.js': `sha256:${'f'.repeat(64)}` } });
-    assert.equal(verdict.steps.s2, 'stale');
+    assert.equal(verdict.steps.s2, 'target-changed');
     assert.equal(verdict.actionable, true);
   });
 
@@ -115,6 +115,21 @@ describe('ACP execution freshness classification', () => {
     const verdict = classify({ now: '2026-08-13T00:00:01.000Z' });
     assert.equal(verdict.historyOnly, true);
     assert.equal(verdict.actionable, false);
+  });
+
+  it('ignores a forged far-future expiry and derives demotion from created_at plus policy TTL', () => {
+    const verdict = classify({
+      execution: { expiresAt: '2099-01-01T00:00:00.000Z' },
+      now: '2026-07-16T00:00:01.000Z',
+    });
+    assert.equal(verdict.aged, true);
+  });
+
+  it('returns target-missing and unknown rather than treating unavailable targets as fresh', () => {
+    const missing = classify({ fileHashes: { 'a.js': null, 'b.js': HASH_OLD } });
+    assert.equal(missing.steps.s1, 'target-missing');
+    const unknown = classify({ fileHashes: { 'a.js': { status: 'unknown' }, 'b.js': HASH_OLD } });
+    assert.equal(unknown.steps.s1, 'unknown');
   });
 
   it('is deterministic for equal inputs', () => {
