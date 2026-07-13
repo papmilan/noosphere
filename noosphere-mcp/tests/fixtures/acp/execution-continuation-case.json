@@ -1,0 +1,59 @@
+{
+  "description": "Agent A stops mid-task after writing a failing test; a clean successor process must learn the current file, symbol, next step, and verify command from the rendered kernel alone.",
+  "asserted": {
+    "origin": { "agent_id": "agent-a", "client": "claude-code", "session_id": null },
+    "cursor": {
+      "step_id": "s3",
+      "status": "mid-edit",
+      "opened_files": ["src/parser.js", "tests/parser.test.js"],
+      "target": { "file": "src/parser.js", "symbol": "parseHeader", "purpose": "Reject headers without a version field." }
+    },
+    "steps": [
+      {
+        "id": "s1", "parent_step_id": null, "kind": "task", "status": "done",
+        "target": { "file": "src/parser.js", "symbol": null, "content_hash": null },
+        "goal": "Design the header validation rules.",
+        "verify": { "command": "cat docs/plan.md", "expectation": "rules agreed" }
+      },
+      {
+        "id": "s2", "parent_step_id": "s1", "kind": "test", "status": "done",
+        "target": { "file": "tests/parser.test.js", "symbol": null, "content_hash": null },
+        "goal": "Write the failing version-field test.",
+        "verify": { "command": "node --test tests/parser.test.js", "expectation": "red" }
+      },
+      {
+        "id": "s3", "parent_step_id": "s1", "kind": "edit", "status": "current",
+        "target": { "file": "src/parser.js", "symbol": "parseHeader", "content_hash": null },
+        "goal": "Implement the version-field guard.",
+        "verify": { "command": "node --test tests/parser.test.js", "expectation": "green" }
+      },
+      {
+        "id": "s4", "parent_step_id": "s1", "kind": "verify", "status": "pending",
+        "target": { "file": "package.json", "symbol": null, "content_hash": null },
+        "goal": "Run the full check suite.",
+        "verify": { "command": "npm run check", "expectation": "all pass" }
+      }
+    ],
+    "frontier": {
+      "searched": [
+        { "query": "parseHeader", "scope": "src", "finding": "single definition, two call sites" }
+      ],
+      "ruled_out": [
+        { "hypothesis": "validate in the caller", "evidence": "both call sites would duplicate the guard" }
+      ]
+    },
+    "working_notes": [
+      { "text": "The guard belongs before the charset check.", "created_at": "2026-07-13T09:00:00.000Z", "expires_at": "2026-07-16T09:00:00.000Z" }
+    ]
+  },
+  "required_kernel_fragments": [
+    "# EXECUTION CHECKPOINT \\(advisory — validate before acting\\)",
+    "Binding: fresh",
+    "Current: edit src/parser\\.js parseHeader — Implement the version-field guard\\.",
+    "cursor: mid-edit",
+    "NEXT: Run the full check suite\\.",
+    "verify: `npm run check`",
+    "RULED OUT: validate in the caller",
+    "NOTE: The guard belongs before the charset check\\."
+  ]
+}

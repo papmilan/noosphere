@@ -90,6 +90,30 @@ Advanced history requires `--allow-stale-advanced` at discovery and apply and
 renders with downgraded authority and suppressed next actions. Set
 `NOOSPHERE_ACP_SYNC=false` to disable exact remote synchronization.
 
+### Execution continuity
+
+Project State answers "what is true"; an execution checkpoint answers "what
+was I about to do." `noosphere exec checkpoint` records an advisory cursor
+over the current Project State snapshot — current step, target file and
+symbol, remaining steps, search frontier — while the CLI itself measures
+every fact a successor will trust: repository state, per-step file hashes,
+and the snapshot binding. Asserted lies are overwritten by measurement, and
+the checkpoint can never carry code, diffs, or multi-line payloads.
+
+```bash
+noosphere exec checkpoint --file checkpoint.json   # record where work stood
+noosphere exec show                                # validated advisory kernel
+noosphere exec import-plan docs/plan.md            # adopt a checkbox plan
+noosphere exec clear
+```
+
+On resume the checkpoint is re-validated: evidence voids (superseded
+snapshot, diverged Git, changed file hashes mark steps stale), age only
+demotes (past its 72-hour default boundary a checkpoint loses NEXT-step
+prominence but is never deleted by the clock). The rendered kernel in
+`.noosphere/execution.md` is at most 1,200 bytes, always labeled advisory,
+and always states its own age.
+
 Cross-machine exact synchronization requires every client to use the same
 durable relayer index. Sharing Walrus credentials alone is not sufficient.
 "walrus-backed/relayer-indexed" means Walrus replicates bytes while exact

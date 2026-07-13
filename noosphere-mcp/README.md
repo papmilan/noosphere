@@ -215,6 +215,8 @@ noosphere state
 noosphere state --json
 noosphere state validate
 noosphere handoff --file handoff.json
+noosphere exec checkpoint --file checkpoint.json
+noosphere exec show
 noosphere uninstall
 ```
 
@@ -243,6 +245,24 @@ summaries. File checkpoints preserve work state; the hook preserves intent.
 Agents should never be asked to reveal hidden chain-of-thought. The public
 work journal captures only conclusions, evidence, attempted approaches, and
 next steps.
+
+### ACP execution continuity
+
+`noosphere exec checkpoint` (`--file <json>` or `--stdin`) records an advisory
+execution cursor: the current step, target file and symbol, remaining steps
+with per-file content hashes, the search frontier, and short working notes.
+Repository facts, file hashes, the Project State binding, and validation
+results are measured by the CLI and override whatever the input asserted —
+an agent cannot claim tests pass or hashes match. Payloads are forbidden:
+fenced code, diff syntax, and multi-line prose are rejected at validation.
+
+`noosphere exec show` re-validates before rendering: envelope digest, binding
+to the current ACP snapshot, Git compatibility, and per-step hash salvage.
+Evidence voids; age demotes (default boundary 72 hours, and the kernel always
+states its age); the clock never deletes. `noosphere exec import-plan` adopts
+a markdown checkbox plan as the execution graph; `noosphere exec clear`
+removes the checkpoint. Files live in `.noosphere/execution.json` and
+`.noosphere/execution.md` and never affect the workspace fingerprint.
 
 ### ACP exact-state synchronization
 
