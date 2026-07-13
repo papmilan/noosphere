@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noosphere.dev/schemas/acp-execution-state-1.json",
+  "title": "ACP Execution State",
+  "description": "Advisory execution cursor over one ACP Project State snapshot. Carries locations and goals only; code bodies, diffs, and multi-line payloads are forbidden by validation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol", "project_snapshot_id", "created_at", "expires_at", "origin",
+    "repository", "cursor", "steps", "frontier", "validation", "working_notes",
+    "integrity"
+  ],
+  "properties": {
+    "protocol": { "const": "acp.execution-state/1" },
+    "project_snapshot_id": { "$ref": "#/$defs/snapshotId" },
+    "created_at": { "$ref": "#/$defs/timestamp" },
+    "expires_at": { "$ref": "#/$defs/timestamp" },
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "client", "session_id"],
+      "properties": {
+        "agent_id": { "$ref": "#/$defs/prose" },
+        "client": { "$ref": "#/$defs/prose" },
+        "session_id": { "oneOf": [{ "$ref": "#/$defs/prose" }, { "type": "null" }] }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "dirty", "workspace_fingerprint"],
+      "properties": {
+        "project_id": { "$ref": "#/$defs/prose" },
+        "head": { "oneOf": [{ "type": "string", "pattern": "^[a-f0-9]{40}$" }, { "type": "null" }] },
+        "branch": { "oneOf": [{ "$ref": "#/$defs/prose" }, { "type": "null" }] },
+        "dirty": { "type": "boolean" },
+        "workspace_fingerprint": { "$ref": "#/$defs/snapshotId" }
+      }
+    },
+    "cursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "status", "opened_files", "target"],
+      "properties": {
+        "step_id": { "$ref": "#/$defs/prose" },
+        "status": { "enum": ["planning", "before-edit", "mid-edit", "verifying", "blocked", "handoff"] },
+        "opened_files": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/prose" } },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["file"],
+          "properties": {
+            "file": { "$ref": "#/$defs/prose" },
+            "symbol": { "oneOf": [{ "$ref": "#/$defs/prose" }, { "type": "null" }] },
+            "purpose": { "oneOf": [{ "$ref": "#/$defs/prose" }, { "type": "null" }] }
+          }
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "parent_step_id", "kind", "status", "target", "goal", "verify"],
+        "properties": {
+          "id": { "$ref": "#/$defs/prose" },
+          "parent_step_id": { "oneOf": [{ "$ref": "#/$defs/prose" }, { "type": "null" }] },
+          "kind": { "enum": ["task", "edit", "test", "verify", "investigate", "commit"] },
+          "status": { "enum": ["done", "current", "pending", "skipped", "blocked"] },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["file"],
+            "properties": {
+              "file": { "$ref": "#/$defs/prose" },
+              "symbol": { "oneOf": [{ "$ref": "#/$defs/prose" }, { "type": "null" }] },
+              "content_hash": { "oneOf": [{ "$ref": "#/$defs/snapshotId" }, { "type": "null" }] }
+            }
+          },
+          "goal": { "$ref": "#/$defs/prose" },
+          "verify": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["command", "expectation"],
+            "properties": {
+              "command": { "type": "string", "minLength": 1, "maxLength": 200 },
+              "expectation": { "$ref": "#/$defs/prose" }
+            }
+          }
+        }
+      }
+    },
+    "frontier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["searched", "ruled_out"],
+      "properties": {
+        "searched": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["query", "scope", "finding"],
+            "properties": {
+              "query": { "$ref": "#/$defs/prose" },
+              "scope": { "$ref": "#/$defs/prose" },
+              "finding": { "$ref": "#/$defs/prose" }
+            }
+          }
+        },
+        "ruled_out": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hypothesis", "evidence"],
+            "properties": {
+              "hypothesis": { "$ref": "#/$defs/prose" },
+              "evidence": { "$ref": "#/$defs/prose" }
+            }
+          }
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["last_command", "last_result", "failing_tests"],
+      "properties": {
+        "last_command": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 200 }, { "type": "null" }] },
+        "last_result": { "oneOf": [{ "enum": ["pass", "fail", "error"] }, { "type": "null" }] },
+        "failing_tests": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/prose" } },
+        "expected_after_next_step": { "oneOf": [{ "$ref": "#/$defs/prose" }, { "type": "null" }] }
+      }
+    },
+    "working_notes": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["text", "created_at", "expires_at"],
+        "properties": {
+          "text": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "created_at": { "$ref": "#/$defs/timestamp" },
+          "expires_at": { "$ref": "#/$defs/timestamp" }
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "digest", "signature"],
+      "properties": {
+        "algorithm": { "const": "sha256" },
+        "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "signature": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "algorithm", "key_id", "value"],
+          "properties": {
+            "status": { "enum": ["unsigned", "local-unverified", "signed"] },
+            "algorithm": { "oneOf": [{ "type": "string" }, { "type": "null" }] },
+            "key_id": { "oneOf": [{ "type": "string" }, { "type": "null" }] },
+            "value": { "oneOf": [{ "type": "string" }, { "type": "null" }] }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "snapshotId": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "timestamp": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+    "prose": { "type": "string", "minLength": 1, "maxLength": 240 }
+  }
+}
