@@ -42,3 +42,22 @@ Use `noosphere setup` for initial configuration and
 Noosphere cannot recover the controlling Sui wallet or a lost delegate key.
 Linux systems without Secret Service explicitly fall back to an owner-only
 `0600` file; that fallback is not encrypted at rest.
+
+## ACP exact-state data
+
+Canonical ACP envelopes may contain externally shareable objectives,
+decisions, evidence, assumptions, blockers, risks, next actions, and file
+references. They must not contain credentials, hidden reasoning, raw chat, or
+provider-private state. Exact-state synchronization does not use semantic
+recall.
+
+Configured local-first handoffs can retain the original canonical envelope in
+owner-only `.noosphere/continuity-sync.json` until upload succeeds. Logs and
+ordinary status output contain only identifiers and typed errors, not envelope
+contents. Invalid, foreign, expired, or integrity-failing bytes may enter the
+owner-only quarantine directory and are never applied automatically.
+
+Advanced-history override deliberately reduces authority: repository-dependent
+assertions are labelled non-authoritative and next actions are suppressed.
+Confirmations contain digests and identifiers, are single-use, and expire
+within five minutes.

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import {
   access,
+  cp,
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -20,6 +22,7 @@ const mcpRoot = path.resolve(
 );
 const repositoryRoot = path.resolve(mcpRoot, '..');
 const relayerRoot = path.join(repositoryRoot, 'noosphere-relayer');
+const protocolRoot = path.join(repositoryRoot, 'noosphere-acp-protocol');
 
 describe('published package distribution', () => {
   it('installs from packed artifacts without repository-only files', async () => {
@@ -53,7 +56,53 @@ describe('published package distribution', () => {
       await access(path.join(packedRelayer, 'LICENSE'));
       await access(path.join(packedRelayer, 'env.example'));
       await access(path.join(packedRelayer, 'npm-shrinkwrap.json'));
+      await access(path.join(packedRelayer, 'durability.js'));
+      await access(path.join(packedRelayer, 'vendor', 'acp-protocol', 'schema.json'));
+      const dockerfile = await readFile(path.join(relayerRoot, 'Dockerfile'), 'utf8');
+      assert.match(dockerfile, /COPY --chown=node:node vendor\/acp-protocol \.\/vendor\/acp-protocol/);
+      for (const source of ['constants.js', 'head-set.js', 'index.js', 'package.json', 'schema.json', 'wire.js']) {
+        assert.equal(
+          await readFile(path.join(relayerRoot, 'vendor', 'acp-protocol', source), 'utf8'),
+          await readFile(path.join(protocolRoot, source), 'utf8'),
+          `Docker-context protocol mirror drifted: ${source}`,
+        );
+      }
+      const dockerContext = path.join(temporaryRoot, 'docker-context');
+      await mkdir(dockerContext);
+      await Promise.all([
+        copyFile(path.join(relayerRoot, 'package.json'), path.join(dockerContext, 'package.json')),
+        copyFile(path.join(relayerRoot, 'npm-shrinkwrap.json'), path.join(dockerContext, 'npm-shrinkwrap.json')),
+        cp(path.join(relayerRoot, 'vendor'), path.join(dockerContext, 'vendor'), { recursive: true }),
+      ]);
+      await execFileAsync('npm', ['ci', '--omit=dev', '--ignore-scripts'], {
+        cwd: dockerContext,
+        env: { ...process.env, npm_config_cache: cache },
+        maxBuffer: 2_000_000,
+      });
+      await execFileAsync(process.execPath, [
+        '--input-type=module', '-e', "const p = await import('@noosphere/acp-protocol'); if (!p.SYNC_PROTOCOL_VERSION) process.exit(2);",
+      ], { cwd: dockerContext, maxBuffer: 2_000_000 });
+      for (const module of [
+        'acp-protocol.js', 'exact-routes.js', 'exact-state.js',
+        'snapshot-backend.js', 'walrus-snapshot-backend.js',
+      ]) await access(path.join(packedRelayer, module));
+      for (const module of [
+        'git-state.js', 'reconcile.js', 'remote-client.js', 'sync-metadata.js', 'sync.js',
+      ]) await access(path.join(packedMcp, 'continuity', 'acp', module));
+      for (const bundled of ['package.json', 'index.js', 'schema.json']) {
+        await access(path.join(packedMcp, 'node_modules', '@noosphere', 'acp-protocol', bundled));
+      }
+      await execFileAsync(process.execPath, [
+        '--input-type=module', '-e',
+        "await import('./continuity/acp/sync.js'); const p = await import('@noosphere/acp-protocol'); if (!p.SYNC_PROTOCOL_VERSION) process.exit(2);",
+      ], { cwd: packedMcp, maxBuffer: 2_000_000 });
       await assert.rejects(access(path.join(packedMcp, 'tests')));
+      for (const forbidden of [
+        path.join(packedRelayer, '.env'),
+        path.join(packedRelayer, '.noosphere-runtime'),
+        path.join(packedMcp, '.noosphere'),
+        path.join(packedMcp, 'tests', 'fixtures'),
+      ]) await assert.rejects(access(forbidden));
 
       const installer = path.join(
         packedMcp,

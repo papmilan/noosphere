@@ -1479,7 +1479,8 @@ async function stateFromCli(root) {
   if (existing && !existing.ok) {
     throw new Error(`Unreadable .noosphere/continuity.json: ${formatAcpErrors(existing.errors)}.`);
   }
-  const decoded = existing ?? await buildInitialState(root, { clock });
+  const projectId = (await readProjectConfig(root))?.project_id;
+  const decoded = existing ?? await buildInitialState(root, { clock, projectId });
   if (!decoded.ok) throw new Error(`Cannot build ACP state: ${formatAcpErrors(decoded.errors)}`);
   if (process.argv.includes('--json')) {
     console.log(JSON.stringify(decoded.state.envelope, null, 2));

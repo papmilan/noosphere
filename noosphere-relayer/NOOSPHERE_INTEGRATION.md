@@ -106,5 +106,24 @@ The default checkpoint contains changed paths, branch and commit information,
 diff statistics, and a timestamp. It does not upload raw source diffs unless
 `privacy.include_diff` is explicitly enabled.
 
+## ACP exact-state topology
+
+Cross-machine exact synchronization requires every client to use the same
+durable relayer index. Sharing Walrus credentials alone is not sufficient.
+"walrus-backed/relayer-indexed" means Walrus replicates bytes while exact
+lookup and heads still depend on that relayer index.
+
+`GET /v1/acp/capabilities` reports `deployment_mode`, byte and index
+durability, `cross_machine_recoverable`, normative quotas, and the server-owned
+`relayer_index_id`. Local-only is durable on one host but not cross-machine.
+Shared-relayer requires durable state and snapshot volumes on one reachable
+deployment. Walrus-backed/relayer-indexed still requires that durable relayer
+index for lookup, ancestry, heads, receipts, and CAS ordering.
+
+Set `NOOSPHERE_SHARED_RELAYER=true` only when both configured paths are on that
+durable shared deployment. This release is single-relayer, not active-active.
+The public limits include the 1 MiB snapshot bound, 200-envelope ancestry
+bound, concurrent-head bound, and per-project snapshot/byte quotas.
+
 Noosphere records concise conclusions and handoffs. It does not request hidden
 chain-of-thought.

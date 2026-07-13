@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalize } from '@noosphere/acp-protocol';
 import { RECONCILIATION_POLICY_VERSION, SYNC_PROTOCOL_VERSION } from '@noosphere/acp-protocol';
+import { syncDirectoryPath, syncFilePath } from './durability.js';
 
 const METADATA_FILE = 'continuity-sync.json';
 const CONFIRMATION_LIMIT = 16;
@@ -39,10 +40,10 @@ export async function writeSyncMetadata(root, metadata) {
     await writeFile(temporary, `${JSON.stringify(normalizeMetadata(metadata), null, 2)}\n`, {
       encoding: 'utf8', mode: 0o600, flag: 'wx',
     });
-    await syncPath(temporary);
+    await syncFilePath(temporary);
     await rename(temporary, file);
     await chmod(file, 0o600);
-    await syncPath(dir);
+    await syncDirectoryPath(dir);
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined);
   }
@@ -278,4 +279,3 @@ function hashHex(bytes) { return createHash('sha256').update(bytes).digest('hex'
 function digest(value) { return `sha256:${hashHex(Buffer.from(value, 'utf8'))}`; }
 function clockMs(clock) { return typeof clock === 'function' ? clockMs(clock()) : typeof clock === 'string' ? Date.parse(clock) : Number(clock); }
 function syncError(code, cause) { return Object.assign(new Error(code, { cause }), { code }); }
-async function syncPath(target) { const handle = await open(target, 'r'); try { await handle.sync(); } finally { await handle.close(); } }

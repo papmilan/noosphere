@@ -1,0 +1,20 @@
+{
+  "name": "@noosphere/acp-protocol",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./schema.json": "./schema.json"
+  },
+  "files": [
+    "constants.js",
+    "head-set.js",
+    "index.js",
+    "schema.json",
+    "wire.js"
+  ],
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -3,13 +3,13 @@ import {
   access,
   constants,
   mkdir,
-  open,
   readFile,
   rename,
   unlink,
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
+import { syncDirectoryPath, syncFilePath } from './durability.js';
 
 const DEFAULT_RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -213,9 +213,9 @@ export class DurableStore {
       `${JSON.stringify(this.state, null, 2)}\n`,
       { encoding: 'utf8', mode: 0o600 },
     );
-    await syncPath(temporary);
+    await syncFilePath(temporary);
     await rename(temporary, this.filePath);
-    await syncPath(path.dirname(this.filePath));
+    await syncDirectoryPath(path.dirname(this.filePath));
   }
 
   async clear() {
@@ -246,10 +246,6 @@ export class DurableStore {
   }
 }
 
-async function syncPath(target) {
-  const handle = await open(target, 'r');
-  try { await handle.sync(); } finally { await handle.close(); }
-}
 
 function emptyProjectRecord() {
   return {

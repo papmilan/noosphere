@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { access, chmod, constants, mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, constants, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { syncDirectoryPath, syncFilePath } from './durability.js';
 
 const SNAPSHOT_ID = /^sha256:[0-9a-f]{64}$/;
 
@@ -74,19 +75,15 @@ async function atomicOwnerOnlyWrite(target, bytes) {
   try {
     await writeFile(temporary, bytes, { mode: 0o600, flag: 'wx' });
     await chmod(temporary, 0o600);
-    await syncPath(temporary);
+    await syncFilePath(temporary);
     await rename(temporary, target);
-    await syncPath(path.dirname(target));
+    await syncDirectoryPath(path.dirname(target));
   } catch (error) {
     await unlink(temporary).catch(() => undefined);
     throw error;
   }
 }
 
-async function syncPath(target) {
-  const handle = await open(target, 'r');
-  try { await handle.sync(); } finally { await handle.close(); }
-}
 
 function hash(value) {
   return createHash('sha256').update(value, 'utf8').digest('hex');

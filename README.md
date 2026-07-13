@@ -81,6 +81,21 @@ cat handoff.json | noosphere handoff --stdin
 noosphere handoff --file handoff.json
 ```
 
+### Exact state across machines
+
+`noosphere state sync|push|pull|history|quarantine --json` uses deterministic
+ACP envelopes. Discovery is read-only; apply requires a cached single-use
+`--confirm-remote <confirmation_id>`. Confirmations expire within five minutes.
+Advanced history requires `--allow-stale-advanced` at discovery and apply and
+renders with downgraded authority and suppressed next actions. Set
+`NOOSPHERE_ACP_SYNC=false` to disable exact remote synchronization.
+
+Cross-machine exact synchronization requires every client to use the same
+durable relayer index. Sharing Walrus credentials alone is not sufficient.
+"walrus-backed/relayer-indexed" means Walrus replicates bytes while exact
+lookup and heads still depend on that relayer index. Capabilities distinguish
+local-only, shared-relayer, and walrus-backed/relayer-indexed deployments.
+
 `.noosphere/continuity.json` is the canonical, content-addressed envelope;
 `.noosphere/continuity.md` is a derived kernel of at most 1,800 bytes that a
 fresh agent reads first. A handoff never overwrites conflicting work: a stale

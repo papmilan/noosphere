@@ -10,12 +10,13 @@
     "dev": "node --watch index.js",
     "test": "node --experimental-vm-modules --test tests/*.test.js",
     "test:live": "node scripts/live-walrus-smoke.js",
-    "check": "node --check index.js && node --check memory.js && node --check local-memory.js && node --check walrus-memory.js && node --check durable-store.js && node --check security.js && node --check credentials.js && node --check local-projects.js && node --check acp-protocol.js && node --check snapshot-backend.js && node --check walrus-snapshot-backend.js && node --check exact-state.js && node --check exact-routes.js"
+    "check": "node --check index.js && node --check memory.js && node --check local-memory.js && node --check walrus-memory.js && node --check durable-store.js && node --check durability.js && node --check security.js && node --check credentials.js && node --check local-projects.js && node --check acp-protocol.js && node --check snapshot-backend.js && node --check walrus-snapshot-backend.js && node --check exact-state.js && node --check exact-routes.js"
   },
   "files": [
     "acp-protocol.js",
     "credentials.js",
     "durable-store.js",
+    "durability.js",
     "exact-state.js",
     "exact-routes.js",
     "index.js",
@@ -26,6 +27,7 @@
     "security.js",
     "walrus-memory.js",
     "walrus-snapshot-backend.js",
+    "vendor/acp-protocol/",
     "env.example",
     "npm-shrinkwrap.json",
     "scripts/"
@@ -54,7 +56,7 @@
   "dependencies": {
     "@mysten-incubation/memwal": "0.0.7",
     "@mysten/sui": "^2.17.0",
-    "@noosphere/acp-protocol": "file:../noosphere-acp-protocol",
+    "@noosphere/acp-protocol": "file:./vendor/acp-protocol",
     "dotenv": "17.4.2",
     "express": "5.2.1"
   }

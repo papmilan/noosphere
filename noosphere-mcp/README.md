@@ -243,3 +243,25 @@ summaries. File checkpoints preserve work state; the hook preserves intent.
 Agents should never be asked to reveal hidden chain-of-thought. The public
 work journal captures only conclusions, evidence, attempted approaches, and
 next steps.
+
+### ACP exact-state synchronization
+
+Use `noosphere state sync|push|pull|history|quarantine --json` for exact ACP
+state. Discovery never applies state. Apply requires a cached single-use
+`--confirm-remote <confirmation_id>` that expires within five minutes and binds
+the snapshot, repository observation, heads, relayer index, versions, action,
+and override. A snapshot ID is not a confirmation. Advanced Git history is
+non-authoritative unless `--allow-stale-advanced` is bound at discovery and
+apply; its kernel suppresses repository-dependent next actions. Set
+`NOOSPHERE_ACP_SYNC=false` to disable remote exact synchronization.
+
+Cross-machine exact synchronization requires every client to use the same
+durable relayer index. Sharing Walrus credentials alone is not sufficient.
+"walrus-backed/relayer-indexed" means Walrus replicates bytes while exact
+lookup and heads still depend on that relayer index.
+
+The capability endpoint identifies three modes: local-only, shared-relayer,
+and walrus-backed/relayer-indexed. Handoffs remain local-first: configured
+failures retain the original bounded canonical envelope in owner-only retry
+metadata. Invalid, foreign, or expired bytes are never applied and may be
+placed in owner-only quarantine for explicit operator inspection or deletion.

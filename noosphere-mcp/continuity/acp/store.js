@@ -6,6 +6,7 @@ import { decodeEnvelope, encodeEnvelope } from './wire.js';
 import { classifyCompatibility, observeRepository } from './git-state.js';
 import { renderKernel } from './render.js';
 import { projectAdvancedTrust } from './trust-projection.js';
+import { syncDirectoryPath, syncFilePath } from './durability.js';
 
 const JSON_FILE = 'continuity.json';
 const MD_FILE = 'continuity.md';
@@ -348,8 +349,8 @@ async function staleStateLock(lockPath) {
   catch (error) { return error.code === 'ESRCH'; }
 }
 
-async function syncFile(file) { const handle = await open(file, 'r'); try { await handle.sync(); } finally { await handle.close(); } }
-async function syncDirectory(dir) { const handle = await open(dir, 'r'); try { await handle.sync(); } finally { await handle.close(); } }
+async function syncFile(file) { return syncFilePath(file); }
+async function syncDirectory(dir) { return syncDirectoryPath(dir); }
 
 function storeError(code, cause) {
   return Object.assign(new Error(code, { cause }), { code });

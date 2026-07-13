@@ -9,6 +9,7 @@ ENV NODE_ENV=production \
 WORKDIR /app
 
 COPY --chown=node:node package.json npm-shrinkwrap.json ./
+COPY --chown=node:node vendor/acp-protocol ./vendor/acp-protocol
 # npm is only needed to install dependencies; the runtime entrypoint is `node`.
 # Remove the base image's bundled npm CLI afterwards so its vendored packages
 # (e.g. picomatch, sigstore) are not shipped as an idle vulnerability surface.
@@ -17,7 +18,7 @@ RUN npm ci --omit=dev --ignore-scripts \
   && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 COPY --chown=node:node index.js memory.js local-memory.js walrus-memory.js ./
-COPY --chown=node:node durable-store.js security.js ./
+COPY --chown=node:node durable-store.js durability.js security.js ./
 COPY --chown=node:node credentials.js local-projects.js ./
 COPY --chown=node:node acp-protocol.js exact-state.js exact-routes.js snapshot-backend.js walrus-snapshot-backend.js ./
 
