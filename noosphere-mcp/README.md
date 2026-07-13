@@ -261,7 +261,9 @@ durable relayer index. Sharing Walrus credentials alone is not sufficient.
 lookup and heads still depend on that relayer index.
 
 The capability endpoint identifies three modes: local-only, shared-relayer,
-and walrus-backed/relayer-indexed. Handoffs remain local-first: configured
-failures retain the original bounded canonical envelope in owner-only retry
-metadata. Invalid, foreign, or expired bytes are never applied and may be
+and walrus-backed/relayer-indexed. Handoffs remain locally authoritative:
+configured projects reserve the exact envelope in owner-only retry metadata
+before committing local state, and a full 200-entry queue fails without
+changing local state. Network failures retain that envelope for retry.
+Invalid, foreign, or expired bytes are never applied and may be
 placed in owner-only quarantine for explicit operator inspection or deletion.

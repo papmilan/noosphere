@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { RECONCILIATION_POLICY_VERSION, SYNC_PROTOCOL_VERSION } from '@noosphere/acp-protocol';
+import { ACP_LIMITS, canonicalize, RECONCILIATION_POLICY_VERSION, SYNC_PROTOCOL_VERSION } from '@noosphere/acp-protocol';
 import { RemoteStateClient, RemoteStateError } from '../continuity/acp/remote-client.js';
 
 const SNAPSHOT = `sha256:${'a'.repeat(64)}`;
@@ -51,7 +51,22 @@ describe('RemoteStateClient', () => {
     await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl: async () => new Response(oversized, { headers: { 'x-relayer-index-id': INDEX } }) }).getHeads('p'), /response-too-large/);
     await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl: async () => new Response('{bad', { headers: { 'x-relayer-index-id': INDEX } }) }).getHeads('p'), /malformed-json/);
     await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', expectedRelayerIndexId: INDEX, fetchImpl: async () => new Response(oversized, { headers: { 'x-relayer-index-id': INDEX } }) }).getSnapshot('p', SNAPSHOT), /response-too-large/);
-    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', fetchImpl: async () => { throw new Error('must not fetch'); } }).putSnapshot('p', { value: oversized }, INDEX), /request-too-large/);
+    await assert.rejects(new RemoteStateClient({ baseUrl: 'https://x', fetchImpl: async () => { throw new Error('must not fetch'); } }).putSnapshot('p', { value: oversized }, INDEX), /snapshot-too-large/);
+  });
+
+  it('applies the snapshot quota to canonical envelope bytes rather than wrapper overhead', async () => {
+    const envelope = { value: 'x'.repeat(ACP_LIMITS.snapshotBytes - 32) };
+    assert.equal(Buffer.byteLength(canonicalize(envelope)) <= ACP_LIMITS.snapshotBytes, true);
+    let sent;
+    const client = new RemoteStateClient({
+      baseUrl: 'https://x', expectedRelayerIndexId: INDEX,
+      fetchImpl: async (_url, options) => {
+        sent = options.body;
+        return json({ created: true }, { status: 201, headers: { 'x-relayer-index-id': INDEX } });
+      },
+    });
+    await client.putSnapshot('p', envelope, INDEX);
+    assert.equal(Buffer.byteLength(sent) > ACP_LIMITS.snapshotBytes, true);
   });
 
   it('returns exact bytes and headers only when ETag matches the requested snapshot', async () => {

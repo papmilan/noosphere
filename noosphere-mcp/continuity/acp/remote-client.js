@@ -1,10 +1,12 @@
 import {
   ACP_LIMITS,
+  canonicalize,
   RECONCILIATION_POLICY_VERSION,
   SYNC_PROTOCOL_VERSION,
 } from '@noosphere/acp-protocol';
 
 const DIGEST_ID = /^sha256:[0-9a-f]{64}$/;
+const MAX_SNAPSHOT_TRANSPORT_BYTES = ACP_LIMITS.snapshotBytes + 4_096;
 
 export class RemoteStateError extends Error {
   constructor(code, { status = 0, details, cause } = {}) {
@@ -43,8 +45,11 @@ export class RemoteStateClient {
   }
 
   async putSnapshot(projectId, envelope, expectedHeadsDigest) {
+    if (Buffer.byteLength(canonicalize(envelope), 'utf8') > ACP_LIMITS.snapshotBytes) {
+      throw new RemoteStateError('snapshot-too-large');
+    }
     const body = JSON.stringify({ envelope, expected_heads_digest: expectedHeadsDigest });
-    if (Buffer.byteLength(body, 'utf8') > ACP_LIMITS.snapshotBytes) {
+    if (Buffer.byteLength(body, 'utf8') > MAX_SNAPSHOT_TRANSPORT_BYTES) {
       throw new RemoteStateError('request-too-large');
     }
     return this.request(`/v1/projects/${encodeURIComponent(projectId)}/acp/snapshots`, {

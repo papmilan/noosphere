@@ -862,6 +862,9 @@ async function processPendingJob(job) {
 }
 
 async function submitSnapshotRequest(projectId, envelope, expectedHeadsDigest) {
+  if (canonicalSize(envelope) > ACP_LIMITS.snapshotBytes) {
+    throw exactError('snapshot-too-large', 413);
+  }
   const decoded = decodeProjectStateEnvelope(envelope);
   if (!decoded.ok) throw exactError(decoded.errors[0].code, 422, decoded.errors);
   if (decoded.envelope.repository?.project_id !== projectId) {
@@ -881,6 +884,11 @@ async function submitSnapshotRequest(projectId, envelope, expectedHeadsDigest) {
   });
   if (submitted.status === 202) scheduleQueueRecovery();
   return submitted;
+}
+
+function canonicalSize(value) {
+  try { return Buffer.byteLength(canonicalize(value), 'utf8'); }
+  catch { return 0; }
 }
 
 async function recoverPendingJobs() {

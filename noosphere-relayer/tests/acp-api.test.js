@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import express from 'express';
-import { ACP_LIMITS } from '@noosphere/acp-protocol';
+import { ACP_LIMITS, canonicalize, digestHeadSet, encodeEnvelope } from '@noosphere/acp-protocol';
 import {
   createExactRouter,
   isRetryableExactError,
@@ -14,7 +14,8 @@ import {
   submitExactSnapshot,
 } from '../exact-routes.js';
 import { DurableStore } from '../durable-store.js';
-import { exactError } from '../snapshot-backend.js';
+import { ExactStateService } from '../exact-state.js';
+import { exactError, FileSnapshotBackend } from '../snapshot-backend.js';
 import { authenticationMiddleware, resolveSecurityConfig } from '../security.js';
 
 describe('ACP exact-state HTTP boundary', () => {
@@ -30,7 +31,7 @@ describe('ACP exact-state HTTP boundary', () => {
   before(async () => { const app = express(); app.use(express.json({ limit: '2mb' })); app.use('/v1', createExactRouter({ service, limits: ACP_LIMITS })); server = app.listen(0, '127.0.0.1'); await once(server, 'listening'); baseUrl = `http://127.0.0.1:${server.address().port}/v1`; });
   after(() => new Promise((resolve) => server.close(resolve)));
   it('advertises exact-state topology and normative limits', async () => { const response = await fetch(`${baseUrl}/acp/capabilities`); const body = await response.json(); assert.equal(response.status, 200); assert.equal(body.cross_machine_recoverable, false); assert.deepEqual(body.limits, ACP_LIMITS); });
-  it('maps create, replay, ETag, empty heads, and bounded history with the real index identity', async () => { const post = (envelope) => fetch(`${baseUrl}/projects/p/acp/snapshots`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ envelope, expected_heads_digest: 'empty' }) }); assert.equal((await post({ created: true })).status, 201); assert.equal((await post({ created: false })).status, 200); const snapshot = await fetch(`${baseUrl}/projects/p/acp/snapshots/${snapshotId}`); assert.equal(snapshot.headers.get('etag'), `"${snapshotId}"`); assert.equal(snapshot.headers.get('x-relayer-index-id'), `sha256:${'b'.repeat(64)}`); assert.equal(await snapshot.text(), '{"canonical":true}'); const heads = await fetch(`${baseUrl}/projects/p/acp/heads`); assert.equal(heads.headers.get('x-relayer-index-id'), `sha256:${'b'.repeat(64)}`); assert.deepEqual((await heads.json()).heads, []); const history = await fetch(`${baseUrl}/projects/p/acp/history?head=${snapshotId}&limit=1`); assert.equal(history.headers.get('x-relayer-index-id'), `sha256:${'b'.repeat(64)}`); assert.deepEqual((await history.json()).history, [{ head: snapshotId, limit: 1 }]); });
+  it('maps create, replay, ETag, empty heads, and bounded history with the real index identity', async () => { const post = (envelope) => fetch(`${baseUrl}/projects/p/acp/snapshots`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ envelope, expected_heads_digest: 'empty' }) }); assert.equal((await post({ created: true })).status, 201); assert.equal((await post({ created: false })).status, 200); const snapshot = await fetch(`${baseUrl}/projects/p/acp/snapshots/${snapshotId}`); assert.equal(snapshot.headers.get('etag'), `"${snapshotId}"`); assert.equal(snapshot.headers.get('x-relayer-index-id'), `sha256:${'b'.repeat(64)}`); assert.equal(await snapshot.text(), '{"canonical":true}'); const heads = await fetch(`${baseUrl}/projects/p/acp/heads`); assert.equal(heads.headers.get('x-relayer-index-id'), `sha256:${'b'.repeat(64)}`); const headsBody = await heads.json(); assert.deepEqual(headsBody.heads, []); assert.equal(headsBody.sync_protocol_version, 'noosphere.acp-sync/1'); assert.equal(headsBody.deployment_mode, 'local-only'); assert.equal(headsBody.exact_bytes_durable, true); assert.deepEqual(headsBody.limits, ACP_LIMITS); const history = await fetch(`${baseUrl}/projects/p/acp/history?head=${snapshotId}&limit=1`); assert.equal(history.headers.get('x-relayer-index-id'), `sha256:${'b'.repeat(64)}`); assert.deepEqual((await history.json()).history, [{ head: snapshotId, limit: 1 }]); });
   it('maps exact-state failures without leaking payloads and retains index identity', async () => { for (const [code, status] of [['stale-heads', 409], ['head-limit', 409], ['snapshot-too-large', 413], ['invalid-envelope', 422], ['project-byte-limit', 507]]) { const response = await fetch(`${baseUrl}/projects/p/acp/snapshots`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ envelope: { fail: code, status, secret: 'do-not-log' } }) }); const body = await response.json(); assert.equal(response.status, status); assert.equal(response.headers.get('x-relayer-index-id'), `sha256:${'b'.repeat(64)}`); assert.equal(body.error, code); assert.equal(JSON.stringify(body).includes('do-not-log'), false); } });
   it('genericizes unknown server failures and redacts server logs', async () => {
     const original = console.error;
@@ -88,6 +89,49 @@ describe('ACP exact-state HTTP boundary', () => {
 });
 
 describe('ACP durable queue ordering', () => {
+  it('replays an asynchronously completed exact receipt after its head advances', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'noosphere-acp-receipt-'));
+    try {
+      const store = new DurableStore({ filePath: path.join(directory, 'state.json') });
+      const exact = new ExactStateService({
+        backend: new FileSnapshotBackend({ root: path.join(directory, 'snapshots') }),
+        index: store,
+      });
+      const envelope = exactEnvelope();
+      const canonicalEnvelope = canonicalize(envelope);
+      let offline = true;
+      const service = {
+        async putSnapshot(...args) {
+          if (offline) throw Object.assign(new Error('offline'), { retryable: true });
+          return exact.putSnapshot(...args);
+        },
+      };
+      const args = {
+        projectId: 'p', envelope, canonicalEnvelope, expectedHeadsDigest: digestHeadSet([]), service, store,
+      };
+      assert.equal((await submitExactSnapshot(args)).status, 202);
+      offline = false;
+      await processAcpSnapshotJob((await store.listPending())[0], { service, store });
+      const advancedDigest = (await exact.getHeads('p')).heads_digest;
+      assert.notEqual(advancedDigest, digestHeadSet([]));
+      const replay = await submitExactSnapshot({ ...args, expectedHeadsDigest: advancedDigest });
+      assert.equal(replay.status, 200);
+      assert.equal(replay.result.deduplicated, true);
+      assert.deepEqual(await store.listPending(), []);
+      const differentSignature = structuredClone(envelope);
+      differentSignature.integrity.signature.value = 'different-detached-signature';
+      await assert.rejects(
+        submitExactSnapshot({
+          ...args, envelope: differentSignature, canonicalEnvelope: canonicalize(differentSignature),
+          expectedHeadsDigest: advancedDigest,
+        }),
+        /snapshot-submission-conflict/,
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('keeps heads invisible while queued and publishes only after restart recovery', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'noosphere-acp-queue-'));
     try {
@@ -150,13 +194,69 @@ describe('ACP durable queue ordering', () => {
       await processAcpSnapshotJob(job, { service, store });
       const replay = await submitExactSnapshot({ ...args, expectedHeadsDigest: 'heads-a' });
       assert.equal(replay.result.deduplicated, true);
-      await assert.rejects(
-        submitExactSnapshot({ ...args, expectedHeadsDigest: 'heads-b' }),
-        /stale-heads/,
-      );
+      assert.equal((await submitExactSnapshot({ ...args, expectedHeadsDigest: 'heads-b' })).result.deduplicated, true);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it('revives an identical terminal stale-heads job with freshly observed heads', async () => {
+    const store = new DurableStore({ persist: false });
+    const envelope = { snapshot_id: `sha256:${'f'.repeat(64)}` };
+    const canonicalEnvelope = JSON.stringify(envelope);
+    let offline = true;
+    const service = {
+      async putSnapshot(_project, _envelope, expected) {
+        if (offline) throw Object.assign(new Error('offline'), { retryable: true });
+        if (expected === 'heads-a') throw exactError('stale-heads', 409);
+        return { created: true, snapshot_id: envelope.snapshot_id };
+      },
+    };
+    const args = { projectId: 'p', envelope, canonicalEnvelope, service, store };
+    assert.equal((await submitExactSnapshot({ ...args, expectedHeadsDigest: 'heads-a' })).status, 202);
+    offline = false;
+    await assert.rejects(processAcpSnapshotJob((await store.listPending())[0], { service, store }), /stale-heads/);
+
+    const revived = await submitExactSnapshot({ ...args, expectedHeadsDigest: 'heads-b' });
+    assert.equal(revived.status, 202);
+    const [job] = await store.listPending();
+    assert.equal(job.expectedHeadsDigest, 'heads-b');
+    assert.notEqual(job.terminal, true);
+    await processAcpSnapshotJob(job, { service, store });
+    assert.equal((await store.getReceipt(job.key)).snapshot_id, envelope.snapshot_id);
+  });
+
+  it('recovers the second of two queued jobs after the first advances shared heads', async () => {
+    const store = new DurableStore({ persist: false });
+    const envelopes = ['1', '2'].map((char) => ({ snapshot_id: `sha256:${char.repeat(64)}` }));
+    let offline = true;
+    let headsDigest = 'empty';
+    const history = [];
+    const service = {
+      async putSnapshot(_project, envelope, expected) {
+        if (offline) throw Object.assign(new Error('offline'), { retryable: true });
+        if (expected !== headsDigest) throw exactError('stale-heads', 409);
+        history.push(envelope.snapshot_id);
+        headsDigest = `heads-${history.length}`;
+        return { created: true, snapshot_id: envelope.snapshot_id };
+      },
+    };
+    for (const envelope of envelopes) {
+      assert.equal((await submitExactSnapshot({
+        projectId: 'p', envelope, canonicalEnvelope: JSON.stringify(envelope),
+        expectedHeadsDigest: 'empty', service, store,
+      })).status, 202);
+    }
+    offline = false;
+    const jobs = await store.listPending();
+    await processAcpSnapshotJob(jobs[0], { service, store });
+    await assert.rejects(processAcpSnapshotJob(jobs[1], { service, store }), /stale-heads/);
+    assert.equal((await submitExactSnapshot({
+      projectId: 'p', envelope: envelopes[1], canonicalEnvelope: JSON.stringify(envelopes[1]),
+      expectedHeadsDigest: headsDigest, service, store,
+    })).status, 202);
+    await processAcpSnapshotJob((await store.listPending())[0], { service, store });
+    assert.deepEqual(history, envelopes.map(({ snapshot_id }) => snapshot_id));
   });
 
   it('does not queue normative quota failures', async () => {
@@ -204,3 +304,18 @@ describe('ACP durable queue ordering', () => {
     assert.equal(calls, 2);
   });
 });
+
+function exactEnvelope() {
+  return encodeEnvelope({ envelope: {
+    protocol: 'acp.project-state-envelope', schema_version: '1.0.0', snapshot_id: `sha256:${'0'.repeat(64)}`,
+    parent_snapshot_id: null, created_at: '2026-07-13T00:00:00.000Z', expires_at: null,
+    origin: { agent_id: 'test', client: 'test', session_id: null },
+    integrity: { algorithm: 'sha256', digest: '0'.repeat(64), signature: { status: 'unsigned', algorithm: null, key_id: null, value: null } },
+    permission_scope: 'project', trust: { level: 'local-unverified', reasons: [] },
+    repository: { project_id: 'p', root_identity: `sha256:${'a'.repeat(64)}`, head: null, branch: null, merge_base: null, dirty: false, workspace_fingerprint: `sha256:${'b'.repeat(64)}` },
+    phase: 'implementation', goal: { project: 'p', current_objective: 'receipt replay', success_conditions: [] },
+    plan: [], completed_work: [], decisions: [], evidence: [], assumptions: [], rejected_approaches: [], unknowns: [], blockers: [], risks: [], conflicts: [],
+    working_stance: { confidence: 'medium', momentum: 'progressing', risk_posture: 'verify-before-change', attention: [], dissatisfaction: [], successor_behavior: [] },
+    next_actions: [], references: [], extensions: {},
+  } });
+}

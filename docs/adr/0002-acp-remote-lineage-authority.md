@@ -1,6 +1,6 @@
 # ADR 0002: Reconcile ACP State by Lineage, Not Timestamp Authority
 
-- **Status:** Proposed revision awaiting review
+- **Status:** Accepted and implemented
 - **Date:** 2026-07-12
 - **Decision owners:** Noosphere maintainers
 - **Supersedes:** No prior decision
@@ -101,7 +101,8 @@ mutation.
 
 Uploading a snapshot is idempotent:
 
-- the same snapshot ID and identical bytes return the existing receipt;
+- the same project, snapshot ID, and identical canonical bytes return the
+  existing receipt even after that completed submission advances heads;
 - the same snapshot ID with different bytes is an integrity violation;
 - a new child removes its stored parent from the head set and adds itself;
 - a new concurrent snapshot adds another head;
@@ -137,9 +138,13 @@ The remote service remains responsible for:
 
 ## Failure and Availability Rules
 
-Local handoff success does not depend on remote availability. The canonical
-local write completes first. Remote upload is a queued replication step and
-may retry with the existing durable queue.
+Local handoff success does not depend on remote availability. Before changing
+local state, the coordinator durably reserves the exact canonical envelope in
+its bounded upload queue; a full queue applies backpressure without changing
+local state. Reservations are not uploadable until the canonical local write
+commits and an exact-byte transition marks them ready. Restart recovery removes
+an unmatched reservation or promotes one matching the committed local state.
+Remote upload may then retry without holding the metadata lock.
 
 A remote head becomes visible only after its snapshot bytes are durable. A
 failed upload cannot publish a dangling head. A failed head update after a

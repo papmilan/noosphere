@@ -139,6 +139,61 @@ describe('ACP sync metadata confirmations', () => {
     assert.equal(Object.keys((await readSyncMetadata(root)).confirmations).length, 16);
   });
 
+  it('preserves confirmation and upload mutations across concurrent Node processes', async () => {
+    const root = await temp();
+    await writeSyncMetadata(root, { version: 1, confirmations: {}, uploads: [] });
+    const issueScript = `
+      const [root, moduleUrl] = process.argv.slice(1);
+      const { issueConfirmation } = await import(moduleUrl);
+      const id = (c) => 'sha256:' + c.repeat(64);
+      await issueConfirmation(root, {
+        remote_snapshot_id: id('1'), local_snapshot_id: null, remote_heads_digest: id('a'),
+        repository_observation: { root_identity: id('b'), head: 'abc', branch: 'main', dirty: false, workspace_fingerprint: id('c'), ancestors: ['abc'] },
+        relayer_index_id: id('d'), sync_protocol_version: 'noosphere.acp-sync/1',
+        reconciliation_policy_version: 'noosphere.acp-reconcile/1', action: 'remote-only-restore',
+        allow_stale_advanced: false, remote_expires_at: null,
+      }, ${NOW});
+    `;
+    const uploadScript = `
+      const [root, moduleUrl] = process.argv.slice(1);
+      const { mutateSyncMetadata } = await import(moduleUrl);
+      await mutateSyncMetadata(root, (metadata) => {
+        metadata.uploads = [{ snapshot_id: 'queued', attempts: 1 }];
+      });
+    `;
+    await Promise.all([
+      execFileAsync('node', ['--input-type=module', '-e', issueScript, root, SYNC_MODULE]),
+      execFileAsync('node', ['--input-type=module', '-e', uploadScript, root, SYNC_MODULE]),
+    ]);
+    const metadata = await readSyncMetadata(root);
+    assert.equal(Object.keys(metadata.confirmations).length, 1);
+    assert.deepEqual(metadata.uploads, [{ snapshot_id: 'queued', attempts: 1 }]);
+
+    const [confirmationId] = Object.keys(metadata.confirmations);
+    const consumeScript = `
+      const [root, confirmationId, moduleUrl] = process.argv.slice(1);
+      const { consumeConfirmation } = await import(moduleUrl);
+      await consumeConfirmation(root, confirmationId, ${NOW});
+    `;
+    const retryScript = `
+      const [root, moduleUrl] = process.argv.slice(1);
+      const { mutateSyncMetadata } = await import(moduleUrl);
+      await mutateSyncMetadata(root, (fresh) => {
+        fresh.uploads[0].attempts = 2;
+        fresh.relayer_index_id = 'sha256:' + 'e'.repeat(64);
+      });
+    `;
+    await Promise.all([
+      execFileAsync('node', ['--input-type=module', '-e', consumeScript, root, confirmationId, SYNC_MODULE]),
+      execFileAsync('node', ['--input-type=module', '-e', retryScript, root, SYNC_MODULE]),
+    ]);
+    const consumed = await readSyncMetadata(root);
+    assert.equal(Object.keys(consumed.confirmations).length, 0);
+    assert.equal(consumed.uploads[0].attempts, 2);
+    assert.equal(consumed.relayer_index_id, id('e'));
+
+  });
+
   it('never reclaims an old lock owned by a live PID', async () => {
     const root = await temp();
     await mkdir(path.join(root, '.noosphere'), { recursive: true });

@@ -11,6 +11,7 @@
     "constants.js",
     "head-set.js",
     "index.js",
+    "project-state.js",
     "schema.json",
     "wire.js"
   ],

@@ -101,10 +101,9 @@ describe('ExactStateService head index', () => {
     const malformed = makeEnvelope().envelope;
     delete malformed.goal;
     const resigned = encodeEnvelope({ envelope: malformed });
-    await assert.rejects(
-      service.putSnapshot(PROJECT, resigned, EMPTY_HEAD_DIGEST),
-      /missing-required-field/,
-    );
+    await assert.rejects(service.putSnapshot(PROJECT, resigned, EMPTY_HEAD_DIGEST),
+      (error) => error.details.some(({ code }) => code === 'required'));
+    assert.deepEqual((await service.getHeads(PROJECT)).heads, []);
   });
 
   it('starts with the canonical empty digest and sorts independent heads', async () => {
@@ -224,16 +223,16 @@ describe('ExactStateService head index', () => {
 
   it('stores an expired envelope as non-actionable history', async () => {
     const { service } = await fixture();
-    const expired = makeEnvelope({ expiresAt: '2000-01-01T00:00:00.000Z' });
+    const expired = makeEnvelope({ expiresAt: '2026-07-12T00:00:01.000Z' });
     const stored = await service.putSnapshot(PROJECT, expired.envelope, EMPTY_HEAD_DIGEST, {
-      now: () => Date.parse('2026-07-12T00:00:00.000Z'),
+      now: () => Date.parse('2026-07-13T00:00:00.000Z'),
     });
     assert.equal(stored.actionable, false);
     assert.deepEqual((await service.getSnapshot(PROJECT, expired.id)).bytes, expired.bytes);
     assert.equal((await service.getHistory(PROJECT, { head: expired.id }))[0].snapshot_id, expired.id);
     assert.deepEqual((await service.getHeads(PROJECT)).head_records, [{
       snapshot_id: expired.id,
-      expires_at: '2000-01-01T00:00:00.000Z',
+      expires_at: '2026-07-12T00:00:01.000Z',
       actionable: false,
     }]);
   });

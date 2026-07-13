@@ -94,6 +94,29 @@ export class DurableStore {
     return this.state.pending[key];
   }
 
+  async reviveStalePending(key, job) {
+    await this.initialize();
+    return this.enqueueWrite(async () => {
+      const current = this.state.pending[key];
+      const canRevive = current?.terminal === true
+        && current.terminalError?.code === 'stale-heads'
+        && current.projectId === job.projectId
+        && current.canonicalEnvelope === job.canonicalEnvelope
+        && current.expectedHeadsDigest !== job.expectedHeadsDigest;
+      if (!canRevive) return { revived: false, pending: structuredClone(current || null) };
+      this.state.pending[key] = {
+        ...job,
+        key,
+        attempts: 0,
+        createdAt: this.now(),
+        lastError: null,
+        nextAttemptAt: null,
+      };
+      if (this.persist) await this.writeState();
+      return { revived: true, pending: structuredClone(this.state.pending[key]) };
+    });
+  }
+
   async markAttempt(key, error, { nextAttemptAt = null } = {}) {
     await this.initialize();
     const pending = this.state.pending[key];

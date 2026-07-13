@@ -31,6 +31,26 @@ export async function readSyncMetadata(root) {
 }
 
 export async function writeSyncMetadata(root, metadata) {
+  return mutateSyncMetadata(root, (current) => {
+    for (const key of Object.keys(current)) delete current[key];
+    Object.assign(current, structuredClone(metadata));
+  });
+}
+
+export async function mutateSyncMetadata(root, mutation) {
+  return withMetadataLock(root, async () => {
+    const metadata = await readSyncMetadata(root);
+    const result = await mutation(metadata);
+    await writeSyncMetadataUnlocked(root, metadata);
+    return result;
+  });
+}
+
+export function withUploadReservationLock(root, operation) {
+  return withOwnerLock(root, 'continuity-upload.lock', 'upload-lock-timeout', operation);
+}
+
+async function writeSyncMetadataUnlocked(root, metadata) {
   const file = metadataPath(root);
   const dir = path.dirname(file);
   await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -61,57 +81,46 @@ export function digestRepositoryObservation(observed) {
 }
 
 export async function issueConfirmation(root, observation, clock = Date.now()) {
-  return withMetadataLock(root, () => issueConfirmationLocked(root, observation, clock));
-}
-
-async function issueConfirmationLocked(root, observation, clock) {
   validateObservation(observation);
   const now = clockMs(clock);
-  const metadata = await readSyncMetadata(root);
-  pruneConfirmations(metadata.confirmations, now);
-  if (Object.keys(metadata.confirmations).length >= CONFIRMATION_LIMIT) {
-    throw syncError('confirmation-limit');
-  }
-  const remoteExpiry = observation.remote_expires_at == null
-    ? Number.POSITIVE_INFINITY : Date.parse(observation.remote_expires_at);
-  const expires = Math.min(now + CONFIRMATION_TTL_MS, remoteExpiry);
-  if (!Number.isFinite(expires) || expires <= now) {
-    if (remoteExpiry !== Number.POSITIVE_INFINITY) throw syncError('confirmation-expired');
-  }
-  const body = {
-    remote_snapshot_id: observation.remote_snapshot_id,
-    local_snapshot_id: observation.local_snapshot_id ?? null,
-    remote_heads_digest: observation.remote_heads_digest,
-    repository_observation_digest: digestRepositoryObservation(observation.repository_observation),
-    relayer_index_id: observation.relayer_index_id,
-    sync_protocol_version: observation.sync_protocol_version,
-    reconciliation_policy_version: observation.reconciliation_policy_version,
-    action: observation.action,
-    allow_stale_advanced: observation.allow_stale_advanced === true,
-    issued_at: new Date(now).toISOString(),
-    expires_at: new Date(Number.isFinite(expires) ? expires : now + CONFIRMATION_TTL_MS).toISOString(),
-  };
-  const confirmationDigest = digest(canonicalize(body));
-  const confirmation = {
-    ...body,
-    confirmation_id: confirmationDigest,
-    digest: confirmationDigest,
-  };
-  metadata.confirmations[confirmation.confirmation_id] = confirmation;
-  await writeSyncMetadata(root, metadata);
-  return structuredClone(confirmation);
+  return mutateSyncMetadata(root, (metadata) => {
+    pruneConfirmations(metadata.confirmations, now);
+    if (Object.keys(metadata.confirmations).length >= CONFIRMATION_LIMIT) {
+      throw syncError('confirmation-limit');
+    }
+    const remoteExpiry = observation.remote_expires_at == null
+      ? Number.POSITIVE_INFINITY : Date.parse(observation.remote_expires_at);
+    const expires = Math.min(now + CONFIRMATION_TTL_MS, remoteExpiry);
+    if (!Number.isFinite(expires) || expires <= now) {
+      if (remoteExpiry !== Number.POSITIVE_INFINITY) throw syncError('confirmation-expired');
+    }
+    const body = {
+      remote_snapshot_id: observation.remote_snapshot_id,
+      local_snapshot_id: observation.local_snapshot_id ?? null,
+      remote_heads_digest: observation.remote_heads_digest,
+      repository_observation_digest: digestRepositoryObservation(observation.repository_observation),
+      relayer_index_id: observation.relayer_index_id,
+      sync_protocol_version: observation.sync_protocol_version,
+      reconciliation_policy_version: observation.reconciliation_policy_version,
+      action: observation.action,
+      allow_stale_advanced: observation.allow_stale_advanced === true,
+      issued_at: new Date(now).toISOString(),
+      expires_at: new Date(Number.isFinite(expires) ? expires : now + CONFIRMATION_TTL_MS).toISOString(),
+    };
+    const confirmationDigest = digest(canonicalize(body));
+    const confirmation = { ...body, confirmation_id: confirmationDigest, digest: confirmationDigest };
+    metadata.confirmations[confirmation.confirmation_id] = confirmation;
+    return structuredClone(confirmation);
+  });
 }
 
 export async function consumeConfirmation(root, confirmationId, clock = Date.now()) {
-  return withMetadataLock(root, () => consumeConfirmationLocked(root, confirmationId, clock));
-}
-
-async function consumeConfirmationLocked(root, confirmationId, clock) {
-  const metadata = await readSyncMetadata(root);
-  const confirmation = metadata.confirmations[confirmationId];
-  if (!confirmation) throw syncError('confirmation-missing');
-  delete metadata.confirmations[confirmationId];
-  await writeSyncMetadata(root, metadata);
+  const confirmation = await mutateSyncMetadata(root, (metadata) => {
+    const found = metadata.confirmations[confirmationId];
+    if (!found) throw syncError('confirmation-missing');
+    delete metadata.confirmations[confirmationId];
+    return structuredClone(found);
+  });
   try { validateConfirmation(confirmation); } catch { throw syncError('confirmation-invalid'); }
   const { confirmation_id, digest: storedDigest, ...body } = confirmation;
   const expected = digest(canonicalize(body));
@@ -211,10 +220,14 @@ function validateConfirmation(value) {
 }
 
 async function withMetadataLock(root, operation) {
+  return withOwnerLock(root, 'continuity-sync.lock', 'confirmation-lock-timeout', operation);
+}
+
+async function withOwnerLock(root, filename, timeoutCode, operation) {
   const directory = path.join(root, '.noosphere');
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
-  const lockPath = path.join(directory, 'continuity-sync.lock');
+  const lockPath = path.join(directory, filename);
   const token = randomUUID();
   let handle;
   for (let attempt = 0; attempt < 500; attempt += 1) {
@@ -229,7 +242,7 @@ async function withMetadataLock(root, operation) {
       else await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
-  if (!handle) throw syncError('confirmation-lock-timeout');
+  if (!handle) throw syncError(timeoutCode);
   try { return await operation(); } finally {
     await handle.close();
     const current = await readFile(lockPath, 'utf8').then(JSON.parse).catch(() => null);

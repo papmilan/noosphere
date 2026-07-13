@@ -31,10 +31,10 @@ import { runSetupWizard, runCredentialsCommand } from './credentials-cli.js';
 import { runOllamaSession } from './ollama.js';
 import { workspaceFingerprintHex as workspaceFingerprint, observeRepository, classifyCompatibility } from './acp/git-state.js';
 import { readState, writeState, validateState, buildInitialState } from './acp/store.js';
-import { decodeEnvelope } from './acp/wire.js';
+import { decodeEnvelope, encodeEnvelope } from './acp/wire.js';
 import { applyUpdate } from './acp/merge.js';
 import { renderKernel } from './acp/render.js';
-import { canonicalize } from '@noosphere/acp-protocol';
+import { ACP_LIMITS, canonicalize } from '@noosphere/acp-protocol';
 import { RemoteStateClient } from './acp/remote-client.js';
 import {
   applyRemoteConfirmation,
@@ -44,7 +44,7 @@ import {
   pushLocalState,
   syncProjectState,
 } from './acp/sync.js';
-import { readSyncMetadata, writeSyncMetadata } from './acp/sync-metadata.js';
+import { mutateSyncMetadata, readSyncMetadata, withUploadReservationLock } from './acp/sync-metadata.js';
 
 const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -1445,9 +1445,18 @@ async function handoffFromCli(root) {
   } else {
     next = { state: update.state, conflicts: update.state.runtime.conflicts };
   }
-  const written = await writeState(root, next.state, { clock });
-  if (await readProjectConfig(root)) {
-    await enqueueExactUpload(root, written.envelope);
+  const configured = await readProjectConfig(root);
+  const replicate = configured && acpSyncEnabled();
+  const exactEnvelope = encodeEnvelope(next.state);
+  const written = replicate
+    ? await withUploadReservationLock(root, async () => {
+      await enqueueExactUpload(root, exactEnvelope);
+      const committed = await writeState(root, next.state, { clock });
+      await finalizeExactUpload(root, committed.envelope);
+      return committed;
+    })
+    : await writeState(root, next.state, { clock });
+  if (replicate) {
     await retryExactUploads(root).catch(() => undefined);
   }
   const conflicts = next.conflicts ?? [];
@@ -1677,44 +1686,98 @@ async function enqueueExactUpload(root, envelope) {
     throw Object.assign(new Error('upload-job-too-large'), { code: 'upload-job-too-large' });
   }
   const snapshotId = envelope.snapshot_id;
-  const metadata = await readSyncMetadata(root);
-  const uploads = (metadata.uploads || []).filter((job) => job.snapshot_id !== snapshotId);
-  uploads.push({
-    snapshot_id: snapshotId,
-    canonical_envelope: canonicalEnvelope,
-    attempts: 0,
-    next_attempt_at: new Date(0).toISOString(),
+  await mutateSyncMetadata(root, (metadata) => {
+    const uploads = (metadata.uploads || []).filter((job) => job.snapshot_id !== snapshotId);
+    if (uploads.length >= ACP_LIMITS.ancestryEnvelopes) {
+      throw Object.assign(new Error('upload-queue-limit'), { code: 'upload-queue-limit' });
+    }
+    uploads.push({
+      snapshot_id: snapshotId,
+      canonical_envelope: canonicalEnvelope,
+      ready: false,
+      attempts: 0,
+      next_attempt_at: new Date(0).toISOString(),
+    });
+    metadata.uploads = uploads;
   });
-  metadata.uploads = uploads.slice(-16);
-  await writeSyncMetadata(root, metadata);
+}
+
+async function finalizeExactUpload(root, envelope) {
+  const canonicalEnvelope = canonicalize(envelope);
+  await mutateSyncMetadata(root, (metadata) => {
+    const queued = (metadata.uploads || []).find((job) => job.snapshot_id === envelope.snapshot_id
+      && job.canonical_envelope === canonicalEnvelope);
+    if (!queued) throw Object.assign(new Error('upload-reservation-missing'), { code: 'upload-reservation-missing' });
+    queued.ready = true;
+  });
+}
+
+async function resolveExactUploadReservations(root) {
+  const metadata = await readSyncMetadata(root);
+  if (!(metadata.uploads || []).some((job) => job.ready === false)) return;
+  await withUploadReservationLock(root, async () => {
+    const current = await readState(root);
+    const committed = current?.ok ? canonicalize(current.state.envelope) : null;
+    await mutateSyncMetadata(root, (fresh) => {
+      fresh.uploads = (fresh.uploads || []).filter((job) => {
+        if (job.ready !== false) return true;
+        if (committed !== null && job.canonical_envelope === committed
+          && job.snapshot_id === current.state.envelope.snapshot_id) {
+          job.ready = true;
+          return true;
+        }
+        return current?.ok === false;
+      });
+    });
+  });
 }
 
 async function retryExactUploads(root, options = {}) {
   if (!acpSyncEnabled()) return;
-  const metadata = await readSyncMetadata(root);
-  const jobs = metadata.uploads || [];
+  await resolveExactUploadReservations(root);
+  const jobs = ((await readSyncMetadata(root)).uploads || []).filter((job) => job.ready !== false);
   if (jobs.length === 0) return;
   const config = options.config || await loadConfig(root);
   const deps = options.deps || await syncDependencies(root, config);
   const now = Date.now();
   for (const job of jobs) {
     if (Date.parse(job.next_attempt_at) > now) continue;
-    job.attempts = Math.min(Number(job.attempts || 0) + 1, 32);
+    const attempts = Math.min(Number(job.attempts || 0) + 1, 32);
     try {
       const envelope = validateExactUploadJob(job);
       const capabilities = await deps.client.capabilities();
       const heads = await deps.client.getHeads(config.project_id);
-      await deps.client.putSnapshot(config.project_id, envelope, heads.heads_digest);
-      metadata.relayer_index_id = capabilities.relayer_index_id;
-      metadata.uploads = metadata.uploads.filter((entry) => entry.snapshot_id !== job.snapshot_id);
+      const response = await deps.client.putSnapshot(config.project_id, envelope, heads.heads_digest);
+      await mutateSyncMetadata(root, (fresh) => {
+        fresh.relayer_index_id = capabilities.relayer_index_id;
+        const queued = (fresh.uploads || []).find((entry) => entry.snapshot_id === job.snapshot_id
+          && entry.canonical_envelope === job.canonical_envelope);
+        if (!queued) return;
+        if (response.pending === true) {
+          queued.attempts = attempts;
+          queued.next_attempt_at = retryAt(now, attempts);
+          queued.last_error = 'remote-pending';
+        } else {
+          fresh.uploads = fresh.uploads.filter((entry) => entry !== queued);
+        }
+      });
     } catch (error) {
-      const retryBase = Math.max(1, Number(process.env.NOOSPHERE_ACP_RETRY_BASE_MS) || 1_000);
-      const delay = Math.min(retryBase * (2 ** Math.min(job.attempts - 1, 8)), 5 * 60_000);
-      job.next_attempt_at = new Date(now + delay).toISOString();
-      job.last_error = String(error.code || 'remote-unavailable').slice(0, 80);
+      await mutateSyncMetadata(root, (fresh) => {
+        const queued = (fresh.uploads || []).find((entry) => entry.snapshot_id === job.snapshot_id
+          && entry.canonical_envelope === job.canonical_envelope);
+        if (!queued) return;
+        queued.attempts = attempts;
+        queued.next_attempt_at = retryAt(now, attempts);
+        queued.last_error = String(error.code || 'remote-unavailable').slice(0, 80);
+      });
     }
   }
-  await writeSyncMetadata(root, metadata);
+}
+
+function retryAt(now, attempts) {
+  const retryBase = Math.max(1, Number(process.env.NOOSPHERE_ACP_RETRY_BASE_MS) || 1_000);
+  const delay = Math.min(retryBase * (2 ** Math.min(attempts - 1, 8)), 5 * 60_000);
+  return new Date(now + delay).toISOString();
 }
 
 function validateExactUploadJob(job) {

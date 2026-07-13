@@ -1,7 +1,7 @@
 # ACP Remote Exact-State Synchronization Design
 
 **Date:** 2026-07-12
-**Status:** Revised specification awaiting user review
+**Status:** Accepted and implemented
 **Normative decision:** `docs/adr/0002-acp-remote-lineage-authority.md`
 
 ## Purpose
@@ -68,12 +68,16 @@ preserved as an explicit conflict.
 ### Normal handoff
 
 1. An agent runs `noosphere handoff --file update.json` or `--stdin`.
-2. Noosphere validates, merges, and atomically writes local state.
-3. If remote synchronization is enabled, the canonical envelope is enqueued
-   for exact upload.
-4. The command succeeds locally even when the network is unavailable and
+2. Noosphere validates and merges the handoff.
+3. If remote synchronization is enabled, Noosphere durably reserves the exact
+   canonical envelope in the upload queue, applying backpressure at 200 jobs
+   without changing local state.
+4. Noosphere atomically writes local state, then attempts exact upload without
+   holding the metadata lock. The reservation remains `ready: false` until an
+   exact snapshot-ID and canonical-byte match marks it uploadable.
+5. The command succeeds locally even when the network is unavailable and
    reports `remote: queued` when replication is pending.
-5. The background manager retries pending uploads and updates the local sync
+6. The background manager retries pending uploads and updates the local sync
    receipt when the snapshot becomes a remote head.
 
 ### New machine
@@ -333,8 +337,10 @@ Responses:
 - `422`: invalid ACP envelope, digest, project binding, or parent metadata;
 - `507`: per-project snapshot-count or indexed-byte quota is exhausted.
 
-The idempotency key is `acp-snapshot:<snapshot_id>`. A completed receipt may be
-replayed without uploading or changing heads again.
+The idempotency key is `acp-snapshot:<snapshot_id>`. A completed receipt binds
+the project and exact canonical envelope bytes, and that identical submission
+may be replayed without uploading or changing heads again even when the caller
+now observes the post-completion head digest. Same-ID byte changes conflict.
 
 ### List heads
 
@@ -592,6 +598,16 @@ not pretend an evidence reference is a causal merge.
   they do not log envelope contents or access tokens.
 
 ## Queue and Crash Consistency
+
+The local coordinator never evicts an unacknowledged upload. It holds at most
+200 exact envelopes, matching the bounded ancestry window, and rejects a new
+handoff before local-state mutation when that bound is full. Every upload,
+confirmation, and relayer-identity mutation uses the same cross-process locked
+metadata transaction; network calls happen outside that lock and their results
+are applied only to a freshly read matching job. A separate dead-owner-safe
+operation lock spans reservation, local commit, and readiness. After a crash,
+an unready reservation is promoted only when current local state matches its
+exact ID and canonical bytes; otherwise it is removed without upload.
 
 The existing durable queue gains an ACP snapshot job type. Pending jobs retain
 canonical bytes in the owner-only runtime state until the backend confirms

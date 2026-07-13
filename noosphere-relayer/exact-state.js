@@ -17,6 +17,9 @@ export class ExactStateService {
   }
 
   async putSnapshot(projectId, envelope, expectedHeadsDigest, options = {}) {
+    if (canonicalSize(envelope) > this.limits.snapshotBytes) {
+      throw exactError('snapshot-too-large', 413);
+    }
     const decoded = decodeProjectStateEnvelope(envelope);
     if (!decoded.ok) throw exactError(decoded.errors[0].code, 400, decoded.errors);
     if (decoded.envelope.repository?.project_id !== projectId) throw exactError('project-id-mismatch', 400);
@@ -128,6 +131,11 @@ export class ExactStateService {
       reconciliation_policy_version: RECONCILIATION_POLICY_VERSION,
     };
   }
+}
+
+function canonicalSize(value) {
+  try { return Buffer.byteLength(canonicalize(value), 'utf8'); }
+  catch { return 0; }
 }
 
 export function recomputeProject(record) {
