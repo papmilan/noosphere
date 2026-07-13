@@ -105,9 +105,14 @@ already exists to build on.
 
 ### Surviving objections that shaped the design
 
-1. **Half-life.** Execution state decays in hours, not days. It is a stack
-   frame, not a ledger. → Mandatory short expiry (default 24 h, hard max
-   7 d), aggressive demotion on drift, current-only storage.
+1. **Half-life.** Execution state usually decays in hours — but the decay is
+   caused by *repository and intent drift*, not by the passage of time
+   itself. A Friday-evening checkpoint over an untouched repository is
+   exactly as valid on Monday morning; a wall-clock expiry would void it and
+   force the replanning this feature exists to eliminate, in the most common
+   real resume case. The design therefore measures staleness instead of
+   assuming it: **evidence voids, age demotes** (Section 6). It remains a
+   stack frame, not a ledger: current-only storage, single writer.
 2. **Plan-file overlap.** → The step graph *is* the checkbox plan,
    formalized; the CLI imports/exports the existing markdown checkbox syntax.
 3. **Extraction friction.** If a checkpoint costs more than replanning, the
@@ -120,9 +125,9 @@ already exists to build on.
 **Build it — as a second ACP object type on the existing infrastructure, not
 a separate subsystem.** Four constraints are non-negotiable and enforced by
 schema and validation, not convention: no code payloads; advisory-only
-rendering; three-level freshness binding; mandatory short expiry. If any of
-the four were dropped, the honest recommendation would be to abandon the
-feature.
+rendering; three-level freshness binding; evidence-based voiding with
+mandatory age demotion. If any of the four were dropped, the honest
+recommendation would be to abandon the feature.
 
 ---
 
@@ -168,7 +173,7 @@ Top-level envelope (content-addressed, same integrity block as ACP):
 | `project_snapshot_id` | snapshot id | **hard bind** to the Project State this cursor traverses |
 | `repository` | observation | head, branch, dirty, workspace_fingerprint at checkpoint time (measured) |
 | `origin` | agent_id, client, session_id | |
-| `created_at` / `expires_at` | ISO-8601 | `expires_at` **required**; default now+24 h, max now+7 d |
+| `created_at` / `expires_at` | ISO-8601 | `expires_at` **required**; the *actionable → aged* boundary, never a deletion time; default now+72 h (covers the weekend gap), max now+30 d |
 | `cursor` | Cursor | where the agent stood |
 | `steps[]` | Step[] | the execution graph, ≤ 64 |
 | `frontier` | Frontier | searched / ruled-out, ≤ 10 + 10 |
@@ -229,9 +234,31 @@ Checkpoints are event-driven and cheap; v1 has no daemon and no timer.
 | Every N operations / context-pressure heuristics | **deferred** — v2, needs agent-harness cooperation | — |
 
 Lifecycle: `checkpoint` (atomic replace of current state) → `resume`
-(validate, adopt or void) → `expire` (past `expires_at`: history-only) →
-`clear`. Current-only, like Project State v1: the durable ledger remains the
-journal and the exact-state sync layer.
+(validate, adopt or void) → `age` → `clear`.
+
+**Expiry semantics — evidence voids, age demotes.** The wall clock never
+destroys or invalidates data, because time is a proxy for staleness and the
+design already measures staleness directly (binding, fingerprint, per-step
+hashes). Injection risk also does not grow with age — a no-payload advisory
+checkpoint is equally impotent on day 1 and day 30 — only *relevance* decays,
+and relevance is the reader's judgment to make, given honest information:
+
+- **Actionable** (now < `expires_at`, all evidence checks pass): full cursor
+  rendering, next steps prominent.
+- **Aged** (past `expires_at`, evidence checks still pass): demoted to an
+  aged-checkpoint summary — age shown first, no `NEXT`-step prominence —
+  adopted only by explicit `noosphere exec resume --accept-aged`.
+- **Void** (any evidence check fails — Project State superseded without
+  ancestry, Git diverged/foreign, envelope invalid): not actionable at any
+  age; per-step hash salvage still applies where the envelope itself is
+  valid.
+- **History cap** (30 d past `created_at`): renders as a single line only,
+  so an abandoned project's checkpoint cannot occupy the kernel forever.
+
+The rendered kernel always states the checkpoint's age (`recorded 3 h ago`),
+fresh or aged, so the successor calibrates trust from data rather than from
+a hidden timer. Current-only, like Project State v1: the durable ledger
+remains the journal and the exact-state sync layer.
 
 ## 7. Extraction Pipeline
 
@@ -258,8 +285,9 @@ Executed in order by `noosphere exec show` / adapter load; first failure
 demotes:
 
 1. **Envelope:** schema, canonical digest, `payload-forbidden` scan,
-   forbidden-key/secret scan, expiry. Fail → state is unreadable or
-   history-only; cursor void.
+   forbidden-key/secret scan. Fail → cursor void. Age is evaluated here but
+   is not a failure: past `expires_at` sets the `aged` demotion flag
+   (Section 6) and validation continues.
 2. **Project State binding:** `project_snapshot_id` equals the current local
    ACP snapshot → full trust. Is an ancestor of it → `rebased` (cursor
    demoted to advisory summary; steps re-checked individually). Unrelated or
@@ -289,8 +317,11 @@ renderer. Same inputs, byte-identical output.
   `oneLine()`; `verify.command` renders in backticks as a record with length
   cap, and is never executed by Noosphere.
 - **Secrets:** same recursive forbidden-pattern validation as ACP v1.
-- **Expiry mandatory**; expired state renders one line: "expired execution
-  checkpoint from <date> exists; run `noosphere exec show --history`."
+- **Age demotion mandatory**; `expires_at` is required and past it the
+  cursor loses `NEXT`-step prominence and needs explicit acceptance
+  (Section 6). Past the 30 d history cap it renders one line: "aged
+  execution checkpoint from <date> exists; run `noosphere exec show
+  --history`."
 - **Trust levels:** the envelope reuses ACP signature states; unsigned
   remote execution state is never auto-adopted (v1 is local-only anyway).
 
