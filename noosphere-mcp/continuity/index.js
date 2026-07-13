@@ -34,6 +34,15 @@ import { readState, writeState, validateState, buildInitialState } from './acp/s
 import { decodeEnvelope, encodeEnvelope } from './acp/wire.js';
 import { applyUpdate } from './acp/merge.js';
 import { renderKernel } from './acp/render.js';
+import { EXECUTION_PROTOCOL } from './acp/execution-state.js';
+import { classifyExecutionFreshness } from './acp/execution-freshness.js';
+import { renderExecutionKernel } from './acp/execution-render.js';
+import {
+  clearExecutionState,
+  executionPaths,
+  readExecutionState,
+  writeExecutionState,
+} from './acp/execution-store.js';
 import { ACP_LIMITS, canonicalize } from '@noosphere/acp-protocol';
 import { RemoteStateClient } from './acp/remote-client.js';
 import {
@@ -58,6 +67,7 @@ const DEFAULT_READ_TIMEOUT_MS = 30_000;
 const DEFAULT_BASELINE_HISTORY_COMMITS = 50;
 const MAX_BASELINE_HISTORY_COMMITS = 200;
 const MAX_HANDOFF_BYTES = 1_048_576;
+const EXECUTION_DEFAULT_TTL_MS = 72 * 60 * 60 * 1000;
 const MANAGED_START = '<!-- noosphere:continuity:start -->';
 const MANAGED_END = '<!-- noosphere:continuity:end -->';
 const ALL_ADAPTERS = ['codex', 'claude', 'gemini', 'cursor', 'mcp'];
@@ -166,6 +176,9 @@ try {
       break;
     case 'state':
       await stateFromCli(projectDir);
+      break;
+    case 'exec':
+      await execFromCli(projectDir);
       break;
     case 'setup':
       await runSetupWizard();
@@ -1531,6 +1544,187 @@ function formatAcpErrors(errors) {
   return (errors ?? []).map((error) => `${error.path} ${error.code}`).join('; ') || 'unknown error';
 }
 
+
+async function execFromCli(root) {
+  await assertGitRepository(root);
+  const sub = process.argv[3];
+  const now = new Date().toISOString();
+  if (sub === 'checkpoint') return execCheckpoint(root, now);
+  if (sub === 'show') return execShow(root, now);
+  if (sub === 'import-plan') return execImportPlan(root, process.argv[4], now);
+  if (sub === 'clear') {
+    await clearExecutionState(root);
+    console.log('Execution checkpoint cleared.');
+    return;
+  }
+  throw new Error('Usage: noosphere exec <checkpoint|show|import-plan|clear> [--file <json> | --stdin | --json]');
+}
+
+async function execCheckpoint(root, now) {
+  const raw = await readHandoffSource();
+  let asserted;
+  try {
+    asserted = JSON.parse(raw);
+  } catch {
+    throw new Error('Execution checkpoint input is not valid JSON.');
+  }
+  const envelope = await buildMeasuredExecutionEnvelope(root, asserted, now);
+  const written = await writeExecutionState(root, envelope, { now });
+  console.log(`Execution checkpoint stored (${written.envelope.integrity.digest.slice(0, 12)}…).`);
+  console.log(`Advisory kernel: ${executionPaths(root).markdown}`);
+}
+
+async function execShow(root, now) {
+  const read = await readExecutionState(root, { now });
+  if (read === null) {
+    console.log('No execution checkpoint. Create one with `noosphere exec checkpoint --file <json>`.');
+    return;
+  }
+  if (!read.ok) {
+    throw new Error(`Unreadable .noosphere/execution.json: ${formatAcpErrors(read.errors)}.`);
+  }
+  if (process.argv.includes('--json')) {
+    console.log(JSON.stringify(read.state.envelope, null, 2));
+    return;
+  }
+  const verdict = await classifyAgainstRepository(root, read.state, now);
+  console.log(renderExecutionKernel(read.state, { verdict, now }));
+}
+
+// Resume-time freshness with real inputs: the current Project State supplies
+// the binding target and the Git verdict (execution trust chains through the
+// project snapshot), and target files are re-hashed from the working tree.
+async function classifyAgainstRepository(root, execution, now) {
+  const project = await readState(root, { clock: now });
+  const currentSnapshotId = project && project.ok ? project.state.envelope.snapshot_id : null;
+  const ancestorIds = project && project.ok && project.state.envelope.parent_snapshot_id
+    ? [project.state.envelope.parent_snapshot_id]
+    : [];
+  const compatibility = project && project.ok
+    ? classifyCompatibility(project.state, await observeRepository(root))
+    : { status: 'unknown', trustDowngrade: 3, actionable: false, reasons: ['no ACP project state to bind against'] };
+  const fileHashes = {};
+  for (const step of execution.envelope.steps) {
+    if (step.target.content_hash == null) continue;
+    fileHashes[step.target.file] = await hashWorkingFile(root, step.target.file);
+  }
+  return classifyExecutionFreshness({
+    execution,
+    currentSnapshotId,
+    ancestorIds,
+    compatibility,
+    fileHashes,
+    now,
+  });
+}
+
+async function execImportPlan(root, planPath, now) {
+  if (!planPath) throw new Error('Usage: noosphere exec import-plan <markdown-file>');
+  const resolved = path.resolve(planPath);
+  const markdown = await readFile(resolved, 'utf8');
+  const boxes = [...markdown.matchAll(/^[-*] \[([ xX])\] (.+)$/gm)];
+  if (!boxes.length) throw new Error('No markdown checkboxes (`- [ ]` / `- [x]`) found in the plan.');
+  const relativePlan = path.relative(root, resolved) || path.basename(resolved);
+  let cursorStep = null;
+  const steps = boxes.map(([, mark, text], index) => {
+    const done = mark !== ' ';
+    const id = `s${index + 1}`;
+    const status = done ? 'done' : (cursorStep ? 'pending' : 'current');
+    if (!done && !cursorStep) cursorStep = id;
+    return {
+      id,
+      parent_step_id: null,
+      kind: 'task',
+      status,
+      target: { file: relativePlan, symbol: null, content_hash: null },
+      goal: text.trim().slice(0, 240),
+      verify: { command: `cat ${relativePlan}`.slice(0, 200), expectation: 'step checked off in the plan' },
+    };
+  });
+  const asserted = {
+    origin: { agent_id: 'plan-import', client: 'noosphere-cli', session_id: null },
+    cursor: {
+      step_id: cursorStep ?? steps[steps.length - 1].id,
+      status: 'planning',
+      opened_files: [relativePlan],
+      target: { file: relativePlan, symbol: null, purpose: 'Continue the imported plan.' },
+    },
+    steps,
+    frontier: { searched: [], ruled_out: [] },
+    working_notes: [],
+  };
+  const envelope = await buildMeasuredExecutionEnvelope(root, asserted, now);
+  await writeExecutionState(root, envelope, { now });
+  console.log(`Imported ${steps.length} steps from ${relativePlan}.`);
+}
+
+// The honesty boundary: repository facts, target-file hashes, the Project
+// State binding, and validation results are measured here and override
+// whatever the structured input asserted.
+async function buildMeasuredExecutionEnvelope(root, asserted, now) {
+  let project = await readState(root, { clock: now });
+  if (project && !project.ok) {
+    throw new Error(`Unreadable .noosphere/continuity.json: ${formatAcpErrors(project.errors)}.`);
+  }
+  if (!project) {
+    project = await buildInitialState(root, { clock: now });
+    if (!project.ok) throw new Error(`Cannot build ACP state: ${formatAcpErrors(project.errors)}`);
+    await writeState(root, project.state, { clock: now });
+  }
+  const observed = await observeRepository(root);
+  const steps = Array.isArray(asserted.steps) ? asserted.steps : [];
+  const measuredSteps = [];
+  for (const step of steps) {
+    const file = step?.target?.file;
+    measuredSteps.push({
+      ...step,
+      target: {
+        ...step?.target,
+        content_hash: typeof file === 'string' ? await hashWorkingFile(root, file) : null,
+      },
+    });
+  }
+  return {
+    protocol: EXECUTION_PROTOCOL,
+    project_snapshot_id: project.state.envelope.snapshot_id,
+    created_at: now,
+    expires_at: typeof asserted.expires_at === 'string'
+      ? asserted.expires_at
+      : new Date(Date.parse(now) + EXECUTION_DEFAULT_TTL_MS).toISOString(),
+    origin: {
+      agent_id: asserted.origin?.agent_id ?? 'unknown-agent',
+      client: asserted.origin?.client ?? 'noosphere-cli',
+      session_id: asserted.origin?.session_id ?? null,
+    },
+    repository: {
+      project_id: project.state.envelope.repository.project_id,
+      head: observed.head,
+      branch: observed.branch,
+      dirty: observed.dirty,
+      workspace_fingerprint: observed.workspace_fingerprint,
+    },
+    cursor: asserted.cursor,
+    steps: measuredSteps,
+    frontier: asserted.frontier ?? { searched: [], ruled_out: [] },
+    validation: { last_command: null, last_result: null, failing_tests: [] },
+    working_notes: asserted.working_notes ?? [],
+    integrity: {
+      algorithm: 'sha256',
+      digest: '0'.repeat(64),
+      signature: { status: 'unsigned', algorithm: null, key_id: null, value: null },
+    },
+  };
+}
+
+async function hashWorkingFile(root, file) {
+  try {
+    const bytes = await readFile(path.resolve(root, file));
+    return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+  } catch {
+    return null;
+  }
+}
+
 async function restoreFromWalrus(root) {
   const config = await loadConfig(root);
   console.log(`Restoring project state from Walrus for ${config.project_id}...`);
@@ -2663,6 +2857,12 @@ Commands:
               Use --confirm-remote <confirmation_id> to apply a cached pull;
               advanced history also requires --allow-stale-advanced
   handoff     Merge a structured ACP handoff (--file <path> or --stdin)
+  exec        Advisory execution checkpoints for agent handoffs:
+              exec checkpoint (--file <json> | --stdin) records where work
+              stood; repository facts and file hashes are measured, never
+              trusted from input. exec show [--json] validates freshness and
+              prints the bounded advisory kernel. exec import-plan <md-file>
+              converts a markdown checkbox plan. exec clear removes it.
 
 Ollama examples:
   noosphere ollama qwen3-coder
