@@ -2,13 +2,19 @@
   "name": "@noosphere/acp-protocol",
   "version": "0.1.0",
   "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
   "main": "index.js",
   "exports": {
     ".": "./index.js",
-    "./schema.json": "./schema.json"
+    "./schema.json": "./schema.json",
+    "./execution-schema.json": "./execution-schema.json"
   },
   "files": [
     "constants.js",
+    "execution-schema.json",
+    "execution-state.js",
     "head-set.js",
     "index.js",
     "project-state.js",

@@ -215,6 +215,8 @@ noosphere state
 noosphere state --json
 noosphere state validate
 noosphere handoff --file handoff.json
+noosphere exec checkpoint --file checkpoint.json
+noosphere exec show
 noosphere uninstall
 ```
 
@@ -243,6 +245,29 @@ summaries. File checkpoints preserve work state; the hook preserves intent.
 Agents should never be asked to reveal hidden chain-of-thought. The public
 work journal captures only conclusions, evidence, attempted approaches, and
 next steps.
+
+### ACP execution continuity
+
+`noosphere exec checkpoint` (`--file <json>` or `--stdin`) records an advisory
+execution cursor: the current step, target file and symbol, remaining steps
+with per-file content hashes, the search frontier, and short working notes.
+Repository facts, file hashes, the Project State binding, and validation
+results are measured by the CLI and override whatever the input asserted —
+an agent cannot claim tests pass or hashes match. Payloads are forbidden:
+fenced code, diff syntax, and multi-line prose are rejected at validation.
+
+`noosphere exec show` re-validates before rendering: envelope digest, binding
+to the current ACP snapshot, Git compatibility, and per-step target status.
+Status is `target-unchanged`, `target-changed`, `target-missing`, or `unknown`;
+a matching hash does not prove a step remains valid, so assumptions and
+dependencies still require validation. Agents are stored separately under
+`.noosphere/execution/<canonical-agent>.json|md`; overlapping non-void targets
+render `CONTENTION` before candidate next-step guidance. Age uses CLI-observed
+creation time plus the 72-hour policy TTL (30-day retention), never submitted
+expiry. `exec clear` requires `--current`, `--agent <id>`, or
+`--all --confirm-all`. Rebased salvage uses only the direct retained validated
+parent and is therefore conservative and limited. `depends_on_files` is
+deferred rather than inferred unsafely in v1.
 
 ### ACP exact-state synchronization
 

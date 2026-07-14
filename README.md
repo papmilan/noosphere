@@ -90,6 +90,36 @@ Advanced history requires `--allow-stale-advanced` at discovery and apply and
 renders with downgraded authority and suppressed next actions. Set
 `NOOSPHERE_ACP_SYNC=false` to disable exact remote synchronization.
 
+### Execution continuity
+
+Project State answers "what is true"; an execution checkpoint answers "what
+was I about to do." `noosphere exec checkpoint` records an advisory cursor
+over the current Project State snapshot — current step, target file and
+symbol, remaining steps, search frontier — while the CLI itself measures
+every fact a successor will trust: repository state, per-step file hashes,
+and the snapshot binding. Asserted lies are overwritten by measurement, and
+the checkpoint can never carry code, diffs, or multi-line payloads.
+
+```bash
+noosphere exec checkpoint --file checkpoint.json   # record where work stood
+noosphere exec show                                # validated advisory kernel
+noosphere exec import-plan docs/plan.md            # adopt a checkbox plan
+noosphere exec clear --current
+```
+
+On resume the checkpoint is re-validated: evidence voids (superseded
+snapshot, diverged Git); each target is classified honestly as
+`target-unchanged`, `target-changed`, `target-missing`, or `unknown`.
+`target-unchanged` only proves the target bytes match: assumptions and
+dependencies still require validation, so no step is automatically actionable.
+`depends_on_files` is deferred rather than inferred unsafely in v1.
+Age demotes past the 72-hour policy boundary and retention is 30 days; neither
+value is accepted from checkpoint input. Checkpoints are per canonical agent in
+`.noosphere/execution/<agent>.json|md`; overlapping live targets render a
+visible `CONTENTION` warning. `exec clear` requires `--current`, `--agent`, or
+`--all --confirm-all`. Local rebased salvage follows only the directly retained
+validated parent, so it is deliberately conservative and limited.
+
 Cross-machine exact synchronization requires every client to use the same
 durable relayer index. Sharing Walrus credentials alone is not sufficient.
 "walrus-backed/relayer-indexed" means Walrus replicates bytes while exact

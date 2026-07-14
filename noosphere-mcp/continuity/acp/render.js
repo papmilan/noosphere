@@ -89,7 +89,7 @@ function conflictLine(conflict) {
 // characters. The kernel is a line-oriented projection an agent reads, so any
 // such character is collapsed to a space to stop stored text from forging kernel
 // lines (fake freshness, conflicts, or NEXT actions).
-function oneLine(value) {
+export function oneLine(value) {
   return String(value).replace(/[\r\n\t\f\v\u0085\u2028\u2029]+/g, ' ');
 }
 
