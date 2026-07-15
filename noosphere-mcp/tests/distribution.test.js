@@ -60,7 +60,8 @@ describe('published package distribution', () => {
       await access(path.join(packedRelayer, 'vendor', 'acp-protocol', 'schema.json'));
       const dockerfile = await readFile(path.join(relayerRoot, 'Dockerfile'), 'utf8');
       assert.match(dockerfile, /COPY --chown=node:node vendor\/acp-protocol \.\/vendor\/acp-protocol/);
-      for (const source of ['constants.js', 'head-set.js', 'index.js', 'package.json', 'schema.json', 'wire.js']) {
+      const protocolManifest = JSON.parse(await readFile(path.join(protocolRoot, 'package.json'), 'utf8'));
+      for (const source of [...protocolManifest.files, 'package.json']) {
         assert.equal(
           await readFile(path.join(relayerRoot, 'vendor', 'acp-protocol', source), 'utf8'),
           await readFile(path.join(protocolRoot, source), 'utf8'),

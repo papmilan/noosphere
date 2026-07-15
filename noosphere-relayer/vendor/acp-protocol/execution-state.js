@@ -32,6 +32,7 @@ export const executionPolicy = Object.freeze({
   maxFrontierItems: 10,
   maxOpenedFiles: 16,
   maxFailingTests: 32,
+  maxFutureCreatedAtMs: 5 * 60 * 1000,
 });
 
 const CURSOR_STATUSES = ['planning', 'before-edit', 'mid-edit', 'verifying', 'blocked', 'handoff'];
@@ -42,7 +43,8 @@ const SIGNATURE_STATUSES = ['unsigned', 'local-unverified', 'signed'];
 
 export function createExecutionState(envelope, { clock, policy = executionPolicy } = {}) {
   const normalized = normalizeEnvelope(envelope);
-  const errors = validateEnvelope(normalized, { ...executionPolicy, ...policy });
+  const effectivePolicy = { ...executionPolicy, ...policy };
+  const errors = validateEnvelope(normalized, effectivePolicy, clock);
   if (errors.length) return { ok: false, errors: orderErrors(errors) };
 
   const runtime = buildRuntime(normalized, clock);
@@ -55,7 +57,7 @@ export function createExecutionState(envelope, { clock, policy = executionPolicy
   };
 }
 
-function validateEnvelope(envelope, limits) {
+function validateEnvelope(envelope, limits, clock) {
   const errors = [];
   if (!isObject(envelope)) {
     error(errors, '$', 'invalid-type', 'envelope must be an object');
@@ -81,6 +83,11 @@ function validateEnvelope(envelope, limits) {
     error(errors, '$.project_snapshot_id', 'invalid-snapshot-id', 'must be a sha256 snapshot id');
   }
   timestamp(envelope.created_at, '$.created_at', errors);
+  const observedNow = typeof clock === 'string' ? Date.parse(clock) : Date.now();
+  if (validTimestamp(envelope.created_at) && Number.isFinite(observedNow)
+    && Date.parse(envelope.created_at) > observedNow + limits.maxFutureCreatedAtMs) {
+    error(errors, '$.created_at', 'future-created-at', 'created_at is implausibly ahead of the observed clock');
+  }
   if (envelope.expires_at == null) {
     error(errors, '$.expires_at', 'missing-expiry', 'expires_at is required; age demotion needs a boundary');
   } else {

@@ -4,10 +4,11 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-const CLI = new URL('../continuity/index.js', import.meta.url).pathname;
+const CLI = fileURLToPath(new URL('../continuity/index.js', import.meta.url));
 const dirs = [];
 
 async function repo() {
