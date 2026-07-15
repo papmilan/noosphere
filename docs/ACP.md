@@ -90,10 +90,20 @@ ACP envelopes.
 
 - Discovery is read-only; apply requires a cached single-use
   `--confirm-remote <confirmation_id>`. Confirmations expire within five
-  minutes.
+  minutes and bind the snapshot, repository observation, heads, relayer
+  index, versions, action, and override. A snapshot ID is not a
+  confirmation.
 - Advanced history requires `--allow-stale-advanced` at both discovery and
-  apply, and renders with downgraded authority and suppressed next actions.
+  apply, and renders with downgraded authority and suppressed
+  repository-dependent next actions.
 - Set `NOOSPHERE_ACP_SYNC=false` to disable exact remote synchronization.
+
+Handoffs remain locally authoritative: configured projects reserve the exact
+envelope in owner-only retry metadata before committing local state, and a
+full 200-entry queue fails without changing local state. Network failures
+retain that envelope for retry. Invalid, foreign, or expired bytes are never
+applied and may be placed in owner-only quarantine for explicit operator
+inspection or deletion.
 
 Cross-machine exact synchronization requires every client to use the same
 durable relayer index. Sharing Walrus credentials alone is not sufficient.

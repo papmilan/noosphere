@@ -223,21 +223,19 @@ noosphere uninstall
 `noosphere activate` may also be used explicitly from an IDE terminal. It
 works from any nested folder inside the repository.
 
-### ACP continuity kernel
+### Agent handoff (ACP)
 
-`noosphere state` renders a deterministic, at-most-1,800-byte continuity kernel
-from a local-first ACP project-state envelope. It captures externally shareable
-state only — objective, decisions, evidence, assumptions, conflicts, blockers,
-risks, and next actions — never hidden reasoning, secrets, or raw chat. The
-canonical envelope lives in `.noosphere/continuity.json` and its derived kernel
-in `.noosphere/continuity.md`.
+`noosphere state` prints what is true — objective, decisions, evidence,
+blockers, next actions — and `noosphere handoff` merges a structured handoff
+from `--file <path>` or `--stdin` without ever silently overwriting prior
+work. `noosphere exec checkpoint` records what an agent was about to do, and
+`noosphere exec show` re-validates it before the next agent resumes. The CLI
+measures repository facts and file hashes itself, so a checkpoint cannot
+claim tests pass or carry code to the next agent. `noosphere state sync`
+extends the same state across machines.
 
-`noosphere handoff` merges a structured handoff from `--file <path>` or
-`--stdin`. The merge is conservative: a stale update appends only new distinct
-assertions, and any change to an existing assertion, contested supersession, or
-competing priority-1 action becomes an explicit unresolved conflict rather than
-silently overwriting prior work. `noosphere state validate` verifies the
-envelope digest, schema, kernel projection, and repository compatibility.
+Protocol semantics — validation rules, freshness classification, kernel
+budgets, and exact-sync requirements — live in [docs/ACP.md](../docs/ACP.md).
 
 The Claude Code SessionEnd hook remains available for richer reasoning
 summaries. File checkpoints preserve work state; the hook preserves intent.
@@ -245,50 +243,3 @@ summaries. File checkpoints preserve work state; the hook preserves intent.
 Agents should never be asked to reveal hidden chain-of-thought. The public
 work journal captures only conclusions, evidence, attempted approaches, and
 next steps.
-
-### ACP execution continuity
-
-`noosphere exec checkpoint` (`--file <json>` or `--stdin`) records an advisory
-execution cursor: the current step, target file and symbol, remaining steps
-with per-file content hashes, the search frontier, and short working notes.
-Repository facts, file hashes, the Project State binding, and validation
-results are measured by the CLI and override whatever the input asserted —
-an agent cannot claim tests pass or hashes match. Payloads are forbidden:
-fenced code, diff syntax, and multi-line prose are rejected at validation.
-
-`noosphere exec show` re-validates before rendering: envelope digest, binding
-to the current ACP snapshot, Git compatibility, and per-step target status.
-Status is `target-unchanged`, `target-changed`, `target-missing`, or `unknown`;
-a matching hash does not prove a step remains valid, so assumptions and
-dependencies still require validation. Agents are stored separately under
-`.noosphere/execution/<canonical-agent>.json|md`; overlapping non-void targets
-render `CONTENTION` before candidate next-step guidance. Age uses CLI-observed
-creation time plus the 72-hour policy TTL (30-day retention), never submitted
-expiry. `exec clear` requires `--current`, `--agent <id>`, or
-`--all --confirm-all`. Rebased salvage uses only the direct retained validated
-parent and is therefore conservative and limited. `depends_on_files` is
-deferred rather than inferred unsafely in v1.
-
-### ACP exact-state synchronization
-
-Use `noosphere state sync|push|pull|history|quarantine --json` for exact ACP
-state. Discovery never applies state. Apply requires a cached single-use
-`--confirm-remote <confirmation_id>` that expires within five minutes and binds
-the snapshot, repository observation, heads, relayer index, versions, action,
-and override. A snapshot ID is not a confirmation. Advanced Git history is
-non-authoritative unless `--allow-stale-advanced` is bound at discovery and
-apply; its kernel suppresses repository-dependent next actions. Set
-`NOOSPHERE_ACP_SYNC=false` to disable remote exact synchronization.
-
-Cross-machine exact synchronization requires every client to use the same
-durable relayer index. Sharing Walrus credentials alone is not sufficient.
-"walrus-backed/relayer-indexed" means Walrus replicates bytes while exact
-lookup and heads still depend on that relayer index.
-
-The capability endpoint identifies three modes: local-only, shared-relayer,
-and walrus-backed/relayer-indexed. Handoffs remain locally authoritative:
-configured projects reserve the exact envelope in owner-only retry metadata
-before committing local state, and a full 200-entry queue fails without
-changing local state. Network failures retain that envelope for retry.
-Invalid, foreign, or expired bytes are never applied and may be
-placed in owner-only quarantine for explicit operator inspection or deletion.
