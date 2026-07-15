@@ -413,10 +413,7 @@ export async function watchProject(root, options = {}) {
     options.debounceMs || config.checkpoint_debounce_ms;
   const refreshMs =
     options.refreshMs || config.context_refresh_ms;
-  let lastFingerprint = await workspaceFingerprint(
-    root,
-    config.privacy.share_journal,
-  );
+  let lastFingerprint = await workspaceFingerprint(root);
   const previousState =
     (await readJson(path.join(root, '.noosphere', 'state.json'))) || {};
   let baselinePending =
@@ -445,10 +442,7 @@ export async function watchProject(root, options = {}) {
 
   const pollTimer = setInterval(async () => {
     try {
-      const fingerprint = await workspaceFingerprint(
-        root,
-        config.privacy.share_journal,
-      );
+      const fingerprint = await workspaceFingerprint(root);
       if (fingerprint !== lastFingerprint) {
         lastFingerprint = fingerprint;
         pendingSince = Date.now();
@@ -898,10 +892,7 @@ export async function buildWorkspaceSnapshot(root, config) {
     head,
     changed_files: changedFiles,
     diff_stat: diffStat || 'No tracked diff statistics available.',
-    workspace_fingerprint: await workspaceFingerprint(
-      root,
-      config.privacy.share_journal,
-    ),
+    workspace_fingerprint: await workspaceFingerprint(root),
     captured_at: new Date().toISOString(),
     raw_diff_included: config.privacy.include_diff,
     journal_present: await fileHasJournalEntries(root),
@@ -1292,13 +1283,10 @@ async function loadConfig(root) {
   };
 }
 
-async function workspaceFingerprint(root, includeJournal = false) {
-  const [status, diff, journal] = await Promise.all([
+async function workspaceFingerprint(root) {
+  const [status, diff] = await Promise.all([
     git(root, ['status', '--porcelain=v1']),
     git(root, ['diff', '--no-ext-diff', '--binary', '--', '.']),
-    readFile(path.join(root, '.noosphere', 'journal.md'), 'utf8').catch(
-      () => '',
-    ),
   ]);
   const lines = status
     .split('\n')
@@ -1324,7 +1312,6 @@ async function workspaceFingerprint(root, includeJournal = false) {
       status: lines,
       diff,
       untracked: untrackedState,
-      journal: includeJournal ? journal : '',
     }),
   );
 }
@@ -1463,7 +1450,7 @@ async function restoreFromWalrus(root) {
         '  noosphere credentials status',
         '',
         'Or switch to local-only mode without Walrus:',
-        '  noosphere setup --demo',
+        '  noosphere setup --local',
       ].join('\n'),
     );
   }
@@ -2127,7 +2114,7 @@ function relayerDownError(url) {
       'NOOSPHERE_RELAYER_URL or relayer_url in .noosphere/config.json.',
       '',
       'To try Noosphere without Walrus credentials, run:',
-      '  noosphere setup --demo',
+      '  noosphere setup --local',
     ].join('\n'),
   );
 }
@@ -2333,7 +2320,7 @@ Commands:
   install     Install Noosphere and automatic user startup
   uninstall   Remove the user installation and background services
   doctor      Check the installed lifecycle and credentials
-  setup       First-time setup wizard (add --demo for local-only mode)
+  setup       First-time setup wizard (add --local for local-only mode)
   credentials Inspect, migrate, or rotate Walrus Memory credentials
   run-relayer Run the relayer in the foreground (when background services
               are blocked by AV/UAC)

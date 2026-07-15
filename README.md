@@ -225,7 +225,6 @@ The same project memory is available through multiple open interfaces:
 | `noosphere` CLI | Terminal agents and scripts |
 | HTTP API | IDEs, web apps, agent frameworks, and custom clients |
 | MCP | Agents that support the Model Context Protocol |
-| Browser dashboard | Manual remember, recall, and project management |
 
 ## Master prompts survive tool switches
 
@@ -256,8 +255,8 @@ cat updated-plan.md | noosphere master-prompt --replace
 ```
 
 For agents that do not expose prompt lifecycle events, pin the prompt once
-through the command above, the HTTP API, or the dashboard. Every agent can
-then read the same exact file.
+through the command above or the HTTP API. Every agent can then read the same
+exact file.
 
 Agents determine what has already been done from three separate evidence
 layers:
@@ -323,14 +322,14 @@ Codex / Claude Code / Cursor / IDE / CLI / HTTP / MCP
        files + CLI + HTTP API + project watcher
                          |
                          v
-               Official Walrus Memory SDK
-          semantic indexing + managed Seal flow
+                 Configured memory backend
+        local JSON file or Walrus Memory SDK
                          |
-              +----------+----------+
-              |                     |
-              v                     v
-      Walrus blob storage     Sui account control
-      encrypted memories      owner + delegate access
+             +-----------+-----------+
+             |                       |
+             v                       v
+       Local file memory      Walrus blob storage
+       one-machine use        encrypted remote recall
 ```
 
 ### Walrus
@@ -364,9 +363,9 @@ Requirements:
 
 - Node.js 22 or newer;
 - npm;
-- a Walrus Memory account and delegate key for shared remote memory.
+- a Walrus Memory account and delegate key if you want shared remote memory.
 
-### 1. Run the local demo
+### 1. Choose local file or Walrus Memory
 
 ```sh
 cd noosphere-relayer
@@ -376,8 +375,9 @@ npm run demo
 
 Open [http://127.0.0.1:3001](http://127.0.0.1:3001).
 
-Demo mode uses a gitignored local file. It is useful for interface testing but
-does not provide cross-machine Walrus memory.
+Local file mode uses a gitignored JSON file on this machine. It is useful for
+people who do not want Walrus credentials, but it does not provide cross-machine
+Walrus memory.
 
 ### 2. Connect Walrus Memory
 
@@ -392,6 +392,7 @@ Create or manage credentials in the
 MEMWAL_NETWORK=mainnet
 MEMWAL_ACCOUNT_ID=0x...
 MEMWAL_PRIVATE_KEY=...
+NOOSPHERE_MEMORY_BACKEND=walrus-memory
 DEMO_MODE=false
 ```
 
@@ -423,13 +424,6 @@ The installer:
 
 The lifecycle installer supports macOS, Linux, and Windows.
 
-For macOS or Linux, the public installer performs the same setup and falls
-back to the current GitHub source until the npm packages are published:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/papmilan/noosphere/main/noosphere-relayer/public/install.sh | sh
-```
-
 ### 4. Register a project
 
 Entering a Git repository from an integrated shell activates it automatically.
@@ -438,9 +432,7 @@ You can also register it explicitly:
 ```sh
 noosphere register --path /absolute/path/to/repository
 ```
-
-For projects opened only through a GUI IDE, use the Projects section at
-[http://127.0.0.1:3001/#projects](http://127.0.0.1:3001/#projects).
+Use the same command for projects opened only through a GUI IDE.
 
 Noosphere does not scan the entire computer. Repositories are registered
 explicitly or through the shell hook. Add `.noosphere-ignore` to opt out.
@@ -554,9 +546,9 @@ Idempotency-Key: <unique-action-id>
 }
 ```
 
-A successful response includes the Walrus blob ID, managed memory ID, and
-project namespace. If Walrus is temporarily unavailable, the API returns an
-accepted queued response and retries from durable local state.
+A successful response includes the configured backend's memory identifier,
+managed memory ID, and project namespace. If Walrus is temporarily unavailable,
+the API returns an accepted queued response and retries from durable local state.
 
 ### Recall relevant memory
 
@@ -709,7 +701,7 @@ require bearer authentication and explicit CORS origins.
 
 ```text
 noosphere-relayer/
-  index.js                 HTTP API and local dashboard
+  index.js                 HTTP API and setup endpoints
   memory.js                Portable record serialization
   walrus-memory.js         Walrus Memory and Sui account adapter
   durable-store.js         Restart-safe queue and receipts
@@ -717,7 +709,6 @@ noosphere-relayer/
   local-projects.js        Local project controls
   credentials.js           Credential loading
   MEMORY_SECURITY.md       Encryption and authorization boundary
-  public/                  Browser dashboard
 
 noosphere-mcp/
   continuity/              CLI, watcher, context refresh

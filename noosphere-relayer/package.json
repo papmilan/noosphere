@@ -1,28 +1,28 @@
 {
   "name": "noosphere-relayer",
   "version": "2.0.4",
-  "description": "Walrus Memory relay server for Noosphere cross-agent project memory",
+  "description": "Local-file or Walrus Memory relay server for Noosphere cross-agent project memory",
   "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "demo": "DEMO_MODE=true node index.js",
+    "demo": "NOOSPHERE_MEMORY_BACKEND=local-file node index.js",
     "dev": "node --watch index.js",
     "test": "node --experimental-vm-modules --test tests/*.test.js",
     "test:live": "node scripts/live-walrus-smoke.js",
-    "check": "node --check index.js && node --check memory.js && node --check walrus-memory.js && node --check durable-store.js && node --check security.js && node --check credentials.js && node --check local-projects.js && node --check public/app.js"
+    "check": "node --check index.js && node --check memory.js && node --check local-memory.js && node --check walrus-memory.js && node --check durable-store.js && node --check security.js && node --check credentials.js && node --check local-projects.js"
   },
   "files": [
     "credentials.js",
     "durable-store.js",
     "index.js",
+    "local-memory.js",
     "local-projects.js",
     "memory.js",
     "security.js",
     "walrus-memory.js",
     "env.example",
     "npm-shrinkwrap.json",
-    "public/",
     "scripts/"
   ],
   "keywords": [

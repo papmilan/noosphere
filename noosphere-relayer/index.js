@@ -11,7 +11,9 @@ import {
   retryOperation,
 } from './durable-store.js';
 import {
+  MEMORY_BACKENDS,
   memoryStore,
+  normalizeMemoryBackend,
   parseMemory,
   serializeMemory,
 } from './memory.js';
@@ -123,7 +125,6 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: '2mb' }));
-app.use(express.static(path.join(directory, 'public')));
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'Noosphere' });
@@ -171,12 +172,12 @@ app.get('/.well-known/noosphere.json', (req, res) => {
     name: 'Noosphere',
     version: '2.0.0',
     description:
-      'Persistent shared project memory for AI agents, built on Walrus Memory.',
+      'Persistent shared project memory for AI agents, with local-file or Walrus Memory storage.',
     architecture: {
-      memory: 'Official Walrus Memory managed relayer',
-      encryption: 'Seal encryption managed by Walrus Memory',
-      search: 'Walrus Memory semantic recall',
-      access_control: 'Walrus Memory account and delegate permissions',
+      memory: 'Local file storage or the official Walrus Memory managed relayer',
+      encryption: 'Local filesystem permissions or Seal encryption managed by Walrus Memory',
+      search: 'Local recency recall or Walrus Memory semantic recall',
+      access_control: 'Local machine access or Walrus Memory account and delegate permissions',
       custom_smart_contract: false,
     },
     security: {
@@ -400,6 +401,18 @@ app.get(
   '/v1/local/credentials/status',
   localProjectControl(securityConfig),
   (_req, res) => {
+    if (memoryStore.mode === MEMORY_BACKENDS.LOCAL_FILE) {
+      res.json({
+        success: true,
+        configured: true,
+        backend: MEMORY_BACKENDS.LOCAL_FILE,
+        memory_backend: MEMORY_BACKENDS.LOCAL_FILE,
+        account_id: null,
+        network: null,
+      });
+      return;
+    }
+
     const status = new CredentialStore('default').status();
     const environmentConfigured = Boolean(
       process.env.MEMWAL_ACCOUNT_ID && process.env.MEMWAL_PRIVATE_KEY,
@@ -408,6 +421,7 @@ app.get(
     res.json({
       success: true,
       configured: secureStoreConfigured || environmentConfigured,
+      memory_backend: MEMORY_BACKENDS.WALRUS,
       backend: secureStoreConfigured
         ? status.backend
         : environmentConfigured
@@ -426,7 +440,24 @@ app.post(
   localProjectControl(securityConfig),
   async (req, res, next) => {
     try {
-      const credentials = validateCredentialSetupBody(req.body);
+      const setup = validateCredentialSetupBody(req.body);
+      if (setup.memoryBackend === MEMORY_BACKENDS.LOCAL_FILE) {
+        process.env.NOOSPHERE_MEMORY_BACKEND = MEMORY_BACKENDS.LOCAL_FILE;
+        process.env.DEMO_MODE = 'false';
+        localCredentialService.reloadMemoryStore();
+        res.status(201).json({
+          success: true,
+          configured: true,
+          backend: MEMORY_BACKENDS.LOCAL_FILE,
+          memory_backend: MEMORY_BACKENDS.LOCAL_FILE,
+          account_id: null,
+          network: null,
+          smoke: null,
+        });
+        return;
+      }
+
+      const credentials = setup.credentials;
       await localCredentialService.validateCredentials(credentials);
 
       const store = localCredentialService.createStore();
@@ -439,6 +470,8 @@ app.post(
       for (const [key, value] of Object.entries(credentials)) {
         process.env[key] = value;
       }
+      process.env.NOOSPHERE_MEMORY_BACKEND = MEMORY_BACKENDS.WALRUS;
+      process.env.DEMO_MODE = 'false';
       localCredentialService.reloadMemoryStore();
 
       let smoke = null;
@@ -450,6 +483,7 @@ app.post(
         success: true,
         configured: true,
         backend: storage.backend,
+        memory_backend: MEMORY_BACKENDS.WALRUS,
         encrypted_at_rest: storage.encryptedAtRest,
         account_id: credentials.MEMWAL_ACCOUNT_ID,
         network: credentials.MEMWAL_NETWORK,
@@ -903,6 +937,22 @@ function validateCredentialSetupBody(body) {
     throw badRequest('Request body must be a JSON object');
   }
 
+  let memoryBackend;
+  try {
+    memoryBackend = normalizeMemoryBackend(
+      body.memory_backend || body.backend || body.storage || MEMORY_BACKENDS.WALRUS,
+    );
+  } catch {
+    throw badRequest('memory_backend must be "local-file" or "walrus-memory"');
+  }
+
+  if (memoryBackend === MEMORY_BACKENDS.LOCAL_FILE) {
+    return {
+      memoryBackend,
+      credentials: null,
+    };
+  }
+
   const accountId = requireNonEmptyString(body.account_id, 'account_id');
   const privateKey = requireNonEmptyString(body.private_key, 'private_key');
   const network =
@@ -917,9 +967,12 @@ function validateCredentialSetupBody(body) {
   }
 
   return {
-    MEMWAL_ACCOUNT_ID: accountId,
-    MEMWAL_PRIVATE_KEY: normalizePrivateKey(privateKey),
-    MEMWAL_NETWORK: network,
+    memoryBackend,
+    credentials: {
+      MEMWAL_ACCOUNT_ID: accountId,
+      MEMWAL_PRIVATE_KEY: normalizePrivateKey(privateKey),
+      MEMWAL_NETWORK: network,
+    },
   };
 }
 
@@ -1054,7 +1107,7 @@ function buildOpenApiDocument(baseUrl) {
       title: 'Noosphere API',
       version: '2.0.0',
       description:
-        'Thin agent-memory API backed by the official Walrus Memory service.',
+        'Thin agent-memory API backed by local-file or Walrus Memory storage.',
     },
     servers: [{ url: baseUrl }],
     components: {
@@ -1099,7 +1152,7 @@ function buildOpenApiDocument(baseUrl) {
             },
           },
           responses: {
-            201: { description: 'Memory stored through Walrus Memory' },
+            201: { description: 'Memory stored through the configured backend' },
           },
         },
       },

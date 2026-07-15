@@ -35,26 +35,33 @@ export async function runSetupWizard({
   args = process.argv,
   relayerEnvPath = defaultRelayerEnvPath(),
 } = {}) {
-  if (args.includes('--demo')) {
-    await enableDemoMode(relayerEnvPath);
+  printBlock([
+    '',
+    '╔══════════════════════════════════════════════════════════╗',
+    '║              Noosphere — First-Time Setup                ║',
+    '╚══════════════════════════════════════════════════════════╝',
+    '',
+    'Noosphere can store your project memory locally or in Walrus Memory.',
+    'Local file mode stays on this machine; Walrus syncs shared memory',
+    'through the official Walrus Memory network built on Sui.',
+    '',
+  ]);
+
+  const selectedBackend = await chooseSetupBackend(args, promptUser);
+  if (selectedBackend === 'local-file') {
+    await enableLocalFileMode(relayerEnvPath);
     return;
   }
 
-  console.log('');
-  console.log('╔══════════════════════════════════════════════════════════╗');
-  console.log('║              Noosphere — First-Time Setup                ║');
-  console.log('╚══════════════════════════════════════════════════════════╝');
-  console.log('');
-  console.log('Noosphere stores your project memory in Walrus Memory,');
-  console.log('a decentralized storage network built on Sui blockchain.');
-  console.log('');
-  console.log('You need two things:');
-  console.log('  1. A Walrus Memory account ID   (starts with 0x)');
-  console.log('  2. A delegate private key       (64 hexadecimal characters)');
-  console.log('');
-  console.log('Just want to try Noosphere without on-chain credentials?');
-  console.log('  Re-run with --demo for local in-memory mode (no Walrus).');
-  console.log('');
+  printBlock([
+    '',
+    'Walrus Memory setup needs two things:',
+    '  1. A Walrus Memory account ID   (starts with 0x)',
+    '  2. A delegate private key       (64 hexadecimal characters)',
+    '',
+    'Prefer local-only memory? Re-run with --local.',
+    '',
+  ]);
 
   const hasAccount =
     readFlag('--account-id', args) ||
@@ -64,37 +71,7 @@ export async function runSetupWizard({
     )).toLowerCase() === 'y';
 
   if (!hasAccount) {
-    console.log('');
-    console.log('────────────────────────────────────────────────────────────');
-    console.log('  Options');
-    console.log('────────────────────────────────────────────────────────────');
-    console.log('');
-    console.log('  A — Local demo (no account, no SUI, no Walrus)');
-    console.log('      Re-run: noosphere setup --demo');
-    console.log('      Local in-memory persistence only; nothing leaves your machine.');
-    console.log('');
-    console.log('  B — Free testnet account (~5 min, no real money)');
-    console.log('      Install Sui CLI:  curl https://install.mystenlabs.com/sui | sh');
-    console.log('      Switch to testnet: sui client switch --env testnet');
-    console.log('      Fund it for free:  sui client faucet');
-    console.log('      Then create a Walrus Memory account per:');
-    console.log('        https://docs.wal.app/walrus-memory/getting-started/');
-    console.log('      Re-run: noosphere setup --network testnet');
-    console.log('');
-    console.log('  C — Mainnet (real SUI, persistent shared memory)');
-    console.log('      Step 1 — Get a Sui wallet');
-    console.log('        Browser: https://slush.app  or  https://suiwallet.com');
-    console.log('        CLI:     curl https://install.mystenlabs.com/sui | sh');
-    console.log('      Step 2 — Fund it with ~0.1 SUI');
-    console.log('        Buy on any exchange (Binance, Coinbase, Kraken…)');
-    console.log('      Step 3 — Create the Walrus Memory account');
-    console.log('        Docs: https://docs.wal.app/walrus-memory/getting-started/');
-    console.log('      Step 4 — Come back with:');
-    console.log('        • Account object ID  (0x followed by 64 hex characters)');
-    console.log('        • Delegate private key  (64 hexadecimal characters)');
-    console.log('');
-    console.log('────────────────────────────────────────────────────────────');
-    console.log('');
+    printWalrusAccountOptions();
     await promptUser(
       'Press Enter when you have your account ID and delegate key…',
     );
@@ -183,19 +160,36 @@ export async function runSetupWizard({
     console.log('  ✓ Store/recall smoke test passed');
   }
 
-  console.log('');
-  console.log('╔══════════════════════════════════════════════════════════╗');
-  console.log('║  Setup complete!                                         ║');
-  console.log('║                                                          ║');
-  console.log('║  Run  noosphere doctor       to verify your install      ║');
-  console.log('║  Run  noosphere credentials status  to check any time   ║');
-  console.log('╚══════════════════════════════════════════════════════════╝');
-  console.log('');
-  console.log('Restart Noosphere services to use the new credentials:');
-  console.log('  macOS:   launchctl kickstart -k gui/$UID/xyz.noosphere.relayer');
-  console.log('  Linux:   systemctl --user restart xyz.noosphere.relayer');
-  console.log('  Windows: schtasks /End /TN "\\Noosphere\\Relayer" && schtasks /Run /TN "\\Noosphere\\Relayer"');
-  console.log('');
+  const backendWritten = await setMemoryBackendMode(
+    relayerEnvPath,
+    'walrus-memory',
+    { requireExisting: false },
+  );
+  if (backendWritten) {
+    console.log(`  ✓ Wrote NOOSPHERE_MEMORY_BACKEND=walrus-memory to ${relayerEnvPath}`);
+  } else {
+    console.warn('');
+    console.warn(
+      `  Warning: relayer .env not found at ${relayerEnvPath}; ` +
+      'credentials were stored, but backend selection was not persisted.',
+    );
+  }
+
+  printBlock([
+    '',
+    '╔══════════════════════════════════════════════════════════╗',
+    '║  Setup complete!                                         ║',
+    '║                                                          ║',
+    '║  Run  noosphere doctor       to verify your install      ║',
+    '║  Run  noosphere credentials status  to check any time   ║',
+    '╚══════════════════════════════════════════════════════════╝',
+    '',
+    'Restart Noosphere services to use the new credentials:',
+    '  macOS:   launchctl kickstart -k gui/$UID/xyz.noosphere.relayer',
+    '  Linux:   systemctl --user restart xyz.noosphere.relayer',
+    '  Windows: schtasks /End /TN "\\Noosphere\\Relayer" && schtasks /Run /TN "\\Noosphere\\Relayer"',
+    '',
+  ]);
 }
 
 export async function runCredentialsCommand(
@@ -321,6 +315,52 @@ async function shouldRunSmokeTest(args = process.argv, promptUser = prompt) {
   return answer.toLowerCase() === 'y';
 }
 
+async function chooseSetupBackend(args, promptUser) {
+  const flagged = readSetupBackendFlag(args);
+  if (flagged) return flagged;
+  if (
+    readFlag('--account-id', args) ||
+    readFlag('--network', args) ||
+    args.includes('--yes')
+  ) {
+    return 'walrus-memory';
+  }
+
+  const answer = (await promptUser(
+    'Storage backend [local/walrus] (local): ',
+  )).toLowerCase();
+  return normalizeSetupBackend(answer || 'local');
+}
+
+function readSetupBackendFlag(args) {
+  if (
+    args.includes('--local') ||
+    args.includes('--local-file') ||
+    args.includes('--demo')
+  ) {
+    return 'local-file';
+  }
+  if (args.includes('--walrus')) return 'walrus-memory';
+  const backend = readFlag('--memory-backend', args);
+  return backend ? normalizeSetupBackend(backend) : null;
+}
+
+function normalizeSetupBackend(value) {
+  switch (String(value || '').trim().toLowerCase()) {
+    case 'local':
+    case 'local-file':
+    case 'file':
+      return 'local-file';
+    case 'walrus':
+    case 'walrus-memory':
+      return 'walrus-memory';
+    default:
+      throw new Error(
+        `Unknown memory backend "${value}". Use local or walrus.`,
+      );
+  }
+}
+
 function normalizeCredentials(values) {
   return {
     MEMWAL_ACCOUNT_ID: String(values.MEMWAL_ACCOUNT_ID || '').trim(),
@@ -356,42 +396,55 @@ function defaultRelayerEnvPath() {
   return path.join(noosphereHome(), 'app', 'noosphere-relayer', '.env');
 }
 
-async function enableDemoMode(envPath) {
+async function enableLocalFileMode(envPath) {
+  await setMemoryBackendMode(envPath, 'local-file', { requireExisting: true });
+
+  printBlock([
+    '',
+    '╔══════════════════════════════════════════════════════════╗',
+    '║  Local file memory enabled                              ║',
+    '╚══════════════════════════════════════════════════════════╝',
+    '',
+    'Noosphere will store memory in a local file only.',
+    'No Walrus, no Sui, nothing leaves this machine.',
+    '',
+    `Wrote NOOSPHERE_MEMORY_BACKEND=local-file to ${envPath}.`,
+    '',
+    'Restart the relayer to apply:',
+    '  macOS:   launchctl kickstart -k gui/$UID/xyz.noosphere.relayer',
+    '  Linux:   systemctl --user restart xyz.noosphere.relayer',
+    '  Windows: schtasks /End /TN "\\Noosphere\\Relayer" && schtasks /Run /TN "\\Noosphere\\Relayer"',
+    '',
+    'To switch back to Walrus, re-run `noosphere setup --walrus`.',
+    '',
+  ]);
+}
+
+async function setMemoryBackendMode(
+  envPath,
+  backend,
+  { requireExisting = false } = {},
+) {
   let contents;
   try {
     contents = await readFile(envPath, 'utf8');
   } catch (error) {
-    if (error.code === 'ENOENT') {
+    if (error.code === 'ENOENT' && requireExisting) {
       throw new Error(
         `Relayer .env not found at ${envPath}. ` +
         'Run `npm --prefix noosphere-mcp run install:user` first, ' +
-        'then re-run `noosphere setup --demo`.',
+        'then re-run `noosphere setup --local`.',
       );
     }
+    if (error.code === 'ENOENT') return false;
     throw error;
   }
 
-  const updated = setEnvLine(contents, 'DEMO_MODE', 'true');
+  let updated = setEnvLine(contents, 'NOOSPHERE_MEMORY_BACKEND', backend);
+  updated = setEnvLine(updated, 'DEMO_MODE', 'false');
   await writeFile(envPath, updated, { mode: 0o600 });
   await chmod(envPath, 0o600);
-
-  console.log('');
-  console.log('╔══════════════════════════════════════════════════════════╗');
-  console.log('║  Demo mode enabled                                       ║');
-  console.log('╚══════════════════════════════════════════════════════════╝');
-  console.log('');
-  console.log('Noosphere will store memory in a local file only.');
-  console.log('No Walrus, no Sui, nothing leaves this machine.');
-  console.log('');
-  console.log(`Wrote DEMO_MODE=true to ${envPath}.`);
-  console.log('');
-  console.log('Restart the relayer to apply:');
-  console.log('  macOS:   launchctl kickstart -k gui/$UID/xyz.noosphere.relayer');
-  console.log('  Linux:   systemctl --user restart xyz.noosphere.relayer');
-  console.log('  Windows: schtasks /End /TN "\\Noosphere\\Relayer" && schtasks /Run /TN "\\Noosphere\\Relayer"');
-  console.log('');
-  console.log('To switch back to Walrus, re-run `noosphere setup` without --demo.');
-  console.log('');
+  return true;
 }
 
 function setEnvLine(contents, key, value) {
@@ -402,6 +455,46 @@ function setEnvLine(contents, key, value) {
   }
   const separator = contents.endsWith('\n') || contents.length === 0 ? '' : '\n';
   return `${contents}${separator}${line}\n`;
+}
+
+function printWalrusAccountOptions() {
+  printBlock([
+    '',
+    '────────────────────────────────────────────────────────────',
+    '  Options',
+    '────────────────────────────────────────────────────────────',
+    '',
+    '  A — Local file memory (no account, no SUI, no Walrus)',
+    '      Re-run: noosphere setup --local',
+    '      Local file persistence only; nothing leaves your machine.',
+    '',
+    '  B — Free testnet account (~5 min, no real money)',
+    '      Install Sui CLI:  curl https://install.mystenlabs.com/sui | sh',
+    '      Switch to testnet: sui client switch --env testnet',
+    '      Fund it for free:  sui client faucet',
+    '      Then create a Walrus Memory account per:',
+    '        https://docs.wal.app/walrus-memory/getting-started/',
+    '      Re-run: noosphere setup --network testnet',
+    '',
+    '  C — Mainnet (real SUI, persistent shared memory)',
+    '      Step 1 — Get a Sui wallet',
+    '        Browser: https://slush.app  or  https://suiwallet.com',
+    '        CLI:     curl https://install.mystenlabs.com/sui | sh',
+    '      Step 2 — Fund it with ~0.1 SUI',
+    '        Buy on any exchange (Binance, Coinbase, Kraken…)',
+    '      Step 3 — Create the Walrus Memory account',
+    '        Docs: https://docs.wal.app/walrus-memory/getting-started/',
+    '      Step 4 — Come back with:',
+    '        • Account object ID  (0x followed by 64 hex characters)',
+    '        • Delegate private key  (64 hexadecimal characters)',
+    '',
+    '────────────────────────────────────────────────────────────',
+    '',
+  ]);
+}
+
+function printBlock(lines) {
+  for (const line of lines) console.log(line);
 }
 
 async function findEnvironmentFile() {
