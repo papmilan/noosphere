@@ -44,7 +44,7 @@
   },
   "homepage": "https://github.com/papmilan/noosphere#readme",
   "peerDependencies": {
-    "noosphere-relayer": "2.1.0"
+    "noosphere-relayer": "2.1.1"
   },
   "peerDependenciesMeta": {
     "noosphere-relayer": {
