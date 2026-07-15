@@ -65,74 +65,30 @@ Noosphere does not capture hidden chain-of-thought. It records concise,
 externally understandable facts: what changed, what was decided, what failed,
 what was verified, and what should happen next.
 
-## ACP continuity kernel
+## Agent handoff (ACP)
 
-The Agent Cognitive-state Protocol (ACP) adds a local-first, storage-neutral
-project-state envelope on top of the existing memory and journal systems. It
-stores only externally shareable state — objective, decisions, evidence,
-assumptions, conflicts, blockers, risks, and next actions — never hidden
-reasoning, secrets, or raw chat.
+The Agent Cognitive-state Protocol (ACP) lets one agent hand a project to the
+next — any vendor, any machine — through two small validated files:
 
-```bash
-noosphere state              # print the compact continuity kernel
-noosphere state --json       # print the canonical ACP envelope
-noosphere state validate     # verify the persisted envelope and kernel
-cat handoff.json | noosphere handoff --stdin
-noosphere handoff --file handoff.json
-```
-
-### Exact state across machines
-
-`noosphere state sync|push|pull|history|quarantine --json` uses deterministic
-ACP envelopes. Discovery is read-only; apply requires a cached single-use
-`--confirm-remote <confirmation_id>`. Confirmations expire within five minutes.
-Advanced history requires `--allow-stale-advanced` at discovery and apply and
-renders with downgraded authority and suppressed next actions. Set
-`NOOSPHERE_ACP_SYNC=false` to disable exact remote synchronization.
-
-### Execution continuity
-
-Project State answers "what is true"; an execution checkpoint answers "what
-was I about to do." `noosphere exec checkpoint` records an advisory cursor
-over the current Project State snapshot — current step, target file and
-symbol, remaining steps, search frontier — while the CLI itself measures
-every fact a successor will trust: repository state, per-step file hashes,
-and the snapshot binding. Asserted lies are overwritten by measurement, and
-the checkpoint can never carry code, diffs, or multi-line payloads.
+- **Project State** answers *what is true*: objective, decisions, evidence,
+  blockers, next actions. Print it with `noosphere state`; hand off with
+  `noosphere handoff`.
+- **Execution checkpoint** answers *what was I about to do*: current step,
+  target file, remaining plan. Record with `noosphere exec checkpoint`;
+  resume with `noosphere exec show`.
 
 ```bash
+noosphere state                                    # what is true right now
+cat handoff.json | noosphere handoff --stdin       # hand the project over
 noosphere exec checkpoint --file checkpoint.json   # record where work stood
-noosphere exec show                                # validated advisory kernel
-noosphere exec import-plan docs/plan.md            # adopt a checkbox plan
-noosphere exec clear --current
+noosphere exec show                                # resume from a checkpoint
 ```
 
-On resume the checkpoint is re-validated: evidence voids (superseded
-snapshot, diverged Git); each target is classified honestly as
-`target-unchanged`, `target-changed`, `target-missing`, or `unknown`.
-`target-unchanged` only proves the target bytes match: assumptions and
-dependencies still require validation, so no step is automatically actionable.
-`depends_on_files` is deferred rather than inferred unsafely in v1.
-Age demotes past the 72-hour policy boundary and retention is 30 days; neither
-value is accepted from checkpoint input. Checkpoints are per canonical agent in
-`.noosphere/execution/<agent>.json|md`; overlapping live targets render a
-visible `CONTENTION` warning. `exec clear` requires `--current`, `--agent`, or
-`--all --confirm-all`. Local rebased salvage follows only the directly retained
-validated parent, so it is deliberately conservative and limited.
-
-Cross-machine exact synchronization requires every client to use the same
-durable relayer index. Sharing Walrus credentials alone is not sufficient.
-"walrus-backed/relayer-indexed" means Walrus replicates bytes while exact
-lookup and heads still depend on that relayer index. Capabilities distinguish
-local-only, shared-relayer, and walrus-backed/relayer-indexed deployments.
-
-`.noosphere/continuity.json` is the canonical, content-addressed envelope;
-`.noosphere/continuity.md` is a derived kernel of at most 1,800 bytes that a
-fresh agent reads first. A handoff never overwrites conflicting work: a stale
-update appends new distinct assertions, and every competing edit becomes an
-explicit unresolved conflict. When mandatory conflicts or blockers would exceed
-the kernel budget, the kernel refuses to summarize and points to
-`noosphere state --json` instead.
+Both are advisory and honest by construction: the CLI measures repository
+state and file hashes itself, so a checkpoint cannot claim tests pass or
+smuggle code to the next agent. `noosphere state sync` extends the same
+state across machines. Full protocol semantics, validation rules, and sync
+requirements live in [docs/ACP.md](docs/ACP.md).
 
 ## What Noosphere remembers
 
@@ -587,6 +543,9 @@ noosphere context
 noosphere recall "query"
 noosphere remember --agent <name> --type <type> "content"
 noosphere journal --agent <name> "note"
+noosphere state [--json] [validate|sync|push|pull|history|quarantine]
+noosphere handoff --stdin | --file <handoff.json>
+noosphere exec checkpoint|show|import-plan|clear
 noosphere protocol
 noosphere uninstall
 ```
@@ -780,14 +739,19 @@ noosphere-relayer/
   MEMORY_SECURITY.md       Encryption and authorization boundary
 
 noosphere-mcp/
-  continuity/              CLI, watcher, context refresh
+  continuity/              CLI, watcher, context refresh, ACP state
   lifecycle/               Installer, services, registry, credentials
   hooks/                   Optional tool-specific hooks
   mcp-server/              MCP configuration and compatibility assets
 
+noosphere-acp-protocol/
+  Shared ACP protocol package: envelopes, schemas, validation
+
 docs/
+  ACP.md                   Agent handoff protocol reference
   PRIVACY.md               Data handling and retention
   DEPLOYMENT.md            Public deployment and recovery
+  superpowers/specs/       Full ACP design documents
 ```
 
 ## Development and verification
