@@ -66,6 +66,17 @@ npm install
 npm run demo
 ```
 
+On Windows, `npm run demo` sets the environment variable POSIX-style; use
+the direct form instead:
+
+```powershell
+$env:NOOSPHERE_MEMORY_BACKEND = 'local-file'; node index.js   # PowerShell
+```
+
+```bat
+set NOOSPHERE_MEMORY_BACKEND=local-file&& node index.js       # cmd.exe
+```
+
 In a second terminal, store and recall a memory over HTTP:
 
 ```sh
