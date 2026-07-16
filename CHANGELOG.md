@@ -1,0 +1,118 @@
+# Changelog
+
+This repository publishes two npm packages that version independently:
+
+- **`noosphere-continuity`** — the CLI, watcher, lifecycle installer, and ACP
+  state (source in [`noosphere-mcp/`](noosphere-mcp/));
+- **`noosphere-relayer`** — the HTTP memory relay
+  (source in [`noosphere-relayer/`](noosphere-relayer/)).
+
+Dates are npm publish dates. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## noosphere-continuity
+
+### 2.3.0 — 2026-07-15
+
+**ACP Execution Continuity.**
+
+- Added the `acp.execution-state/1` object type: short-lived advisory
+  checkpoints recording what an agent was about to do (current step, target
+  file and symbol, remaining plan) bound to one Project State snapshot.
+- New CLI commands: `noosphere exec checkpoint`, `exec show`,
+  `exec import-plan`, and `exec clear` (which requires `--current`,
+  `--agent`, or `--all --confirm-all`).
+- The CLI measures repository head, branch, dirty state, workspace
+  fingerprint, and per-step target hashes itself; asserted values are
+  overwritten by measurement.
+- Structural payload prohibition: fenced code, diff syntax, and multi-line
+  prose are rejected at validation.
+- Freshness model: only measured evidence voids a checkpoint; age demotes
+  past a 72-hour policy boundary; implausible `created_at` values are
+  rejected.
+- Per-agent checkpoint isolation with explicit `CONTENTION` rendering when
+  live targets overlap.
+- Generated vendor adapters now load the master prompt, follow-ups, ACP
+  kernel, and per-agent execution kernels before Git state and optional
+  context.
+- Docs: the ACP protocol reference moved to `docs/ACP.md`; package READMEs
+  link to it instead of duplicating semantics.
+
+### 2.2.0 — 2026-07-13
+
+**ACP Project State and remote exact-state sync.**
+
+- Added the `acp.project-state/1` envelope: objective, decisions, evidence,
+  blockers, and next actions in a canonical content-addressed JSON file,
+  with a derived kernel of at most 1,800 bytes for fresh agents.
+- New CLI commands: `noosphere state` (`--json`, `validate`, `sync`,
+  `push`, `pull`, `history`, `quarantine`) and `noosphere handoff`
+  (`--stdin`, `--file`).
+- Conflicting handoffs never overwrite: stale updates append distinct
+  assertions and competing edits become explicit unresolved conflicts.
+- Remote exact-state sync: read-only discovery, apply gated by a cached
+  single-use `--confirm-remote` confirmation that expires within five
+  minutes, quarantine for invalid or foreign bytes, and
+  `NOOSPHERE_ACP_SYNC=false` to disable.
+- Extracted the shared `@noosphere/acp-protocol` package (envelopes,
+  schemas, validation, head sets), bundled into both published packages.
+- Added a local-file memory backend so the full flow works without Walrus
+  credentials.
+
+### 2.1.6 — 2026-06-17
+
+- Fixed Windows credential decryption under PowerShell 5.1 by loading the
+  `System.Security` assembly before calling DPAPI `ProtectedData`, and
+  using fully qualified type names.
+
+### 2.1.5 — 2026-06-17
+
+- Fixed a Windows DPAPI credential write that could leave a 0-byte
+  credential file.
+
+### 2.1.1 – 2.1.4 — 2026-06-16
+
+- First published releases: cross-agent project memory CLI
+  (`context`, `recall`, `remember`, `journal`, `master-prompt`), the
+  background workspace watcher with metadata-only checkpoints, the
+  per-user lifecycle installer for macOS/Linux/Windows, Ollama session
+  support, and optional per-tool adapters.
+- 2.1.2–2.1.4 were same-day packaging and setup fixes, ending with
+  graceful degradation when Windows blocks `schtasks /Create`.
+
+## noosphere-relayer
+
+### 2.1.1 — 2026-07-15
+
+- Added the package README (the npm page previously rendered none).
+- Synchronized vendored `@noosphere/acp-protocol` package metadata with the
+  source package; distribution parity is now derived from the protocol
+  package manifest instead of a hardcoded file list.
+
+### 2.1.0 — 2026-07-13
+
+**ACP exact-state relay support.**
+
+- Authenticated ACP exact-state API: durable server-owned index, snapshot
+  backends (local and Walrus), apply-time confirmation, and owner-only
+  quarantine with secured file permissions.
+- Deterministic remote reconciliation bound to validated authority;
+  expired ancestry is rejected.
+- Exact upload jobs are retained across restarts; queue semantics
+  hardened.
+- Added the local-file memory backend
+  (`NOOSPHERE_MEMORY_BACKEND=local-file`) and removed the static demo
+  website.
+
+### 2.0.4 — 2026-06-17
+
+- Fixed Windows DPAPI credential handling in PowerShell 5.1 (missing
+  `System.Security` assembly load; fully qualified type names).
+
+### 2.0.1 – 2.0.3 — 2026-06-16
+
+- First published releases: HTTP memory API (`/v1/actions`, recall,
+  context, bootstrap), durable restart-safe upload queue with idempotency
+  receipts, exponential backoff and cooldown handling, loopback-first
+  security defaults with fail-closed token auth for non-loopback
+  deployments, and Walrus Memory integration.
