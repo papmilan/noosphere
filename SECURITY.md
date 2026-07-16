@@ -65,6 +65,52 @@ Out of scope:
 - issues only reproducible with `ALLOW_LOOPBACK_WITHOUT_TOKEN=true` on a
   loopback-only development instance, which is the documented local mode.
 
+## Relayer origin approval (migration)
+
+The API token (`NOOSPHERE_API_TOKEN`) is only sent to a **loopback** relayer or to
+an origin the owner has explicitly approved. A relayer URL taken from project
+configuration can never silently receive the token.
+
+- Default (`http://127.0.0.1:3001`) and any loopback origin work with no extra
+  step.
+- A non-loopback relayer must use **HTTPS** and be approved once:
+
+  ```
+  noosphere approve-relayer https://relay.example.com
+  ```
+
+  Approvals are stored owner-only (mode `0600`) in
+  `~/.noosphere/approved-relayers.json`. Until an origin is approved, requests to
+  it fail closed and no token is sent. Origin-changing HTTP redirects on a
+  credentialed request are rejected.
+
+**Existing self-hosters:** if you previously set a non-loopback `relayer_url` or
+`NOOSPHERE_RELAYER_URL`, run `approve-relayer` once for that origin after
+upgrading. No token is transmitted until you do.
+
+## Known limitations and hardening notes
+
+These residuals are disclosed intentionally; they are not undisclosed defects:
+
+- **DNS rebinding / SSRF via hostname.** Origin classification (loopback vs
+  private/link-local vs public) is exact for literal IPs. A DNS hostname that
+  resolves to a private address is treated as public — it still requires HTTPS
+  and one-time approval — but the resolved address is not re-pinned. Approve only
+  origins you control.
+- **Same-user parent-swap TOCTOU.** State directories are verified with
+  `lstat` + `realpath` containment and files are created with `O_NOFOLLOW`, which
+  blocks symlinked directories, components, and files. A local attacker running
+  as the same user who swaps a path component between the check and the write is
+  not fully prevented, because fd-relative (`openat`) semantics are not available
+  in the Node core API. This requires an already-local same-user attacker.
+- **Windows filesystem behavior.** The symlink/`O_NOFOLLOW` containment guards
+  are verified on POSIX (macOS/Linux). Behavior against Windows
+  junctions/reparse points and case-insensitive path normalization is **not yet
+  verified on a Windows runner** and must be validated with
+  `scripts/verify-secure-fs-windows.ps1` on the exact supported Windows versions
+  before a Windows release is declared safe. See
+  [docs/security/windows-filesystem-verification.md](docs/security/windows-filesystem-verification.md).
+
 ## Security model
 
 The documented trust boundary and data path live in
