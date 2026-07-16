@@ -59,6 +59,7 @@ import {
   syncProjectState,
 } from './acp/sync.js';
 import { mutateSyncMetadata, readSyncMetadata, withUploadReservationLock } from './acp/sync-metadata.js';
+import { approveOrigin, secureRelayerFetch } from './relayer-authority.js';
 
 const execFileAsync = promisify(execFile);
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -125,6 +126,9 @@ try {
       break;
     case 'context':
       await printContext(projectDir);
+      break;
+    case 'approve-relayer':
+      await approveRelayerFromCli(process.argv[3]);
       break;
     case 'recall':
       await recallFromCli(projectDir);
@@ -1361,6 +1365,15 @@ async function printContext(root) {
   } catch {
     process.stdout.write(await refreshContext(root));
   }
+}
+
+async function approveRelayerFromCli(url) {
+  if (!url) {
+    throw new Error('Usage: noosphere approve-relayer <https-origin>');
+  }
+  const origin = await approveOrigin(url);
+  console.log(`Approved relayer origin: ${origin}`);
+  console.log('The API token may now be sent to this origin.');
 }
 
 async function recallFromCli(root) {
@@ -2683,7 +2696,9 @@ async function findGitRoot(start) {
 
 async function pingRelayer(url) {
   try {
-    const response = await fetch(`${url}/health`, {
+    // Route the health probe through the same authority so an unapproved or
+    // insecure origin is never contacted at all (no token is sent regardless).
+    const response = await secureRelayerFetch(`${url}/health`, {
       signal: AbortSignal.timeout(2_000),
     });
     return response.ok;
@@ -2712,9 +2727,8 @@ function relayerDownError(url) {
 }
 
 async function requestJson(url, options) {
-  const response = await fetch(url, {
+  const response = await secureRelayerFetch(url, {
     ...options,
-    headers: withAuthentication(options?.headers),
     signal: AbortSignal.timeout(
       Number(process.env.NOOSPHERE_WRITE_TIMEOUT_MS) ||
         DEFAULT_WRITE_TIMEOUT_MS,
@@ -2728,8 +2742,8 @@ async function requestJson(url, options) {
 }
 
 async function requestText(url) {
-  const response = await fetch(url, {
-    headers: withAuthentication({ accept: 'text/plain' }),
+  const response = await secureRelayerFetch(url, {
+    headers: { accept: 'text/plain' },
     signal: AbortSignal.timeout(
       Number(process.env.NOOSPHERE_READ_TIMEOUT_MS) ||
         DEFAULT_READ_TIMEOUT_MS,
@@ -2740,15 +2754,6 @@ async function requestText(url) {
     throw new Error(text || `${response.status} ${response.statusText}`);
   }
   return text;
-}
-
-function withAuthentication(headers = {}) {
-  const token = process.env.NOOSPHERE_API_TOKEN;
-  if (!token) return headers;
-  return {
-    ...headers,
-    authorization: `Bearer ${token}`,
-  };
 }
 
 async function readJson(file) {
