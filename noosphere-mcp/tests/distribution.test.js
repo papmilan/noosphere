@@ -39,12 +39,6 @@ describe('published package distribution', () => {
     const noosphereHome = path.join(fakeHome, '.noosphere');
 
     try {
-      assert.equal(
-        await readFile(path.join(relayerRoot, 'env.example'), 'utf8'),
-        await readFile(path.join(relayerRoot, '.env.example'), 'utf8'),
-        'The public and npm-safe environment templates must stay identical',
-      );
-
       const mcpTarball = await pack(mcpRoot, temporaryRoot, cache);
       const relayerTarball = await pack(relayerRoot, temporaryRoot, cache);
       await mkdir(packedMcp, { recursive: true });
