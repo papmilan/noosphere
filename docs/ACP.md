@@ -128,6 +128,6 @@ noosphere-relayer/vendor/acp-protocol/
 
 The full designs, including the hostile reviews that shaped them:
 
-- [ACP continuity kernel](superpowers/specs/2026-07-12-acp-continuity-kernel-design.md)
-- [ACP remote exact-state sync](superpowers/specs/2026-07-12-acp-remote-exact-state-sync-design.md)
-- [ACP execution continuity](superpowers/specs/2026-07-13-acp-execution-continuity-design.md)
+- [ACP continuity kernel](design/specs/2026-07-12-acp-continuity-kernel-design.md)
+- [ACP remote exact-state sync](design/specs/2026-07-12-acp-remote-exact-state-sync-design.md)
+- [ACP execution continuity](design/specs/2026-07-13-acp-execution-continuity-design.md)

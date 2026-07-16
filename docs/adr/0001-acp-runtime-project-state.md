@@ -4,7 +4,7 @@
 - **Date:** 2026-07-12
 - **Decision owners:** Noosphere maintainers
 - **Related specification:**
-  `docs/superpowers/specs/2026-07-12-acp-continuity-kernel-design.md`
+  `docs/design/specs/2026-07-12-acp-continuity-kernel-design.md`
 
 ## Context
 

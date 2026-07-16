@@ -5,7 +5,7 @@
 - **Decision owners:** Noosphere maintainers
 - **Supersedes:** No prior decision
 - **Related:** `docs/adr/0001-acp-runtime-project-state.md` and
-  `docs/superpowers/specs/2026-07-12-acp-continuity-kernel-design.md`
+  `docs/design/specs/2026-07-12-acp-continuity-kernel-design.md`
 
 ## Context
 

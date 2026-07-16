@@ -751,7 +751,7 @@ docs/
   ACP.md                   Agent handoff protocol reference
   PRIVACY.md               Data handling and retention
   DEPLOYMENT.md            Public deployment and recovery
-  superpowers/specs/       Full ACP design documents
+  design/specs/       Full ACP design documents
 ```
 
 ## Development and verification
