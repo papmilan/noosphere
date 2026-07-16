@@ -40,9 +40,14 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/papmilan/noosphere.git"
+    "url": "git+https://github.com/papmilan/noosphere.git",
+    "directory": "noosphere-mcp"
   },
   "homepage": "https://github.com/papmilan/noosphere#readme",
+  "bugs": {
+    "url": "https://github.com/papmilan/noosphere/issues"
+  },
+  "author": "Milan Pap",
   "peerDependencies": {
     "noosphere-relayer": "2.1.1"
   },

@@ -44,9 +44,14 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/papmilan/noosphere.git"
+    "url": "git+https://github.com/papmilan/noosphere.git",
+    "directory": "noosphere-relayer"
   },
   "homepage": "https://github.com/papmilan/noosphere#readme",
+  "bugs": {
+    "url": "https://github.com/papmilan/noosphere/issues"
+  },
+  "author": "Milan Pap",
   "engines": {
     "node": ">=22"
   },
