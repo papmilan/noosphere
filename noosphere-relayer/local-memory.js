@@ -6,6 +6,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
+import { assertRealDirectory } from './secure-fs.js';
 
 export class LocalMemoryStore {
   constructor(env, { defaultPath }) {
@@ -98,7 +99,9 @@ export class LocalMemoryStore {
 
   async writeToDisk() {
     const temporary = `${this.filePath}.${randomUUID()}.tmp`;
-    await mkdir(path.dirname(this.filePath), { recursive: true });
+    const dir = path.dirname(this.filePath);
+    await mkdir(dir, { recursive: true });
+    await assertRealDirectory(dir);
     await writeFile(
       temporary,
       `${JSON.stringify(

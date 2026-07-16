@@ -10,6 +10,7 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import { syncDirectoryPath, syncFilePath } from './durability.js';
+import { assertRealDirectory } from './secure-fs.js';
 
 const DEFAULT_RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -226,10 +227,12 @@ export class DurableStore {
   }
 
   async writeState() {
-    await mkdir(path.dirname(this.filePath), {
+    const directory = path.dirname(this.filePath);
+    await mkdir(directory, {
       recursive: true,
       mode: 0o700,
     });
+    await assertRealDirectory(directory);
     const temporary = `${this.filePath}.${randomUUID()}.tmp`;
     await writeFile(
       temporary,

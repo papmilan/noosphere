@@ -7,6 +7,7 @@ import { classifyCompatibility, observeRepository } from './git-state.js';
 import { renderKernel } from './render.js';
 import { projectAdvancedTrust } from './trust-projection.js';
 import { syncDirectoryPath, syncFilePath } from './durability.js';
+import { ensureContainedDir } from '../secure-fs.js';
 
 const JSON_FILE = 'continuity.json';
 const MD_FILE = 'continuity.md';
@@ -57,7 +58,7 @@ export async function writeState(root, state, options = {}) {
 
 async function writeStateUnlocked(root, state, options = {}) {
   const { dir, json, markdown } = statePaths(root);
-  await mkdir(dir, { recursive: true });
+  await ensureContainedDir(root, dir);
   const envelope = encodeEnvelope(state);
   const compatibility = options.compatibility
     ?? classifyCompatibility(state, await observeRepository(root));
@@ -89,7 +90,7 @@ async function writeStateIfCurrentLocked(root, state, expectedSnapshotId, option
     throw storeError('invalid-expected-snapshot-id');
   }
   const { dir, json, markdown } = statePaths(root);
-  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await ensureContainedDir(root, dir);
   const envelope = encodeEnvelope(state);
   const compatibility = options.compatibility
     ?? classifyCompatibility(state, await observeRepository(root));
@@ -314,7 +315,7 @@ function validateJournal(journal) {
 
 async function withStateLock(root, operation) {
   const dir = statePaths(root).dir;
-  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await ensureContainedDir(root, dir);
   await chmod(dir, 0o700);
   const lockPath = path.join(dir, '.continuity-state.lock');
   const token = randomUUID();

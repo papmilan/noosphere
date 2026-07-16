@@ -23,6 +23,7 @@
     "local-memory.js",
     "local-projects.js",
     "memory.js",
+    "secure-fs.js",
     "snapshot-backend.js",
     "security.js",
     "walrus-memory.js",
