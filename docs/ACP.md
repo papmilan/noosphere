@@ -8,6 +8,23 @@ never hidden reasoning, secrets, or raw chat.
 This document is the protocol reference for implementers and contributors.
 For installation and everyday usage, read the [main README](../README.md).
 
+## The ACP stack
+
+Both object types share one wire/domain/render/store stack:
+
+```mermaid
+flowchart TD
+    wire["Wire layer<br/>canonical JSON envelopes, content addressing"]
+    domain["Domain layer<br/>validation: bounds, payload prohibition, graph rules"]
+    render["Render layer<br/>deterministic advisory kernels (1,800 / 1,200 bytes)"]
+    store["Store layer<br/>atomic, content-addressed .noosphere/ files"]
+
+    ps["acp.project-state/1<br/>what is true"] --> wire
+    es["acp.execution-state/1<br/>what was I about to do"] --> wire
+    wire --> domain --> render
+    domain --> store
+```
+
 ## Object types
 
 ACP defines two object types. Both are canonical JSON envelopes with content
@@ -72,6 +89,24 @@ search frontier.
 - Local rebased salvage follows only the directly retained validated
   parent, so it is deliberately conservative and limited.
 
+```mermaid
+flowchart TD
+    cp["Agent records checkpoint<br/>(step, target file + symbol, remaining plan)"]
+    measure["CLI measures:<br/>head · branch · dirty state ·<br/>workspace fingerprint · target hashes ·<br/>snapshot binding"]
+    validate["Validate envelope<br/>payload prohibition · bounds · graph rules"]
+    stored["Store per canonical agent<br/>.noosphere/execution/&lt;agent&gt;.json|md"]
+    resume["Next agent: noosphere exec show"]
+    classify{"Freshness<br/>classification"}
+    fresh["Advisory kernel<br/>'Previous agent recorded …'"]
+    demoted["Age-demoted kernel<br/>(&gt; 72h, states its age)"]
+    void["Voided by evidence<br/>superseded snapshot · diverged Git ·<br/>changed target hashes"]
+
+    cp --> measure --> validate --> stored --> resume --> classify
+    classify -->|"measured facts hold"| fresh
+    classify -->|"old but unrefuted"| demoted
+    classify -->|"evidence refutes"| void
+```
+
 CLI surface:
 
 ```bash
@@ -87,6 +122,26 @@ noosphere exec clear --current
 
 `noosphere state sync|push|pull|history|quarantine --json` uses deterministic
 ACP envelopes.
+
+```mermaid
+sequenceDiagram
+    participant C as CLI (machine B)
+    participant R as Relayer (durable index)
+    participant W as Walrus (blob bytes)
+
+    C->>R: discover (read-only)
+    R-->>C: heads, snapshot ancestry, capabilities
+    C->>C: cache single-use confirmation_id (expires ≤ 5 min)
+    C->>R: apply --confirm-remote <confirmation_id>
+    R->>W: fetch exact snapshot bytes
+    W-->>R: content-addressed envelope
+    R-->>C: validated envelope
+    alt bytes valid and ancestry intact
+        C->>C: apply to local ACP state
+    else invalid, foreign, or expired
+        C->>C: reject; owner-only quarantine
+    end
+```
 
 - Discovery is read-only; apply requires a cached single-use
   `--confirm-remote <confirmation_id>`. Confirmations expire within five

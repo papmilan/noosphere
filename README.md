@@ -1,22 +1,30 @@
 # Noosphere
 
-**Switch AI tools without losing project context.**
+**Switch AI coding tools without losing project context.**
 
-Noosphere gives a software project one shared memory that every AI coding tool
-can read and update. Work can begin in Codex, continue in Claude Code, move to
-Cursor, and finish through another CLI or HTTP client without forcing each
-agent to rediscover the project from scratch.
+[![npm: noosphere-continuity](https://img.shields.io/npm/v/noosphere-continuity?label=noosphere-continuity)](https://www.npmjs.com/package/noosphere-continuity)
+[![npm: noosphere-relayer](https://img.shields.io/npm/v/noosphere-relayer?label=noosphere-relayer)](https://www.npmjs.com/package/noosphere-relayer)
+[![CI](https://github.com/papmilan/noosphere/actions/workflows/ci.yml/badge.svg)](https://github.com/papmilan/noosphere/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node >= 22](https://img.shields.io/node/v/noosphere-continuity)](noosphere-mcp/package.json)
 
-It stores project memories through
-[Walrus Memory](https://docs.wal.app/walrus-memory/getting-started/what-is-walrus-memory),
-uses semantic recall to retrieve only the relevant history, and exposes the
-same memory through files, a CLI, HTTP, and MCP.
+Noosphere gives a software project one shared memory that every AI coding
+tool can read and update. Work can begin in Codex, continue in Claude Code,
+move to Cursor, and finish through another CLI or HTTP client without
+forcing each agent to rediscover the project from scratch.
 
-## The problem
+> Noosphere is a continuity layer that lets any AI agent resume a project
+> from the work, decisions, findings, and handoffs left by previous agents.
 
-AI coding tools usually keep context inside one session and one product.
+It is not shared consciousness and it does not transfer reasoning. It
+records concise, externally verifiable facts — what changed, what was
+decided, what failed, what was verified, what should happen next — and puts
+them where the next agent will look.
 
-When a session ends or the user switches tools:
+## Why it exists
+
+AI coding tools keep context inside one session and one product. When a
+session ends or the user switches tools:
 
 - decisions disappear into chat history;
 - bugs and failed approaches are investigated again;
@@ -25,16 +33,14 @@ When a session ends or the user switches tools:
 - useful work is tied to a vendor instead of the project.
 
 The repository survives. The agent's understanding often does not.
-
-## The solution
-
-Noosphere attaches memory to the project, not to the AI provider.
+Noosphere attaches that understanding to the project, not to the AI
+provider:
 
 ```text
 Codex finds a bug
        |
        v
-Noosphere stores the finding in the project's Walrus namespace
+Noosphere stores the finding in the project's memory
        |
        v
 Claude Code, Cursor, Gemini, or another agent recalls it later
@@ -43,374 +49,85 @@ Claude Code, Cursor, Gemini, or another agent recalls it later
 The next agent verifies or continues the work instead of starting over
 ```
 
-In one sentence:
-
-> Noosphere is a continuity layer that lets any AI agent resume a project from
-> the work, decisions, findings, and handoffs left by previous agents.
-
-## What happens during normal use
-
-1. You install Noosphere once for your user account.
-2. Entering or registering a Git repository gives it a stable project ID.
-3. The repository receives one bounded starting baseline.
-4. A background watcher observes settled working-tree changes.
-5. Noosphere stores metadata-only checkpoints after the workspace is quiet.
-6. Agents store explicit decisions, findings, and handoffs when they matter.
-7. Walrus Memory indexes those records for semantic recall.
-8. `.noosphere/context.md` is refreshed with relevant shared memory.
-9. The next tool reads the file, calls the CLI, uses HTTP, or connects through
-   MCP.
-
-Noosphere does not capture hidden chain-of-thought. It records concise,
-externally understandable facts: what changed, what was decided, what failed,
-what was verified, and what should happen next.
-
-## Agent handoff (ACP)
-
-The Agent Cognitive-state Protocol (ACP) lets one agent hand a project to the
-next — any vendor, any machine — through two small validated files:
-
-- **Project State** answers *what is true*: objective, decisions, evidence,
-  blockers, next actions. Print it with `noosphere state`; hand off with
-  `noosphere handoff`.
-- **Execution checkpoint** answers *what was I about to do*: current step,
-  target file, remaining plan. Record with `noosphere exec checkpoint`;
-  resume with `noosphere exec show`.
-
-```bash
-noosphere state                                    # what is true right now
-cat handoff.json | noosphere handoff --stdin       # hand the project over
-noosphere exec checkpoint --file checkpoint.json   # record where work stood
-noosphere exec show                                # resume from a checkpoint
-```
-
-Both are advisory and honest by construction: the CLI measures repository
-state and file hashes itself, so a checkpoint cannot claim tests pass or
-smuggle code to the next agent. `noosphere state sync` extends the same
-state across machines. Full protocol semantics, validation rules, and sync
-requirements live in [docs/ACP.md](docs/ACP.md).
-
-## What Noosphere remembers
-
-Noosphere supports two complementary kinds of memory.
-
-### Automatic workspace checkpoints
-
-After a short quiet period, the watcher records:
-
-- changed file paths;
-- current Git branch and commit;
-- Git diff statistics;
-- a workspace fingerprint;
-- timestamp and project identity.
-
-Raw source diffs are not uploaded by default.
-
-### Explicit project memories
-
-Agents and developers can store:
-
-- architecture decisions;
-- bug findings;
-- implementation summaries;
-- test results;
-- failed approaches;
-- research conclusions;
-- session handoffs;
-- unresolved blockers and next steps.
-
-Automatic checkpoints preserve observable workspace state. Explicit memories
-preserve intent and conclusions that cannot be inferred from files alone.
-
-## Use Noosphere with an existing project
-
-Noosphere does not require a new or empty repository. You can add it to a
-project that has been running for months:
-
-```sh
-cd /path/to/existing-project
-noosphere activate
-```
-
-On the first activation, every Git repository receives one project baseline.
-There is no minimum age or commit count. A repository with one commit, five
-commits, or hundreds of commits follows the same rule. Before the normal
-watcher begins recording new changes, Noosphere prepares and stores this
-starting point.
-
-The baseline gives a new agent an initial map of the existing work:
-
-- repository age and total commit count;
-- current branch, HEAD, changed paths, and workspace fingerprint;
-- tracked-file counts grouped by top-level directory;
-- up to 50 recent commit dates, hashes, and subjects.
-
-The local version is written to:
-
-```text
-.noosphere/baseline.md
-```
-
-The same summary is stored once in Walrus Memory as a `project-baseline`
-record. Agents read it before the current master prompt, follow-ups, semantic
-context, and journal. The watcher then treats that exact workspace state as
-the starting point, so it records changes made after onboarding instead of
-pretending the entire historical repository was created in one new session.
-
-You can create or replace the baseline manually:
-
-```sh
-noosphere baseline
-noosphere baseline --commits 100 --force
-```
-
-The selected history is capped at 200 commits. Configure automatic behavior in
-`.noosphere/config.json`:
-
-```json
-{
-  "onboarding": {
-    "auto_baseline": true,
-    "history_commits": 50
-  }
-}
-```
-
-### What the import cannot recover
-
-Git can show code history, but it cannot reconstruct old AI chats, abandoned
-ideas, verbal decisions, or requirements that were never committed. For a
-long-running project, add the important missing knowledge explicitly:
-
-```sh
-noosphere remember --agent maintainer --type decision \
-  "Production uses PostgreSQL. SQLite is supported only in local development."
-
-cat existing-roadmap.md | noosphere master-prompt
-```
-
-From that point onward, automatic checkpoints and explicit memories preserve
-new work normally across agents and machines.
-
-## Restore on a fresh machine
-
-Project memory survives losing the local checkout. After cloning the
-repository to a new machine, a different workstation, or any directory where
-`.noosphere/` is missing, run:
-
-```sh
-noosphere restore
-```
-
-The command reads `project_id` from `.noosphere/config.json` (or
-`.noosphere.json` if you have not run `noosphere init` yet), then reconstructs
-the durable shared files from Walrus:
-
-- `.noosphere/baseline.md` — from the project-baseline record;
-- `.noosphere/master-prompt.md` — from the master-prompt record;
-- `.noosphere/followups.jsonl` — from every user-followup record;
-- `.noosphere/context.md` — composed from the records above plus a fresh
-  semantic recall.
-
-Each file is restored only when the local copy is missing or empty. Existing
-local content is never overwritten. The command is safe to run more than once.
-
-### Requirements
-
-- A `.noosphere/config.json` (or legacy `.noosphere.json`) with the same
-  `project_id` used on the previous machine.
-- Walrus Memory credentials provisioned on the new machine
-  (`noosphere setup` and `noosphere credentials status` should both pass).
-- Network access to the configured relayer.
-
-### What does not come back
-
-- `.noosphere/journal.md` — the local journal is only mirrored to Walrus when
-  `privacy.share_journal` is `true`. If the previous machine kept it local,
-  the journal does not survive the move.
-- Hidden chain-of-thought or anything else that was never recorded by an
-  agent.
-- Automatic workspace checkpoints remain queryable through
-  `noosphere recall` and `noosphere context`, but they are not written back
-  into local files by `restore`; they are intentionally consulted through
-  semantic search rather than stored as a static snapshot.
-
-After `noosphere restore` completes, `noosphere activate` re-enables the
-background watcher and the project resumes normal continuity.
-
-## Why it works with any agent
-
-Noosphere does not require every tool to support the same proprietary plugin.
-The same project memory is available through multiple open interfaces:
-
-| Interface | Best for |
-| --- | --- |
-| `.noosphere/context.md` | Any agent that can read project files |
-| `.noosphere/journal.md` | Human-readable local notes and handoffs |
-| `noosphere` CLI | Terminal agents and scripts |
-| HTTP API | IDEs, web apps, agent frameworks, and custom clients |
-| MCP | Agents that support the Model Context Protocol |
-
-## Master prompts survive tool switches
-
-When a substantial prompt defines multiple phases, Noosphere preserves the
-exact prompt as pinned project intent in:
-
-```text
-.noosphere/master-prompt.md
-```
-
-Claude Code captures qualifying multi-phase prompts automatically through its
-`UserPromptSubmit` hook. `noosphere ollama` does the same for every local
-Ollama model. Noosphere also installs a Codex `UserPromptSubmit` hook and a
-global Codex adapter, so prompts originating in Codex are captured and every
-new Codex session reads pinned intent before project history. Codex asks you
-to review a newly installed user hook once through `/hooks`.
-
-This means a later instruction such as `continue with phase 2` is resolved
-against the original phase definitions, not inferred from the phase 1
-summary. Every later visible user prompt is appended exactly to
-`.noosphere/followups.jsonl` and stored as a `user-followup` memory. Another
-large master prompt is therefore preserved as a follow-up rather than erasing
-the original. Replace the pinned original only when project intent genuinely
-changes:
-
-```sh
-cat updated-plan.md | noosphere master-prompt --replace
-```
-
-For agents that do not expose prompt lifecycle events, pin the prompt once
-through the command above or the HTTP API. Every agent can then read the same
-exact file.
-
-Agents determine what has already been done from three separate evidence
-layers:
-
-1. Current files, Git state, and tests are ground truth.
-2. `.noosphere/journal.md` contains explicit findings and handoffs.
-3. Metadata checkpoints and semantic Walrus recall show earlier activity.
-
-Noosphere labels these as completion evidence rather than mixing them with
-user intent. Agents are instructed to verify completion claims against the
-working tree before continuing.
-
-## Local models through Ollama
-
-Every model installed in Ollama can join the same project memory:
-
-```sh
-cd /path/to/project
-noosphere ollama qwen3-coder
-```
-
-Or run one prompt non-interactively:
-
-```sh
-noosphere ollama run minimax-m2 "Continue phase 2 from the existing handoff"
-```
-
-Noosphere refreshes shared memory before the first response, injects it as an
-Ollama system message, keeps chat history for the session, and stores a concise
-handoff when the session ends. The separate Ollama `thinking` field is never
-added to shared memory. Local-model transcripts are marked unverified so later
-agents know to check factual claims against current project files. Use
-`--no-store` for a private session:
-
-```sh
-noosphere ollama llama3.2 --no-store
-```
-
-This works with any model served by Ollama's local API. File changes made
-during a coding session are still captured by the independent project watcher.
-
-Every new project receives only one `.noosphere/` folder. No Claude, Codex,
-Gemini, Cursor, or MCP files are generated by default.
-
-Tool-specific files are optional adapters. Add only the ones you use:
-
-```sh
-noosphere adapters --only claude
-noosphere adapters --only claude,codex,mcp
-```
-
-They point compatible tools back to the same `.noosphere/` folder and do not
-create separate memories for each vendor.
-
-## Architecture
-
-```text
-AI tools
-Codex / Claude Code / Cursor / IDE / CLI / HTTP / MCP
-                         |
-                         v
-              Noosphere continuity layer
-       files + CLI + HTTP API + project watcher
-                         |
-                         v
-                 Configured memory backend
-        local JSON file or Walrus Memory SDK
-                         |
-             +-----------+-----------+
-             |                       |
-             v                       v
-       Local file memory      Walrus blob storage
-       one-machine use        encrypted remote recall
-```
-
-### Walrus
-
-Walrus stores the encrypted memory blobs. Walrus Memory also provides semantic
-indexing and recall, allowing an agent to ask for the history relevant to the
-current task instead of loading every old record.
-
-### Sui
-
-Sui is used by Walrus Memory for account ownership and delegate authorization.
-No project memory text is stored directly on Sui, and Noosphere does not
-require a custom smart contract.
-
-### Noosphere
-
-Noosphere provides the project-level continuity behavior:
-
-- stable project namespaces;
-- portable memory records;
-- automatic Git-aware checkpoints;
-- prompt-ready context files;
-- universal interfaces;
-- a durable upload queue;
-- retry and restart recovery;
-- local project lifecycle management.
-
 ## Quick start
 
-Requirements:
+Requirements: Node.js 22+, npm, git. No Walrus account is needed for local
+mode.
 
-- Node.js 22 or newer;
-- npm;
-- a Walrus Memory account and delegate key if you want shared remote memory.
-
-### 1. Choose local file or Walrus Memory
+### Try it in five minutes (local, no credentials)
 
 ```sh
+git clone https://github.com/papmilan/noosphere.git
+cd noosphere
+
+# Start the memory relay in local-file mode
 cd noosphere-relayer
 npm install
 npm run demo
 ```
 
-Open [http://127.0.0.1:3001](http://127.0.0.1:3001).
+In a second terminal, store and recall a memory over HTTP:
 
-Local file mode uses a gitignored JSON file on this machine. It is useful for
-people who do not want Walrus credentials, but it does not provide cross-machine
-Walrus memory.
+```sh
+curl http://127.0.0.1:3001/health
 
-### 2. Connect Walrus Memory
+curl -X POST http://127.0.0.1:3001/v1/actions \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: demo-1" \
+  -d '{"project_id":"demo","agent_id":"codex","action_type":"decision",
+       "content":"Use idempotency keys for payment creation."}'
+
+# Writes flow through a durable queue; allow up to ~30 seconds
+curl -X POST http://127.0.0.1:3001/v1/projects/demo/recall \
+  -H "Content-Type: application/json" \
+  -d '{"query":"what affects duplicate payments?","limit":5}'
+```
+
+Local-file mode keeps memory in a gitignored JSON file on this machine. It
+demonstrates the full flow but does not provide cross-machine memory.
+
+### Install the CLI and automatic continuity
+
+From the repository root:
+
+```sh
+npm --prefix noosphere-mcp run install:user
+~/.noosphere/bin/noosphere setup
+```
+
+The installer copies a self-contained runtime to `~/.noosphere`, installs
+the `noosphere` command, configures per-user background services
+(macOS, Linux, and Windows), and adds shell activation hooks for zsh, bash,
+fish, and PowerShell.
+
+### Register a project and make the first handoff
+
+```sh
+cd /path/to/your/repository
+noosphere register --path "$PWD"   # or just enter it from an integrated shell
+
+noosphere context                  # read current shared context
+noosphere remember --agent me --type decision "Ship v2 with the new queue."
+noosphere state                    # ACP kernel: what is true right now
+noosphere exec show                # ACP checkpoint: what was I about to do
+```
+
+Hand the project to the next agent (any vendor, any machine):
+
+```sh
+cat handoff.json | noosphere handoff --stdin
+noosphere exec checkpoint --file checkpoint.json
+```
+
+Envelope formats and validation rules live in [docs/ACP.md](docs/ACP.md).
+
+### Connect Walrus Memory (optional, for shared remote memory)
 
 ```sh
 cp noosphere-relayer/env.example noosphere-relayer/.env
 ```
 
-Create or manage credentials in the
+Create credentials in the
 [Walrus Memory dashboard](https://memory.walrus.xyz/), then set:
 
 ```dotenv
@@ -421,138 +138,205 @@ NOOSPHERE_MEMORY_BACKEND=walrus-memory
 DEMO_MODE=false
 ```
 
-The `0x` prefix belongs on the account ID. The delegate private key is expected
-as a 64-character hexadecimal Ed25519 key.
+The `0x` prefix belongs on the account ID; the delegate private key is a
+64-character hexadecimal Ed25519 key. Noosphere validates that the account
+exists on the selected Sui network, is active, and has the delegate public
+key registered.
 
-Noosphere validates that:
+## Architecture
 
-- the account exists on the selected Sui network;
-- the account is active;
-- the public key derived from the delegate private key is registered.
+```mermaid
+flowchart TD
+    tools["AI tools<br/>Codex · Claude Code · Cursor · Gemini · IDE · scripts"]
 
-### 3. Install automatic continuity
+    subgraph noosphere["Noosphere continuity layer"]
+        files[".noosphere/ files<br/>context · journal · ACP state"]
+        cli["noosphere CLI"]
+        http["HTTP API<br/>(noosphere-relayer)"]
+        mcp["MCP"]
+        watcher["project watcher<br/>metadata checkpoints"]
+    end
 
-From the repository root:
+    backend{"configured<br/>memory backend"}
+    localfile[("local JSON file<br/>one machine")]
+    walrus[("Walrus blob storage<br/>encrypted, semantic recall")]
+    sui["Sui<br/>account ownership +<br/>delegate authorization"]
 
-```sh
-npm --prefix noosphere-mcp run install:user
-~/.noosphere/bin/noosphere setup
+    tools --> files & cli & http & mcp
+    watcher --> backend
+    cli --> http
+    http --> backend
+    backend --> localfile
+    backend --> walrus
+    walrus -.-> sui
 ```
 
-The installer:
+- **Walrus** stores the encrypted memory blobs; Walrus Memory adds semantic
+  indexing so an agent can ask for the history relevant to the current task
+  instead of loading every record.
+- **Sui** provides account ownership and delegate authorization. No project
+  memory text is stored on Sui, and Noosphere requires no custom smart
+  contract.
+- **Noosphere** provides the project-level behavior: stable project
+  namespaces, portable records, Git-aware automatic checkpoints,
+  prompt-ready context files, a durable upload queue with restart recovery,
+  and local project lifecycle management.
 
-- copies a self-contained runtime to `~/.noosphere`;
-- installs the `noosphere` command;
-- configures per-user background services;
-- adds activation hooks for zsh, bash, fish, and PowerShell;
-- starts one project manager that supervises registered repositories.
+## Core concepts
 
-The lifecycle installer supports macOS, Linux, and Windows.
+### Project memory
 
-### 4. Register a project
+Two complementary kinds of memory:
 
-Entering a Git repository from an integrated shell activates it automatically.
-You can also register it explicitly:
-
-```sh
-noosphere register --path /absolute/path/to/repository
-```
-Use the same command for projects opened only through a GUI IDE.
-
-Noosphere does not scan the entire computer. Repositories are registered
-explicitly or through the shell hook. Add `.noosphere-ignore` to opt out.
-
-This command is the same for a new repository and an older one. Every project
-automatically receives the bounded baseline described in
-[Use Noosphere with an existing project](#use-noosphere-with-an-existing-project).
-
-## Everyday workflow
-
-### Start work
-
-Read the current shared context:
+- **Automatic workspace checkpoints.** After the working tree settles, the
+  watcher records changed paths, branch and commit, diff statistics, a
+  workspace fingerprint, and project identity. Metadata only — raw source
+  diffs are not uploaded by default.
+- **Explicit memories.** Agents and developers store decisions, findings,
+  failed approaches, test results, and handoffs when they matter:
 
 ```sh
-noosphere context
-```
-
-Or recall a specific subject:
-
-```sh
-noosphere recall "What changed in authentication and what remains broken?"
-```
-
-### Store a finding or decision
-
-```sh
-noosphere remember \
-  --agent codex \
-  --type decision \
+noosphere remember --agent codex --type decision \
   "Use exponential backoff for retryable API failures."
 ```
 
-Input can also come from stdin:
+Automatic checkpoints preserve observable workspace state. Explicit
+memories preserve intent and conclusions that cannot be inferred from files
+alone.
 
-```sh
-printf '%s\n' "Checkout rejects negative prices." |
-  noosphere remember --agent claude-code --type finding
+### Agent handoff (ACP)
+
+The Agent Cognitive-state Protocol (ACP) hands a project between agents
+through two small validated files:
+
+- **Project State** (`acp.project-state/1`) answers *what is true*:
+  objective, decisions, evidence, blockers, next actions. Print with
+  `noosphere state`; hand off with `noosphere handoff`.
+- **Execution checkpoint** (`acp.execution-state/1`) answers *what was I
+  about to do*: current step, target file, remaining plan. Record with
+  `noosphere exec checkpoint`; resume with `noosphere exec show`.
+
+Both are advisory and honest by construction: the CLI measures repository
+state and file hashes itself, so a checkpoint cannot claim tests pass and
+cannot smuggle code or prompts to the next agent (fenced code and diff
+syntax are rejected at validation).
+
+```mermaid
+sequenceDiagram
+    participant A as Agent A (any vendor)
+    participant N as Noosphere
+    participant B as Agent B (any vendor)
+
+    A->>N: remember decisions / findings
+    A->>N: handoff (Project State)
+    A->>N: exec checkpoint (measured Git state + target hashes)
+    Note over N: validate, content-address, store
+    B->>N: noosphere state / exec show
+    N-->>B: advisory kernels with freshness classification
+    B->>B: verify claims against working tree and tests
+    B->>N: continue: remember, journal, handoff
 ```
 
-### Leave a local handoff note
+`noosphere state sync` extends the same state across machines with
+confirmation-gated apply and quarantine for invalid bytes. Full protocol
+semantics: [docs/ACP.md](docs/ACP.md).
+
+### Master prompts survive tool switches
+
+When a substantial prompt defines multiple phases, Noosphere pins the exact
+prompt in `.noosphere/master-prompt.md`, and appends every later visible
+user prompt to `.noosphere/followups.jsonl`. A later instruction such as
+"continue with phase 2" is resolved against the original phase definitions,
+not inferred from a summary. Claude Code and Codex capture qualifying
+prompts automatically through installed hooks; any other agent can pin
+intent explicitly:
 
 ```sh
-noosphere journal \
-  --agent cursor \
-  "Verified the cache fix. Payment timeout handling remains unresolved."
+cat project-plan.md | noosphere master-prompt
+cat updated-plan.md | noosphere master-prompt --replace   # only when intent truly changes
 ```
 
-The journal stays local unless project configuration explicitly enables
-sharing it.
+Agents separate *intent* from *completion evidence*: current files, Git
+state, and tests are ground truth; the journal carries explicit findings;
+checkpoints and semantic recall show earlier activity. Agents are
+instructed to verify completion claims against the working tree before
+continuing.
 
-### End work
+## Why it works with any agent
 
-Store a concise handoff containing:
+No proprietary plugin is required. The same memory is available through
+multiple open interfaces:
 
-- what changed;
-- what was verified;
-- important decisions;
-- unresolved problems;
-- the best next step.
+| Interface | Best for |
+| --- | --- |
+| `.noosphere/context.md` | Any agent that can read project files |
+| `.noosphere/journal.md` | Human-readable local notes and handoffs |
+| `noosphere` CLI | Terminal agents and scripts |
+| HTTP API | IDEs, web apps, agent frameworks, custom clients |
+| MCP | Agents that support the Model Context Protocol |
 
-The next agent can retrieve it by meaning even if it uses a different tool or
-model.
+Tool-specific files are optional adapters — add only the ones you use:
 
-## CLI reference
+```sh
+noosphere adapters --only claude
+noosphere adapters --only claude,codex,mcp
+```
+
+They point compatible tools back at the same `.noosphere/` folder; no
+per-vendor memories are created.
+
+### Local models through Ollama
+
+Every model served by Ollama's local API can join the same project memory:
+
+```sh
+noosphere ollama qwen3-coder                                   # interactive
+noosphere ollama run minimax-m2 "Continue phase 2"             # one prompt
+noosphere ollama llama3.2 --no-store                           # private session
+```
+
+Noosphere refreshes shared memory before the first response, injects it as
+a system message, and stores a concise handoff when the session ends. The
+Ollama `thinking` field is never added to shared memory, and local-model
+transcripts are marked unverified.
+
+## Everyday workflow
+
+```sh
+noosphere context                                  # start: read shared context
+noosphere recall "What remains broken in auth?"    # or ask a specific question
+
+noosphere remember --agent codex --type decision "…"   # store what matters
+noosphere journal --agent cursor "Verified the cache fix; timeouts remain."
+
+noosphere state                                    # before stopping: what is true
+noosphere exec checkpoint --file checkpoint.json   # where work stood
+```
+
+### CLI reference
 
 ```text
-noosphere setup
-noosphere credentials status
-noosphere credentials migrate
-noosphere credentials rotate
-noosphere doctor
-noosphere activate
-noosphere deactivate
+noosphere setup | doctor | uninstall
+noosphere credentials status | migrate | rotate
+noosphere activate | deactivate
 noosphere register --path /absolute/repository
-noosphere projects
-noosphere baseline
-noosphere checkpoint
-noosphere refresh
-noosphere restore
-noosphere status
+noosphere projects | status | protocol
+noosphere baseline | checkpoint | refresh | restore
 noosphere context
 noosphere recall "query"
 noosphere remember --agent <name> --type <type> "content"
 noosphere journal --agent <name> "note"
+noosphere master-prompt [--replace]
 noosphere state [--json] [validate|sync|push|pull|history|quarantine]
 noosphere handoff --stdin | --file <handoff.json>
 noosphere exec checkpoint|show|import-plan|clear
-noosphere protocol
-noosphere uninstall
+noosphere ollama <model> [run "prompt"] [--no-store]
+noosphere adapters --only <list>
 ```
 
 ## HTTP API
 
-### Store memory
+Store a memory:
 
 ```http
 POST /v1/actions
@@ -564,151 +348,132 @@ Idempotency-Key: <unique-action-id>
   "agent_id": "codex",
   "action_type": "decision",
   "content": "Use idempotency keys for payment creation.",
-  "session_id": "session-2026-06-12",
-  "provider": "OpenAI",
-  "model": "codex",
-  "client": "CLI",
-  "metadata": {
-    "files": ["src/payments.js"]
-  }
+  "metadata": { "files": ["src/payments.js"] }
 }
 ```
 
-A successful response includes the configured backend's memory identifier,
-managed memory ID, and project namespace. If Walrus is temporarily unavailable,
-the API returns an accepted queued response and retries from durable local state.
+A successful response includes the backend's memory identifier and project
+namespace. If the backend is temporarily unavailable, the API returns an
+accepted-and-queued response and retries from durable local state.
 
-### Recall relevant memory
+Recall and context:
 
 ```http
 POST /v1/projects/payments-api/recall
-Content-Type: application/json
-
-{
-  "query": "What decisions affect duplicate payments?",
-  "limit": 10
-}
+GET  /v1/projects/payments-api/context?q=duplicate%20payments&format=text
+GET  /v1/projects/payments-api/bootstrap
 ```
 
-### Get prompt-ready context
-
-```http
-GET /v1/projects/payments-api/context?q=duplicate%20payments&format=text
-```
-
-### Bootstrap any HTTP-capable agent
-
-```http
-GET /v1/projects/payments-api/bootstrap
-```
-
-The bootstrap response combines operating instructions with current semantic
-project context.
-
-### Discovery
-
-- `GET /.well-known/noosphere.json`
-- `GET /openapi.json`
-- `GET /health`
-- `GET /ready`
+Discovery: `GET /.well-known/noosphere.json`, `GET /openapi.json`,
+`GET /health`, `GET /ready`. The OpenAPI document describes the full
+surface.
 
 ## MCP
 
-Noosphere generates project MCP configuration for the official Walrus Memory
-server:
+`noosphere adapters --only mcp` generates project MCP configuration for the
+official Walrus Memory server:
 
 ```sh
-npx -y @mysten-incubation/memwal-mcp@0.0.4 \
-  --staging \
-  --namespace noosphere-<project>
+npx -y @mysten-incubation/memwal-mcp@0.0.4 --staging --namespace noosphere-<project>
 ```
 
-MCP is one access method, not the core protocol. Agents without MCP can use the
-same memory through files, CLI, or HTTP.
+MCP is one access method, not the core protocol; agents without MCP use the
+same memory through files, CLI, or HTTP. Note: the pinned `memwal-mcp`
+release currently targets the staging Walrus Memory service, so the MCP
+adapter reads a different backend than a mainnet-configured relayer. Prefer
+files, CLI, or HTTP when exact parity with your configured backend matters.
+
+## Using Noosphere on an existing project
+
+Noosphere does not require a new repository:
+
+```sh
+cd /path/to/existing-project
+noosphere activate
+```
+
+On first activation every Git repository receives one bounded baseline:
+repository age and commit count, current branch and HEAD, tracked-file
+counts by top-level directory, and up to 50 recent commit subjects (capped
+at 200, configurable in `.noosphere/config.json`; disable with
+`onboarding.auto_baseline: false` if commit subjects are sensitive). The
+watcher then records changes made *after* onboarding instead of pretending
+the historical repository appeared in one session.
+
+Git cannot reconstruct old AI chats or verbal decisions. Add the important
+missing knowledge explicitly:
+
+```sh
+noosphere remember --agent maintainer --type decision \
+  "Production uses PostgreSQL. SQLite is only for local development."
+cat existing-roadmap.md | noosphere master-prompt
+```
+
+### Restore on a fresh machine
+
+After cloning to a machine where `.noosphere/` is missing:
+
+```sh
+noosphere restore
+```
+
+This reconstructs `baseline.md`, `master-prompt.md`, `followups.jsonl`, and
+`context.md` from the project's Walrus records. Files are restored only
+when missing or empty; existing local content is never overwritten, and the
+command is safe to repeat. It requires the same `project_id` in
+`.noosphere/config.json`, provisioned credentials, and network access. The
+local journal does not survive the move unless `privacy.share_journal` was
+enabled on the previous machine.
 
 ## Project files
 
-Default initialization creates:
-
 ```text
 .noosphere/
-├── baseline.md            Optional established-project onboarding snapshot
-├── config.json             Project identity, privacy, and adapter settings
-├── context.md              Refreshed context for file-reading agents
-├── journal.md              Local public work notes and handoffs
-├── protocol.json           Machine-readable continuity protocol
-└── instructions.md         Human-readable universal instructions
+├── baseline.md       Optional established-project onboarding snapshot
+├── config.json       Project identity, privacy, and adapter settings
+├── context.md        Refreshed context for file-reading agents
+├── journal.md        Local public work notes and handoffs
+├── protocol.json     Machine-readable continuity protocol
+└── instructions.md   Human-readable universal instructions
 ```
 
-The following files exist only after an explicit `noosphere adapters` command:
-
-```text
-CLAUDE.md                   Optional Claude adapter
-AGENTS.md                   Optional Codex/generic adapter
-GEMINI.md                   Optional Gemini adapter
-.cursor/                    Optional Cursor adapter
-.mcp.json                   Optional generic MCP adapter
-```
-
-The adapters are intentionally small. The durable memory remains in the
-project's Walrus namespace.
+`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursor/`, and `.mcp.json` exist
+only after an explicit `noosphere adapters` command. (This repository
+tracks its own copies because Noosphere develops itself with Noosphere.)
 
 ## Privacy model
 
-### Default checkpoint privacy
+- **Checkpoints are metadata-only by default.** Raw source diffs upload
+  only when `privacy.include_diff` is explicitly enabled. The baseline is
+  metadata-only too.
+- **The managed relayer sees plaintext.** Walrus Memory's managed relayer
+  receives plaintext to create embeddings and apply Seal encryption before
+  storing encrypted blobs on Walrus. This is a documented trust boundary,
+  not zero-knowledge encryption.
+- **Pending uploads** live in an owner-only durable queue until confirmed,
+  then are removed.
+- **Credentials** are stored through the platform credential backend;
+  Linux systems without Secret Service fall back to an owner-only `0600`
+  file. Private keys are never printed.
+- **No hidden reasoning.** Noosphere never asks agents to reveal
+  chain-of-thought; memories are concise conclusions, evidence, and
+  handoffs.
 
-Automatic checkpoints are metadata-only. Raw source diffs are uploaded only
-when `privacy.include_diff` is explicitly enabled in
-`.noosphere/config.json`.
-
-The established-project baseline is metadata-only too. It includes recent
-commit subjects, changed paths, file-area counts, and repository timing
-metadata, but no source contents or historical diffs. Disable
-`onboarding.auto_baseline` before first activation when commit subjects are
-sensitive.
-
-### Managed relayer boundary
-
-The managed Walrus Memory relayer receives plaintext to create embeddings and
-apply Seal encryption before storing encrypted blobs on Walrus. This is not
-zero-knowledge encryption with respect to the managed relayer.
-
-### Temporary local plaintext
-
-Pending uploads are stored in an owner-only durable queue until Walrus confirms
-storage. The pending entry is removed after a successful upload.
-
-### Credentials
-
-`noosphere setup` stores credentials using the platform credential backend.
-Linux systems without Secret Service fall back to an owner-only `0600` file.
-Private keys are never printed by the setup or status commands.
-
-### Hidden reasoning
-
-Noosphere does not ask agents to reveal private chain-of-thought. Memories
-should contain concise conclusions, evidence, and handoffs.
-
-See [docs/PRIVACY.md](docs/PRIVACY.md) for the complete data path and
-retention limitations, and
-[noosphere-relayer/MEMORY_SECURITY.md](noosphere-relayer/MEMORY_SECURITY.md)
-for the security boundary.
+Full data path and retention: [docs/PRIVACY.md](docs/PRIVACY.md) and
+[noosphere-relayer/MEMORY_SECURITY.md](noosphere-relayer/MEMORY_SECURITY.md).
 
 ## Reliability
 
-The relayer is designed for intermittent external-service failures:
-
-- writes enter an atomic durable queue before upload;
-- idempotency receipts survive restarts;
-- temporary failures use exponential backoff;
-- upstream cooldown hints are respected;
-- uploads are serialized to avoid request storms;
-- explicit user memories are prioritized before background checkpoints;
-- queued writes resume after restart;
-- readiness exposes pending jobs and the next upload slot.
-
-The default service binds to `127.0.0.1`. Public or non-loopback deployments
-require bearer authentication and explicit CORS origins.
+- Writes enter an atomic durable queue before upload; queued writes resume
+  after restart, and idempotency receipts survive restarts.
+- Temporary failures use exponential backoff and respect upstream cooldown
+  hints; uploads are serialized to avoid request storms.
+- Explicit user memories are prioritized before background checkpoints.
+- Readiness (`/ready`) exposes pending jobs and the next upload slot.
+- The default service binds to `127.0.0.1`. Production and non-loopback
+  startup **fail closed** without `NOOSPHERE_API_TOKEN`; public deployments
+  require bearer authentication and explicit CORS origins. See
+  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Important limitations
 
@@ -716,97 +481,125 @@ require bearer authentication and explicit CORS origins.
   chronological audit log.
 - Automatic checkpoints preserve observable Git state, not every unspoken
   decision made inside an agent session.
-- Initial project onboarding cannot reconstruct old chats or undocumented
-  decisions. It creates a bounded Git-derived starting point.
+- Onboarding cannot reconstruct old chats or undocumented decisions.
 - Forgetting a project removes local registration but does not delete its
-  existing Walrus memories.
-- Memory retention follows Walrus Memory account and service behavior.
+  existing Walrus memories; retention follows Walrus Memory account
+  behavior.
 - The managed relayer is part of the plaintext trust boundary.
-- Demo mode is local-only and should not be confused with Walrus-backed
-  shared memory.
+- Demo mode is local-only and is not Walrus-backed shared memory.
 
 ## Repository structure
 
 ```text
-noosphere-relayer/
+noosphere-mcp/             npm: noosphere-continuity
+  continuity/              CLI, watcher, context refresh, ACP state
+  lifecycle/               Installer, services, registry, credentials
+  hooks/                   Optional tool-specific hooks
+  mcp-server/              MCP configuration assets
+
+noosphere-relayer/         npm: noosphere-relayer
   index.js                 HTTP API and setup endpoints
   memory.js                Portable record serialization
   walrus-memory.js         Walrus Memory and Sui account adapter
   durable-store.js         Restart-safe queue and receipts
   security.js              Authentication, CORS, headers, rate limits
-  local-projects.js        Local project controls
-  credentials.js           Credential loading
-  MEMORY_SECURITY.md       Encryption and authorization boundary
+  vendor/acp-protocol/     Docker-context mirror of the protocol package
 
-noosphere-mcp/
-  continuity/              CLI, watcher, context refresh, ACP state
-  lifecycle/               Installer, services, registry, credentials
-  hooks/                   Optional tool-specific hooks
-  mcp-server/              MCP configuration and compatibility assets
-
-noosphere-acp-protocol/
-  Shared ACP protocol package: envelopes, schemas, validation
+noosphere-acp-protocol/    Shared ACP package: envelopes, schemas, validation
 
 docs/
   ACP.md                   Agent handoff protocol reference
   PRIVACY.md               Data handling and retention
   DEPLOYMENT.md            Public deployment and recovery
-  design/specs/       Full ACP design documents
+  adr/                     Architecture decision records
+  design/                  Full ACP design documents and plans
 ```
 
-## Development and verification
-
-Relayer:
+## Development
 
 ```sh
-cd noosphere-relayer
-npm install
-npm run check
-npm test
+npm --prefix noosphere-relayer install && npm --prefix noosphere-relayer run check
+npm --prefix noosphere-mcp install     && npm --prefix noosphere-mcp run check
+npm --prefix noosphere-acp-protocol test
 ```
 
-Continuity and lifecycle:
+Live Walrus verification is intentionally separate:
+`npm --prefix noosphere-relayer run test:live`.
 
-```sh
-cd noosphere-mcp
-npm install
-npm run check
-npm test
-```
+Contributions welcome — read [CONTRIBUTING.md](CONTRIBUTING.md) for setup,
+standards, and the review process. Security reports go through
+[SECURITY.md](SECURITY.md), releases are recorded in
+[CHANGELOG.md](CHANGELOG.md), and design history lives in
+[docs/adr/](docs/adr/) and [docs/design/](docs/design/).
 
-Live Walrus verification is intentionally separate from routine tests:
+## Status and roadmap
 
-```sh
-cd noosphere-relayer
-npm run test:live
-```
+Noosphere was built for Sui Overflow 2026 and is maintained beyond it. The
+system is verified with live Walrus mainnet store and recall, process
+restart and durable queue recovery, cross-agent CLI handoffs, and
+multi-project lifecycle management across macOS, Linux, and Windows.
 
-## Deployment
+Current focus is stability, portability, and documentation — hardening the
+existing ACP surface rather than adding capabilities. Feature proposals are
+welcome as GitHub issues.
 
-The relayer binds to loopback by default. For a public deployment:
+## FAQ
 
-```dotenv
-NODE_ENV=production
-HOST=0.0.0.0
-NOOSPHERE_API_TOKEN=<random-secret>
-CORS_ORIGINS=https://your-noosphere.example
-```
+**Is my source code uploaded?**
+Not by default. Automatic checkpoints are metadata-only (paths, branch,
+diff statistics). Raw diffs upload only if you explicitly enable
+`privacy.include_diff`.
 
-Generate a token with:
+**Do I need a Walrus account or any blockchain knowledge?**
+No. Local-file mode runs the entire flow on one machine with zero
+credentials. Walrus Memory adds encrypted cross-machine storage and
+semantic recall; Sui is only used for account ownership and delegate
+authorization underneath Walrus Memory.
 
-```sh
-openssl rand -hex 32
-```
+**Is this an MCP server?**
+No. MCP is one of four interfaces (files, CLI, HTTP, MCP). Agents without
+MCP support lose nothing.
 
-Production and non-loopback startup fail closed when the token is missing.
-Use TLS through Caddy, NGINX, or another trusted reverse proxy.
+**How is this different from a memory plugin for one tool?**
+Memory attaches to the project, not the vendor. Any tool that can read a
+file, run a command, or make an HTTP request participates — including local
+Ollama models.
 
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for TLS, container, backup, and
-recovery guidance.
+**Can an agent smuggle instructions or code through a handoff?**
+ACP execution checkpoints structurally reject fenced code, diff syntax, and
+multi-line prose, and the CLI measures Git state and file hashes itself, so
+asserted claims ("tests pass") are overwritten by measurement. Kernels are
+rendered as advisory statements, never imperatives.
 
-## Project status
+**Why does recall return nothing right after storing?**
+Writes flow through the durable queue and become recallable after the next
+upload cycle — up to ~30 seconds in local-file mode.
 
-Noosphere is built for Sui Overflow 2026 using Walrus Memory and Sui account
-authorization. The working system has been verified with live Walrus mainnet
-store and recall, process restart, durable queue recovery, cross-agent CLI
-handoffs, and automatic multi-project lifecycle management.
+**What happens when Walrus is unreachable?**
+The write is accepted into the durable queue and retried with backoff;
+queued writes survive restarts.
+
+## Troubleshooting
+
+- **`noosphere: command not found`** — the installer puts the binary in
+  `~/.noosphere/bin`; restart the shell or check that the activation hook
+  was added, then run `noosphere doctor`.
+- **`noosphere credentials status` fails** — verify the account in the
+  [Walrus Memory dashboard](https://memory.walrus.xyz/), that
+  `MEMWAL_NETWORK` matches where the account exists, and that the delegate
+  key is registered.
+- **Relayer refuses to start in production** — that is the fail-closed
+  token check: set `NOOSPHERE_API_TOKEN` (generate with
+  `openssl rand -hex 32`) or run loopback-only.
+- **Port 3001 already in use** — set `PORT` and point
+  `NOOSPHERE_RELAYER_URL` (or `relayer_url` in `.noosphere/config.json`)
+  at the same address.
+- **Windows: scheduled task creation blocked** — the installer degrades
+  gracefully when `schtasks /Create` is blocked; per-user services still
+  work. Credential encryption under PowerShell 5.1 requires
+  `noosphere-continuity` ≥ 2.1.6 and `noosphere-relayer` ≥ 2.0.4.
+- Anything else: `noosphere doctor`, then open an issue with its output.
+
+## License
+
+[MIT](LICENSE) © 2026 Milan Pap
