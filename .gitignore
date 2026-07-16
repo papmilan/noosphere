@@ -6,9 +6,6 @@ demo_blobs/
 project_registry.json
 *.tmp
 
-# Move build artifacts
-build/
-
 # Test temp dirs
 tests/.tmp-*
 
@@ -21,12 +18,20 @@ tests/.tmp-*
 .DS_Store
 ._*
 
-# Claude Flow runtime
+# Local AI tool state (never part of the project)
+.claude/
 .claude-flow/
+.serena/
+*-worktree
+
+# Local screenshots and design references
+/*.png
+
+# Noosphere local runtime files (protocol.json stays tracked)
 .noosphere/context.md
 .noosphere/state.json
 .noosphere/ide-hint.json
 .noosphere/*.tmp
+.noosphere/journal.md
 noosphere-relayer/.noosphere-local-memory.json
 noosphere-relayer/.noosphere-runtime/
-.noosphere/journal.md
