@@ -1968,12 +1968,21 @@ function printSyncResult(result) {
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }
 
-async function syncDependencies(root, config) {
+export async function syncDependencies(root, config) {
   const metadata = await readSyncMetadata(root);
   return {
     client: new RemoteStateClient({
       baseUrl: config.relayer_url,
-      token: process.env.NOOSPHERE_API_TOKEN,
+      // SEC-01: the ACP exact-state client must not own the credential. Every
+      // request is routed through secureRelayerFetch, which is the single
+      // authority boundary (resolveRelayerAuthority): an unapproved or
+      // non-HTTPS non-loopback origin — including one chosen by a
+      // repository-controlled config.relayer_url — is refused before any
+      // network I/O, the token is attached only after the destination is
+      // approved, and redirects are rejected (redirect: 'error'). Passing
+      // token: null keeps the client from ever attaching a bearer itself.
+      token: null,
+      fetchImpl: (url, options) => secureRelayerFetch(url, options),
       timeoutMs: Number(process.env.NOOSPHERE_ACP_TIMEOUT_MS) || 2_000,
       expectedRelayerIndexId: metadata.relayer_index_id || null,
     }),
