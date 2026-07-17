@@ -3,11 +3,12 @@
 // prevents two writers from silently replacing one another's checkpoint.
 
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalize } from '@noosphere/acp-protocol';
 import { createExecutionState } from './execution-state.js';
 import { renderExecutionKernel } from './execution-render.js';
+import { ensureContainedDir } from '../secure-fs.js';
 
 const DEFAULT_AGENT_ID = 'default';
 const AGENT_ID = /^[a-z0-9](?:[a-z0-9-]{0,62})?$/;
@@ -73,7 +74,7 @@ export async function writeExecutionState(root, envelope, options = {}) {
   const decoded = createExecutionState(envelope, { clock: options.now, policy: options.policy });
   if (!decoded.ok) throw new Error(`Invalid execution state: ${decoded.errors.map(({ path: p, code }) => `${p} ${code}`).join('; ')}`);
   const paths = executionPaths(root, agentId);
-  return withAgentLock(paths, async () => {
+  return withAgentLock(root, paths, async () => {
     const generation = await readGeneration(paths.generation);
     if (options.expectedGeneration != null && options.expectedGeneration !== generation) throw executionError('checkpoint-cleared');
     const previous = await readExecutionState(root, { agentId, now: options.now, policy: options.policy });
@@ -103,7 +104,7 @@ export async function writeExecutionState(root, envelope, options = {}) {
 
 export async function clearExecutionState(root, agentId = DEFAULT_AGENT_ID) {
   const paths = executionPaths(root, agentId);
-  return withAgentLock(paths, async () => {
+  return withAgentLock(root, paths, async () => {
     const nextGeneration = (await readGeneration(paths.generation)) + 1;
     await writeFile(paths.generation, `${nextGeneration}\n`, { mode: 0o600 });
     await rm(paths.json, { force: true });
@@ -112,8 +113,8 @@ export async function clearExecutionState(root, agentId = DEFAULT_AGENT_ID) {
   });
 }
 
-async function withAgentLock(paths, action) {
-  await mkdir(paths.dir, { recursive: true, mode: 0o700 });
+async function withAgentLock(root, paths, action) {
+  await ensureContainedDir(root, paths.dir);
   let handle;
   try { handle = await open(paths.lock, 'wx', 0o600); }
   catch (error) { if (error.code === 'EEXIST') throw executionError('execution-write-in-progress'); throw error; }

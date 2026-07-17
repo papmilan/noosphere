@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import {
-  mkdir,
   readFile,
   rename,
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
+import { ensureRealDirectoryPath } from './secure-fs.js';
 
 export class LocalMemoryStore {
   constructor(env, { defaultPath }) {
@@ -97,8 +97,9 @@ export class LocalMemoryStore {
   }
 
   async writeToDisk() {
+    const dir = path.dirname(this.filePath);
+    await ensureRealDirectoryPath(dir, { mode: 0o700 });
     const temporary = `${this.filePath}.${randomUUID()}.tmp`;
-    await mkdir(path.dirname(this.filePath), { recursive: true });
     await writeFile(
       temporary,
       `${JSON.stringify(

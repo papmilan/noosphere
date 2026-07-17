@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { ensureContainedDirSync, readFileNoFollowSync, writeFileNoFollowSync } from './secure-fs.js';
 
 const SERVICE_NAME = 'noosphere';
 const CREDENTIAL_KEYS = [
@@ -22,6 +23,7 @@ export class CredentialStore {
     this.account = account;
     this.platform = platform;
     this.run = run;
+    this.home = home;
     this.fallbackPath = path.join(
       home,
       '.noosphere',
@@ -279,23 +281,17 @@ export class CredentialStore {
 
   #fallbackStore(secret) {
     this.#ensureDirectory();
-    fs.writeFileSync(this.fallbackPath, secret, {
-      mode: 0o600,
-      encoding: 'utf8',
-    });
-    fs.chmodSync(this.fallbackPath, 0o600);
+    // No-follow write: refuse to write the secret through a pre-planted symlink.
+    writeFileNoFollowSync(this.fallbackPath, secret, 0o600);
   }
 
   #fallbackGet() {
-    if (!fs.existsSync(this.fallbackPath)) return null;
-    return fs.readFileSync(this.fallbackPath, 'utf8');
+    // No-follow read: refuse to read the secret through a pre-planted symlink.
+    return readFileNoFollowSync(this.fallbackPath);
   }
 
   #ensureDirectory() {
-    fs.mkdirSync(path.dirname(this.fallbackPath), {
-      recursive: true,
-      mode: 0o700,
-    });
+    ensureContainedDirSync(this.home, path.dirname(this.fallbackPath));
   }
 
   #cleanupZeroByte(filePath) {
