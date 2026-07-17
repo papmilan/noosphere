@@ -103,12 +103,13 @@ These residuals are disclosed intentionally; they are not undisclosed defects:
   as the same user who swaps a path component between the check and the write is
   not fully prevented, because fd-relative (`openat`) semantics are not available
   in the Node core API. This requires an already-local same-user attacker.
-- **Windows filesystem behavior.** The symlink/`O_NOFOLLOW` containment guards
-  are verified on POSIX (macOS/Linux). Behavior against Windows
-  junctions/reparse points and case-insensitive path normalization is **not yet
-  verified on a Windows runner** and must be validated with
-  `scripts/verify-secure-fs-windows.ps1` on the exact supported Windows versions
-  before a Windows release is declared safe. See
+- **Windows filesystem behavior.** Junction/reparse-point containment was
+  verified on commit `66a2e490cefd77a4aad0941d2c8869d89a4c14bc` with
+  `PASS=4`, `FAIL=0`, and `SKIP=3`. The ACP Project State, Execution State,
+  credential-store, and case-insensitive Project State junction scenarios all
+  passed. The three symbolic-link scenarios were skipped because Developer Mode
+  was unavailable. Junction containment is verified; full Windows symbolic-link
+  coverage remains pending until a Developer Mode run. See
   [docs/security/windows-filesystem-verification.md](docs/security/windows-filesystem-verification.md).
 
 ## Security model

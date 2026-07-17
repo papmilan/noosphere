@@ -93,16 +93,30 @@ Windows threat) and marks the symlink scenarios `SKIP`. A run with `SKIP` rows
 verifies junction containment but does not cover symlink containment; enable
 Developer Mode to get full coverage before declaring symlink safety.
 
-## Supported Windows / Node versions
+## Completed Windows verification
 
-> Not yet run. This table must be filled in from an actual run on each supported
-> platform before Windows safety is claimed. Do not mark this row PASS from a
-> POSIX host.
+Verification was completed on commit
+`66a2e490cefd77a4aad0941d2c8869d89a4c14bc`.
 
 | Windows version | Node version | Symlinks | Result | Date | Runner |
 | --- | --- | --- | --- | --- | --- |
-| _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
+| Windows 10 Pro, Version 2009, build 19045 | v22.18.0 | Unavailable (Developer Mode disabled) | `PASS=4`, `FAIL=0`, `SKIP=3`; SAFE for executed scenarios | 2026-07-17 | Dell laptop; Windows PowerShell 5.1 |
 
-Until this table shows a passing run on the supported Windows versions, the
-Windows filesystem behavior of SEC-03 is **unverified** and the project must not
-be declared Windows-safe.
+Passed scenarios:
+
+- ACP Project State (junction)
+- Execution State (junction)
+- Credential store (junction)
+- ACP Project State (case-insensitive junction)
+
+Skipped scenarios:
+
+- ACP Project State (symbolic link)
+- Execution State (symbolic link)
+- Credential store (symbolic link)
+
+All three symbolic-link scenarios were skipped only because Developer Mode was
+unavailable. The completed run verifies Windows junction/reparse-point
+containment, including the case-insensitive Project State scenario. It does not
+establish full Windows symbolic-link coverage; that remains pending until the
+same scenarios run with Developer Mode enabled.
