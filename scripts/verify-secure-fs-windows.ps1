@@ -171,14 +171,14 @@ try {
     Write-Host ("PASS={0}  FAIL={1}  SKIP={2}" -f $pass, $fail, $skip)
 
     if ($Unsafe) {
-        Write-Host "RESULT: UNSAFE — a state store wrote outside its root or the guard did not refuse." -ForegroundColor Red
+        Write-Host "RESULT: UNSAFE - a state store wrote outside its root or the guard did not refuse." -ForegroundColor Red
         exit 1
     }
     if ($skip -gt 0) {
         Write-Host "RESULT: SAFE for executed scenarios; symlink scenarios SKIPPED (enable Developer Mode to cover them)." -ForegroundColor Yellow
         exit 0
     }
-    Write-Host "RESULT: SAFE — all scenarios refused and contained." -ForegroundColor Green
+    Write-Host "RESULT: SAFE - all scenarios refused and contained." -ForegroundColor Green
     exit 0
 }
 finally {
