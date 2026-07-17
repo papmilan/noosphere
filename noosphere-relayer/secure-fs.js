@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { lstat, mkdir, realpath } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 // Centralized filesystem trust boundary. A cloned repository (or a local attacker)
@@ -24,19 +25,50 @@ const NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
 
 function relativeSegments(root, dir) {
   const relative = path.relative(root, dir);
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+  if (
+    relative === '..'
+    || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative)
+  ) {
     throw new PathBoundaryError('state-dir-escape', `${dir} is not under ${root}`);
   }
   return relative === '' ? [] : relative.split(path.sep);
 }
 
 function assertContained(rootReal, dirReal) {
-  if (dirReal !== rootReal && !dirReal.startsWith(rootReal + path.sep)) {
+  const relative = path.relative(rootReal, dirReal);
+  if (
+    relative === '..'
+    || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative)
+  ) {
     throw new PathBoundaryError('state-dir-escape', `resolved ${dirReal} escapes ${rootReal}`);
   }
 }
 
+function trustedRootFor(dir) {
+  const absolute = path.resolve(dir);
+  const candidates = [os.homedir(), os.tmpdir()]
+    .filter(Boolean)
+    .map((candidate) => path.resolve(candidate))
+    .filter((candidate) => {
+      const relative = path.relative(candidate, absolute);
+      return relative === '' || (
+        relative !== '..'
+        && !relative.startsWith(`..${path.sep}`)
+        && !path.isAbsolute(relative)
+      );
+    })
+    .sort((left, right) => right.length - left.length);
+
+  return {
+    root: candidates[0] ?? path.parse(absolute).root,
+    dir: absolute,
+  };
+}
+
 export async function ensureContainedDir(root, dir, { mode = 0o700 } = {}) {
+  const rootReal = await realpath(root);
   let current = root;
   for (const segment of relativeSegments(root, dir)) {
     current = path.join(current, segment);
@@ -57,10 +89,14 @@ export async function ensureContainedDir(root, dir, { mode = 0o700 } = {}) {
     if (!info.isDirectory()) {
       throw new PathBoundaryError('state-dir-not-directory', `not a directory: ${current}`);
     }
+    assertContained(rootReal, await realpath(current));
   }
-  const [rootReal, dirReal] = await Promise.all([realpath(root), realpath(current)]);
-  assertContained(rootReal, dirReal);
   return current;
+}
+
+export async function ensureRealDirectoryPath(dir, options = {}) {
+  const boundary = trustedRootFor(dir);
+  return ensureContainedDir(boundary.root, boundary.dir, options);
 }
 
 // Lightweight guard for stores whose file lives at a configured path with no

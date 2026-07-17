@@ -2,7 +2,6 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import {
   access,
   constants,
-  mkdir,
   readFile,
   rename,
   unlink,
@@ -10,7 +9,7 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import { syncDirectoryPath, syncFilePath } from './durability.js';
-import { assertRealDirectory } from './secure-fs.js';
+import { ensureRealDirectoryPath } from './secure-fs.js';
 
 const DEFAULT_RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -174,10 +173,7 @@ export class DurableStore {
   async health() {
     await this.initialize();
     if (!this.persist) return { ready: true, durable: false, shared: false };
-    await mkdir(path.dirname(this.filePath), {
-      recursive: true,
-      mode: 0o700,
-    });
+    await ensureRealDirectoryPath(path.dirname(this.filePath), { mode: 0o700 });
     await access(path.dirname(this.filePath), constants.W_OK);
     return { ready: true, durable: true, shared: this.shared };
   }
@@ -228,11 +224,7 @@ export class DurableStore {
 
   async writeState() {
     const directory = path.dirname(this.filePath);
-    await mkdir(directory, {
-      recursive: true,
-      mode: 0o700,
-    });
-    await assertRealDirectory(directory);
+    await ensureRealDirectoryPath(directory, { mode: 0o700 });
     const temporary = `${this.filePath}.${randomUUID()}.tmp`;
     await writeFile(
       temporary,
