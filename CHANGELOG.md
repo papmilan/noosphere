@@ -12,6 +12,29 @@ Dates are npm publish dates. The format follows
 
 ## noosphere-continuity
 
+### 2.3.1 — 2026-07-17
+
+**Security patch.** Publishes the merged SEC-01/03/05 fixes.
+
+- **SEC-01 (memory path):** every credentialed relayer request now passes
+  through a single authority boundary. A repository-controlled `relayer_url`
+  can no longer select a credential-bearing origin: unapproved or non-HTTPS
+  non-loopback origins are refused before any network I/O, the API token is
+  attached only to a loopback or owner-approved origin (owner-only
+  `~/.noosphere/approved-relayers.json`), and origin-changing redirects are
+  rejected.
+- **SEC-01 (ACP exact-state):** the ACP exact-state sync client no longer owns
+  the API token; it is routed through the same authority boundary, closing the
+  automatic `activateProject` token-exfiltration path.
+- **SEC-03:** centralized secure-filesystem boundary (no-follow, exclusive
+  creation, realpath containment) applied to ACP project/execution state,
+  locks, journals, temp files, and local memory; symlinked/reparse state
+  directories and path components are rejected.
+- **SEC-05:** recalled semantic memory is treated as untrusted quoted data —
+  control characters, terminal escapes, and system-role/markup impersonation
+  are sanitized, and recalled text is never injected into adapter instructions
+  as authority.
+
 ### 2.3.0 — 2026-07-15
 
 **ACP Execution Continuity.**
@@ -81,6 +104,16 @@ Dates are npm publish dates. The format follows
   graceful degradation when Windows blocks `schtasks /Create`.
 
 ## noosphere-relayer
+
+### 2.1.2 — 2026-07-17
+
+**Security patch.**
+
+- Relayer authority validation support: filesystem and credential stores are
+  routed through the centralized secure-filesystem boundary (no-follow,
+  exclusive creation, realpath containment), and symlinked/reparse state
+  directories, credential files, and path components are rejected (SEC-03).
+- Security hardening for the fallback credential and local-memory stores.
 
 ### 2.1.1 — 2026-07-15
 
