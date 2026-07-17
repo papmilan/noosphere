@@ -1,6 +1,6 @@
 {
   "name": "noosphere-continuity",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "description": "Cross-agent project memory backed by local files or Walrus Memory on Sui",
   "type": "module",
   "bin": {
@@ -49,7 +49,7 @@
   },
   "author": "Milan Pap",
   "peerDependencies": {
-    "noosphere-relayer": "2.1.1"
+    "noosphere-relayer": "2.1.2"
   },
   "peerDependenciesMeta": {
     "noosphere-relayer": {
