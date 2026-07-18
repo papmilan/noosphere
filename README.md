@@ -1,6 +1,6 @@
 # Noosphere
 
-**Switch AI coding tools without losing project context.**
+**Open-source continuity infrastructure for resumable AI workflows.**
 
 [![npm: noosphere-continuity](https://img.shields.io/npm/v/noosphere-continuity?label=noosphere-continuity)](https://www.npmjs.com/package/noosphere-continuity)
 [![npm: noosphere-relayer](https://img.shields.io/npm/v/noosphere-relayer?label=noosphere-relayer)](https://www.npmjs.com/package/noosphere-relayer)
@@ -8,51 +8,47 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node >= 22](https://img.shields.io/node/v/noosphere-continuity)](noosphere-mcp/package.json)
 
-Noosphere gives a software project one shared memory that every AI coding
-tool can read and update. Work can begin in Codex, continue in Claude Code,
-move to Cursor, and finish through another CLI or HTTP client without
-forcing each agent to rediscover the project from scratch.
+Noosphere is an open-source continuity layer for AI-assisted software work.
+It records project intent, decisions, evidence, handoffs, and execution
+state so work can pause, resume, and move between agents without forcing the
+next session to reconstruct the project from scratch. Its Continuation State
+Protocol (CSP) keeps durable project context close to the repository, while
+the Agent Continuity Protocol (ACP) provides validated, Git-aware handoffs.
 
-> Noosphere is a continuity layer that lets any AI agent resume a project
-> from the work, decisions, findings, and handoffs left by previous agents.
+## Why use Noosphere?
 
-It is not shared consciousness and it does not transfer reasoning. It
-records concise, externally verifiable facts — what changed, what was
-decided, what failed, what was verified, what should happen next — and puts
-them where the next agent will look.
+AI work is often trapped in a single chat, session, or vendor. Noosphere
+keeps the continuity in the project instead: the next agent can start from
+shared facts, verify prior work, and continue a resumable workflow across
+Codex, Claude Code, Cursor, local models, scripts, or custom clients.
 
-## Why it exists
+## Install
 
-AI coding tools keep context inside one session and one product. When a
-session ends or the user switches tools:
+Requirements: Node.js 22+, npm, and Git. No Walrus account is needed for
+local mode.
 
-- decisions disappear into chat history;
-- bugs and failed approaches are investigated again;
-- the next agent cannot see what another agent already verified;
-- long projects repeatedly spend tokens rebuilding context;
-- useful work is tied to a vendor instead of the project.
-
-The repository survives. The agent's understanding often does not.
-Noosphere attaches that understanding to the project, not to the AI
-provider:
-
-```text
-Codex finds a bug
-       |
-       v
-Noosphere stores the finding in the project's memory
-       |
-       v
-Claude Code, Cursor, Gemini, or another agent recalls it later
-       |
-       v
-The next agent verifies or continues the work instead of starting over
+```sh
+git clone https://github.com/papmilan/noosphere.git
+cd noosphere
+npm --prefix noosphere-mcp run install:user
+~/.noosphere/bin/noosphere setup
 ```
 
-## Quick start
+The installer adds the `noosphere` command, per-user background services,
+and shell activation hooks for macOS, Linux, and Windows.
 
-Requirements: Node.js 22+, npm, git. No Walrus account is needed for local
-mode.
+## Main capabilities
+
+- **CSP project continuity:** preserves durable context, pinned intent,
+  decisions, evidence, and handoffs alongside the repository.
+- **ACP handoffs:** stores validated project state and execution checkpoints
+  so another agent can resume from what is true and what remains to do.
+- **Cross-agent workflows:** shares continuity through project files, the
+  CLI, HTTP API, and MCP rather than tying it to one AI vendor.
+- **Local or remote memory:** supports local-file workflows and optional
+  shared remote memory with semantic recall.
+
+## Quick start
 
 ### Try it in five minutes (local, no credentials)
 
@@ -96,20 +92,6 @@ curl -X POST http://127.0.0.1:3001/v1/projects/demo/recall \
 
 Local-file mode keeps memory in a gitignored JSON file on this machine. It
 demonstrates the full flow but does not provide cross-machine memory.
-
-### Install the CLI and automatic continuity
-
-From the repository root:
-
-```sh
-npm --prefix noosphere-mcp run install:user
-~/.noosphere/bin/noosphere setup
-```
-
-The installer copies a self-contained runtime to `~/.noosphere`, installs
-the `noosphere` command, configures per-user background services
-(macOS, Linux, and Windows), and adds shell activation hooks for zsh, bash,
-fish, and PowerShell.
 
 ### Register a project and make the first handoff
 
@@ -575,14 +557,14 @@ standards, and the review process. Security reports go through
 
 ## Status and roadmap
 
-Noosphere was built for Sui Overflow 2026 and is maintained beyond it. The
-system is verified with live Walrus mainnet store and recall, process
-restart and durable queue recovery, cross-agent CLI handoffs, and
+Noosphere is a released, open-source project for durable AI workflow
+continuity. It is verified with live Walrus mainnet store and recall,
+process restart and durable queue recovery, cross-agent CLI handoffs, and
 multi-project lifecycle management across macOS, Linux, and Windows.
 
-Current focus is stability, portability, and documentation — hardening the
-existing ACP surface rather than adding capabilities. Feature proposals are
-welcome as GitHub issues.
+Current focus is stability, portability, and documentation while hardening
+the existing CSP and ACP surface. Feature proposals are welcome as GitHub
+issues.
 
 ## FAQ
 
