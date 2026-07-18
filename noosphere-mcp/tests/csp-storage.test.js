@@ -174,18 +174,26 @@ describe('CSP storage and runtime-state migration', () => {
     assert.equal((await lstat(state)).isFile(), true);
   });
 
-  it('treats an empty object as ambiguous rather than positive legacy telemetry', async () => {
-    const root = await tempRoot();
-    const { dir, state, runtime } = cspPaths(root);
-    await mkdir(dir);
-    await writeFile(state, '{}\n');
+  it('returns structured errors for null, empty, and malformed legacy state', async () => {
+    const cases = [
+      { bytes: 'null\n', code: 'state-file-ambiguous' },
+      { bytes: '{}\n', code: 'state-file-ambiguous' },
+      { bytes: '{bad json\n', code: 'csp-json-invalid' },
+    ];
 
-    await assert.rejects(
-      migrateLegacyRuntimeState(root),
-      (error) => error.code === 'state-file-ambiguous',
-    );
-    assert.equal(await readFile(state, 'utf8'), '{}\n');
-    await assert.rejects(readFile(runtime), (error) => error.code === 'ENOENT');
+    for (const fixture of cases) {
+      const root = await tempRoot();
+      const { dir, state, runtime } = cspPaths(root);
+      await mkdir(dir);
+      await writeFile(state, fixture.bytes);
+
+      await assert.rejects(
+        migrateLegacyRuntimeState(root),
+        (error) => !(error instanceof TypeError) && error.code === fixture.code,
+      );
+      assert.equal(await readFile(state, 'utf8'), fixture.bytes);
+      await assert.rejects(readFile(runtime), (error) => error.code === 'ENOENT');
+    }
   });
 
   it('does not overwrite a runtime destination created during migration', async () => {

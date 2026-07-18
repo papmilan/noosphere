@@ -84,7 +84,7 @@ export async function migrateLegacyRuntimeState(root, options = {}) {
     const parsed = parseJson(raw.bytes);
     const validated = validateState(parsed);
     if (validated.ok) return { migrated: false, reason: 'csp-state-present' };
-    if (Object.hasOwn(parsed, 'version')) {
+    if (isPlainObject(parsed) && Object.hasOwn(parsed, 'version')) {
       throw cspError('csp-schema-invalid', 'CSP state does not match a supported schema', {
         errors: validated.errors,
       });
