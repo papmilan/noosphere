@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -14,6 +14,7 @@ import {
 } from '../continuity/acp/execution-store.js';
 import { EXECUTION_PROTOCOL } from '../continuity/acp/execution-state.js';
 import { workspaceFingerprintHex } from '../continuity/acp/git-state.js';
+import { assertOwnerOnlyFile } from './file-security.js';
 
 const execFileAsync = promisify(execFile);
 const CREATED_AT = '2026-07-13T09:00:00.000Z';
@@ -89,8 +90,8 @@ describe('ACP execution store', () => {
     const kernel = await readFile(markdown, 'utf8');
     assert.equal(storedJson.integrity.digest, written.envelope.integrity.digest);
     assert.match(kernel, /# EXECUTION CHECKPOINT \(advisory/);
-    assert.equal((await stat(json)).mode & 0o777, 0o600);
-    assert.equal((await stat(markdown)).mode & 0o777, 0o600);
+    await assertOwnerOnlyFile(json);
+    await assertOwnerOnlyFile(markdown);
   });
 
   it('reads back a valid state and returns null when absent', async () => {

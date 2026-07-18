@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import http from 'node:http';
-import { mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +13,7 @@ import { observeRepository } from '../continuity/acp/git-state.js';
 import { readState, writeState, writeStateIfCurrent } from '../continuity/acp/store.js';
 import { writeSyncMetadata } from '../continuity/acp/sync-metadata.js';
 import { RECONCILIATION_POLICY_VERSION, SYNC_PROTOCOL_VERSION, canonicalize, digestHeadSet } from '@noosphere/acp-protocol';
+import { assertOwnerOnlyFile } from './file-security.js';
 
 const execFileAsync = promisify(execFile);
 const CLI = fileURLToPath(new URL('../continuity/index.js', import.meta.url));
@@ -140,7 +141,7 @@ describe('ACP store and CLI', () => {
     assert.match(result.stdout, /ACP handoff stored/);
     const stored = JSON.parse(await readFile(path.join(dir, '.noosphere', 'continuity.json'), 'utf8'));
     const metadata = JSON.parse(await readFile(path.join(dir, '.noosphere', 'continuity-sync.json'), 'utf8'));
-    assert.equal((await stat(path.join(dir, '.noosphere', 'continuity-sync.json'))).mode & 0o777, 0o600);
+    await assertOwnerOnlyFile(path.join(dir, '.noosphere', 'continuity-sync.json'));
     assert.equal(metadata.uploads[0].snapshot_id, stored.snapshot_id);
     assert.equal(metadata.uploads[0].attempts, 1);
     assert.equal(metadata.uploads[0].canonical_envelope, canonicalize(stored));

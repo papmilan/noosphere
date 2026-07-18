@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
@@ -14,6 +14,7 @@ import {
   resolveRelayerAuthority,
   secureRelayerFetch,
 } from '../continuity/relayer-authority.js';
+import { assertOwnerOnlyFile } from './file-security.js';
 
 const dirs = [];
 after(async () => Promise.all(dirs.map((dir) => import('node:fs/promises').then((fs) => fs.rm(dir, { recursive: true, force: true })))));
@@ -94,8 +95,7 @@ describe('relayer authority — token gate', () => {
   it('writes the approved store owner-only (0600)', async () => {
     const env = { NOOSPHERE_HOME: await tempHome() };
     await approveOrigin('https://relay.example.com', env);
-    const mode = (await stat(approvedOriginsPath(env))).mode & 0o777;
-    assert.equal(mode, 0o600);
+    await assertOwnerOnlyFile(approvedOriginsPath(env));
   });
 
   it('refuses to approve a non-HTTPS remote origin', async () => {

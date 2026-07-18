@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -13,6 +13,7 @@ import {
   readSyncMetadata,
   writeSyncMetadata,
 } from '../continuity/acp/sync-metadata.js';
+import { assertOwnerOnlyDirectory, assertOwnerOnlyFile } from './file-security.js';
 
 const dirs = [];
 const execFileAsync = promisify(execFile);
@@ -44,8 +45,8 @@ describe('ACP sync metadata confirmations', () => {
     const root = await temp();
     await writeSyncMetadata(root, { version: 1, confirmations: {}, remote_heads: [id('a')] });
     const file = path.join(root, '.noosphere', 'continuity-sync.json');
-    assert.equal((await stat(file)).mode & 0o777, 0o600);
-    assert.equal((await stat(path.dirname(file))).mode & 0o777, 0o700);
+    await assertOwnerOnlyFile(file);
+    await assertOwnerOnlyDirectory(path.dirname(file));
     assert.deepEqual((await readSyncMetadata(root)).remote_heads, [id('a')]);
     assert.equal(digestRepositoryObservation(observation().repository_observation), digestRepositoryObservation({ ...observation().repository_observation, ancestors: ['a', 'z'] }));
   });
@@ -219,7 +220,7 @@ describe('ACP quarantine', () => {
     const bytes = Buffer.from('untrusted remote bytes');
     const hostile = await quarantineBytes(root, '../../secret', bytes);
     assert.match(path.basename(hostile.path), /^sha256-[0-9a-f]{64}\.json$/);
-    assert.equal((await stat(hostile.path)).mode & 0o777, 0o600);
+    await assertOwnerOnlyFile(hostile.path);
     assert.deepEqual(await readFile(hostile.path), bytes);
     await assert.rejects(quarantineBytes(root, '../../secret', bytes), /quarantine-exists/);
 
