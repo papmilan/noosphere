@@ -211,6 +211,7 @@ describe('ACP quarantine', () => {
     const source = await readFile(QUARANTINE_WRITER, 'utf8');
     assert.match(source, /handle\.chmod\(0o600\)/);
     assert.doesNotMatch(source, /chmod\(filename/);
+    assert.match(source, /syncDirectoryPath\('\.'\)/);
   });
 
   it('uses only safe names, exclusive owner-only files, and rejects symlink directories or targets', async () => {
