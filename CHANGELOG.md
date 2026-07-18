@@ -12,7 +12,7 @@ Dates are npm publish dates. The format follows
 
 ## noosphere-continuity
 
-### Unreleased
+### 2.4.0 — 2026-07-18
 
 - Added Continuation State Protocol v1: strict Git-tracked
   `.noosphere/state.json`, deterministic transitions and three-way merging,
@@ -126,7 +126,7 @@ Dates are npm publish dates. The format follows
 
 ## noosphere-relayer
 
-### Unreleased
+### 2.1.3 — 2026-07-18
 
 - Made durability synchronization portable across supported platforms by
   keeping file handles write-capable, directory handles read-only, and

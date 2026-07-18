@@ -1,12 +1,12 @@
 {
   "name": "noosphere-relayer",
-  "version": "2.1.2",
+  "version": "2.1.3",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "noosphere-relayer",
-      "version": "2.1.2",
+      "version": "2.1.3",
       "bundleDependencies": [
         "@noosphere/acp-protocol"
       ],
