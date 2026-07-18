@@ -229,7 +229,8 @@ describe('ACP store and CLI', () => {
       await execFileAsync('node', [CLI, 'handoff', '--file', candidateFile, '--path', dir], { env });
       parentSnapshotId = JSON.parse(await readFile(path.join(dir, '.noosphere', 'continuity.json'), 'utf8')).snapshot_id;
     }
-    const queued = JSON.parse(await readFile(path.join(dir, '.noosphere', 'continuity-sync.json'), 'utf8')).uploads;
+    const queuedMetadata = JSON.parse(await readFile(path.join(dir, '.noosphere', 'continuity-sync.json'), 'utf8'));
+    const queued = queuedMetadata.uploads;
     assert.equal(queued.length, 17);
     assert.equal(new Set(queued.map(({ snapshot_id }) => snapshot_id)).size, 17);
     const queuedEnvelopes = queued.map(({ canonical_envelope }) => JSON.parse(canonical_envelope));
@@ -237,9 +238,13 @@ describe('ACP store and CLI', () => {
     for (let index = 1; index < queuedEnvelopes.length; index += 1) {
       assert.equal(queuedEnvelopes[index].parent_snapshot_id, queuedEnvelopes[index - 1].snapshot_id);
     }
+    queuedMetadata.uploads[0].next_attempt_at = '2999-01-01T00:00:00.000Z';
+    for (const job of queuedMetadata.uploads.slice(1)) job.next_attempt_at = new Date(0).toISOString();
+    await writeSyncMetadata(dir, queuedMetadata);
 
     const indexId = `sha256:${'9'.repeat(64)}`;
     const posted = [];
+    const indexed = new Map();
     let heads = [];
     const server = http.createServer(async (request, response) => {
       const send = (status, body) => {
@@ -259,9 +264,10 @@ describe('ACP store and CLI', () => {
         for await (const chunk of request) chunks.push(chunk);
         const { envelope, expected_heads_digest: expected } = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         assert.equal(expected, digestHeadSet(heads));
-        assert.equal(envelope.parent_snapshot_id, heads[0] || null);
         posted.push(envelope);
-        heads = [envelope.snapshot_id];
+        indexed.set(envelope.snapshot_id, envelope);
+        const parentIds = new Set([...indexed.values()].map(({ parent_snapshot_id: parent }) => parent).filter(Boolean));
+        heads = [...indexed.keys()].filter((snapshotId) => !parentIds.has(snapshotId)).sort();
         return send(201, { created: true, snapshot_id: envelope.snapshot_id, heads });
       }
       return send(404, { error: 'unexpected' });
@@ -274,12 +280,23 @@ describe('ACP store and CLI', () => {
       await execFileAsync('node', [CLI, 'activate', '--quiet', '--path', dir], {
         env: { ...env, NOOSPHERE_HOME: path.join(dir, '.home') },
       });
+      const deferred = JSON.parse(await readFile(path.join(dir, '.noosphere', 'continuity-sync.json'), 'utf8'));
+      assert.deepEqual(deferred.uploads.map(({ snapshot_id: snapshotId }) => snapshotId), [queued[0].snapshot_id]);
+      deferred.uploads[0].next_attempt_at = new Date(0).toISOString();
+      await writeSyncMetadata(dir, deferred);
+      await execFileAsync('node', [CLI, 'activate', '--quiet', '--path', dir], {
+        env: { ...env, NOOSPHERE_HOME: path.join(dir, '.home') },
+      });
       const restarted = JSON.parse(await readFile(path.join(dir, '.noosphere', 'continuity-sync.json'), 'utf8'));
       assert.deepEqual(restarted.uploads, []);
       assert.equal(posted.length, 17);
-      assert.deepEqual(posted.map(({ snapshot_id }) => snapshot_id), queued.map(({ snapshot_id }) => snapshot_id));
-      assert.equal(posted.at(-1).next_actions.some(({ status }) => status === 'planned'), true);
-      assert.equal(decodeEnvelope(posted.at(-1), { clock: CREATED_AT }).ok, true);
+      assert.deepEqual(posted.map(({ snapshot_id }) => snapshot_id), [
+        ...queued.slice(1).map(({ snapshot_id }) => snapshot_id),
+        queued[0].snapshot_id,
+      ]);
+      const actionable = indexed.get(queued.at(-1).snapshot_id);
+      assert.equal(actionable.next_actions.some(({ status }) => status === 'planned'), true);
+      assert.equal(decodeEnvelope(actionable, { clock: CREATED_AT }).ok, true);
     } finally {
       server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
