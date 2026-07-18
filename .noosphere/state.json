@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "status": "done",
+  "current_task": "Correct CSP v1 durable/runtime architecture",
+  "next_action": "Review the corrected uncommitted CSP v1 implementation",
+  "blocker": null
+}

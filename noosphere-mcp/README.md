@@ -146,6 +146,8 @@ Initialization creates one project folder:
 ├── instructions.md
 ├── journal.md
 ├── master-prompt.md
+├── state.json           Git-tracked canonical CSP project state
+├── runtime-state.json   Ignored internal watcher telemetry
 └── protocol.json
 ```
 
@@ -213,7 +215,10 @@ noosphere refresh
 noosphere status
 noosphere state
 noosphere state --json
-noosphere state validate
+noosphere state set status in-progress
+noosphere state next "Run tests"
+noosphere acp state
+noosphere acp state validate
 noosphere handoff --file handoff.json
 noosphere exec checkpoint --file checkpoint.json
 noosphere exec show
@@ -223,15 +228,31 @@ noosphere uninstall
 `noosphere activate` may also be used explicitly from an IDE terminal. It
 works from any nested folder inside the repository.
 
+### Continuation State Protocol (CSP)
+
+`.noosphere/state.json` is the optional Git-tracked CSP v1 snapshot. It keeps
+only durable project truth: version, status, task, next action, and blocker.
+Agent identity, observed branch/HEAD, timestamps, revision, and watcher
+telemetry remain in ignored `.noosphere/runtime-state.json`. Only explicit
+meaningful task transitions rewrite tracked CSP; resume, checkpoint, and
+journal operations do not. Ambiguous concurrent edits fail without writing.
+See the normative
+  [CSP specification](CSP.md) for schema, migration, state-machine, merge, and
+compatibility guarantees.
+
+Pre-CSP watcher telemetry is migrated without loss to the ignored
+`.noosphere/runtime-state.json`. A conflicting or ambiguous migration fails
+closed and leaves both files untouched.
+
 ### Agent handoff (ACP)
 
-`noosphere state` prints what is true — objective, decisions, evidence,
+`noosphere acp state` prints rich ACP truth — objective, decisions, evidence,
 blockers, next actions — and `noosphere handoff` merges a structured handoff
 from `--file <path>` or `--stdin` without ever silently overwriting prior
 work. `noosphere exec checkpoint` records what an agent was about to do, and
 `noosphere exec show` re-validates it before the next agent resumes. The CLI
 measures repository facts and file hashes itself, so a checkpoint cannot
-claim tests pass or carry code to the next agent. `noosphere state sync`
+claim tests pass or carry code to the next agent. `noosphere acp state sync`
 extends the same state across machines.
 
 Protocol semantics — validation rules, freshness classification, kernel

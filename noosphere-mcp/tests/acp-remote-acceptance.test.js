@@ -28,7 +28,7 @@ describe('ACP clean-machine remote acceptance', () => {
       assert.equal(capabilities[0].relayer_index_id, capabilities[1].relayer_index_id);
       assert.equal(capabilities[0].relayer_index_id, fixture.indexId);
 
-      const initial = await runCli(machines.a, ['state', '--json']);
+      const initial = await runCli(machines.a, ['acp', 'state', '--json']);
       const handoff = path.join(path.dirname(machines.a), 'handoff.json');
       await writeFile(handoff, initial.stdout);
       await runCli(machines.a, ['handoff', '--file', handoff]);
@@ -42,7 +42,7 @@ describe('ACP clean-machine remote acceptance', () => {
       assert.equal(afterRestart.relayer_index_id, beforeRestart);
       assert.equal(afterRestart.relayer_index_id, persistedIndexId);
 
-      const discovered = JSON.parse((await runCli(machines.b, ['state', 'pull', '--json'])).stdout);
+      const discovered = JSON.parse((await runCli(machines.b, ['acp', 'state', 'pull', '--json'])).stdout);
       assert.equal(discovered.action, 'remote-only-restore', JSON.stringify(discovered));
       assert.match(discovered.confirmation_id, /^sha256:[0-9a-f]{64}$/);
       await assert.rejects(readFile(path.join(machines.b, '.noosphere', 'continuity.json')));
@@ -70,12 +70,12 @@ describe('ACP clean-machine remote acceptance', () => {
     const secondary = await startRelayer({ shared: true });
     const machines = await makeMachines(primary.url, 'negative-project');
     try {
-      const initial = await runCli(machines.a, ['state', '--json']);
+      const initial = await runCli(machines.a, ['acp', 'state', '--json']);
       const handoff = path.join(path.dirname(machines.a), 'negative-handoff.json');
       await writeFile(handoff, initial.stdout);
       await runCli(machines.a, ['handoff', '--file', handoff]);
 
-      const topologyConfirmation = JSON.parse((await runCli(machines.b, ['state', 'pull', '--json'])).stdout);
+      const topologyConfirmation = JSON.parse((await runCli(machines.b, ['acp', 'state', 'pull', '--json'])).stdout);
       await configureMachine(machines.b, secondary.url, 'negative-project');
       await assert.rejects(runCli(machines.b, [
         'state', 'pull', '--json', '--confirm-remote', topologyConfirmation.confirmation_id,
@@ -83,7 +83,7 @@ describe('ACP clean-machine remote acceptance', () => {
       assert.notEqual(primary.indexId, secondary.indexId);
 
       await configureMachine(machines.b, primary.url, 'negative-project');
-      const staleConfirmation = JSON.parse((await runCli(machines.b, ['state', 'pull', '--json'])).stdout);
+      const staleConfirmation = JSON.parse((await runCli(machines.b, ['acp', 'state', 'pull', '--json'])).stdout);
       await writeFile(path.join(machines.b, 'advanced.txt'), 'new revision\n');
       await git(machines.b, ['add', 'advanced.txt']);
       await git(machines.b, ['-c', 'user.email=acceptance@example.com', '-c', 'user.name=Acceptance', 'commit', '-m', 'advance B']);
@@ -91,7 +91,7 @@ describe('ACP clean-machine remote acceptance', () => {
         'state', 'pull', '--json', '--confirm-remote', staleConfirmation.confirmation_id,
       ]), /confirmation-stale/);
 
-      const historical = JSON.parse((await runCli(machines.b, ['state', 'pull', '--json'])).stdout);
+      const historical = JSON.parse((await runCli(machines.b, ['acp', 'state', 'pull', '--json'])).stdout);
       assert.equal(historical.action, 'historical-advanced');
       assert.equal(historical.confirmation_id, null);
       const override = JSON.parse((await runCli(machines.b, [
@@ -121,14 +121,14 @@ describe('ACP clean-machine remote acceptance', () => {
       assert.equal(capabilities.cross_machine_recoverable, false);
       assert.equal(capabilities.deployment_mode, 'local-only');
 
-      const initial = JSON.parse((await runCli(machines.a, ['state', '--json'])).stdout);
+      const initial = JSON.parse((await runCli(machines.a, ['acp', 'state', '--json'])).stdout);
       initial.expires_at = new Date(Date.now() + 1_000).toISOString();
       const expired = encodeEnvelope({ envelope: initial });
       const handoff = path.join(path.dirname(machines.a), 'expired-handoff.json');
       await writeFile(handoff, JSON.stringify(expired));
       await runCli(machines.a, ['handoff', '--file', handoff]);
       await new Promise((resolve) => setTimeout(resolve, 1_100));
-      const result = JSON.parse((await runCli(machines.b, ['state', 'pull', '--json'])).stdout);
+      const result = JSON.parse((await runCli(machines.b, ['acp', 'state', 'pull', '--json'])).stdout);
       assert.equal(result.action, 'quarantine');
       assert.equal(result.reason, 'remote-expired');
       assert.equal(result.confirmation_id, null);

@@ -47,6 +47,14 @@ describe('published package distribution', () => {
       await extract(relayerTarball, packedRelayer);
 
       await access(path.join(packedMcp, 'LICENSE'));
+      assert.equal(
+        await readFile(path.join(packedMcp, 'CSP.md'), 'utf8'),
+        await readFile(path.join(repositoryRoot, 'CSP.md'), 'utf8'),
+      );
+      assert.match(
+        await readFile(path.join(packedMcp, 'README.md'), 'utf8'),
+        /\[CSP specification\]\(CSP\.md\)/u,
+      );
       await access(path.join(packedRelayer, 'LICENSE'));
       await access(path.join(packedRelayer, 'env.example'));
       await access(path.join(packedRelayer, 'npm-shrinkwrap.json'));

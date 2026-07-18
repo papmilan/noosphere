@@ -10,7 +10,7 @@ const UNSAFE_KERNEL = [
   '# ACP CONTINUITY KERNEL',
   'Status: unsafe-to-summarize',
   'Reason: mandatory ACP conflicts or blockers exceed the safe kernel budget.',
-  'Next: run `noosphere state --json` and resolve the listed conflicts before acting.',
+  'Next: run `noosphere acp state --json` and resolve the listed conflicts before acting.',
 ].join('\n');
 
 export function unresolvedConflicts(state) {

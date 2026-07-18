@@ -445,7 +445,7 @@ describe('ACP store and CLI', () => {
 
   it('returns a stable disabled action without reading or printing an envelope', async () => {
     const dir = await makeRepo();
-    const result = await execFileAsync('node', [CLI, 'state', 'sync', '--json', '--path', dir], {
+    const result = await execFileAsync('node', [CLI, 'acp', 'state', 'sync', '--json', '--path', dir], {
       env: { ...process.env, NOOSPHERE_ACP_SYNC: 'false' },
     });
     assert.deepEqual(JSON.parse(result.stdout), {
@@ -491,10 +491,10 @@ describe('ACP store and CLI', () => {
       await writeFile(path.join(dir, '.noosphere', 'config.json'), JSON.stringify({
         project_id: 'noosphere', relayer_url: `http://127.0.0.1:${server.address().port}`,
       }));
-      const sync = await execFileAsync('node', [CLI, 'state', 'sync', '--json', '--path', dir]);
+      const sync = await execFileAsync('node', [CLI, 'acp', 'state', 'sync', '--json', '--path', dir]);
       assert.equal(JSON.parse(sync.stdout).action, 'push-local');
       assert.doesNotMatch(sync.stdout, /current_objective|integrity|next_actions/);
-      const history = await execFileAsync('node', [CLI, 'state', 'history', '--json', '--limit', '2', '--path', dir]);
+      const history = await execFileAsync('node', [CLI, 'acp', 'state', 'history', '--json', '--limit', '2', '--path', dir]);
       assert.deepEqual(JSON.parse(history.stdout).history, []);
       assert.equal(requests.some((entry) => entry.includes('/recall') || entry.includes('/v1/actions')), false);
     } finally {
@@ -508,11 +508,11 @@ describe('ACP store and CLI', () => {
     const observed = await observeRepository(dir);
     const state = decodeEnvelope(await signedEnvelope(observed), { clock: CREATED_AT }).state;
     await writeState(dir, state, { clock: CREATED_AT });
-    const ok = await execFileAsync('node', [CLI, 'state', 'validate', '--path', dir]);
+    const ok = await execFileAsync('node', [CLI, 'acp', 'state', 'validate', '--path', dir]);
     assert.match(ok.stdout, /valid/);
 
     await writeFile(path.join(dir, '.noosphere', 'continuity.md'), 'tampered\n');
-    await assert.rejects(execFileAsync('node', [CLI, 'state', 'validate', '--path', dir]));
+    await assert.rejects(execFileAsync('node', [CLI, 'acp', 'state', 'validate', '--path', dir]));
   });
 
   it('refuses to overwrite an unreadable continuity.json on handoff', async () => {

@@ -43,14 +43,14 @@ assumptions, conflicts, blockers, risks, and next actions.
   distinct assertions, and every competing edit becomes an explicit
   unresolved conflict.
 - When mandatory conflicts or blockers would exceed the kernel budget, the
-  kernel refuses to summarize and points to `noosphere state --json` instead.
+  kernel refuses to summarize and points to `noosphere acp state --json` instead.
 
 CLI surface:
 
 ```bash
-noosphere state              # print the compact continuity kernel
-noosphere state --json       # print the canonical ACP envelope
-noosphere state validate     # verify the persisted envelope and kernel
+noosphere acp state              # print the compact continuity kernel
+noosphere acp state --json       # print the canonical ACP envelope
+noosphere acp state validate     # verify the persisted envelope and kernel
 cat handoff.json | noosphere handoff --stdin
 noosphere handoff --file handoff.json
 ```
@@ -120,7 +120,7 @@ noosphere exec clear --current
 
 ## Exact state across machines
 
-`noosphere state sync|push|pull|history|quarantine --json` uses deterministic
+`noosphere acp state sync|push|pull|history|quarantine --json` uses deterministic
 ACP envelopes.
 
 ```mermaid

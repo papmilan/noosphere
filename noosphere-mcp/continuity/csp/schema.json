@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/papmilan/noosphere/blob/main/noosphere-mcp/continuity/csp/schema.json",
+  "title": "Noosphere Continuation State Protocol v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "status",
+    "current_task",
+    "next_action",
+    "blocker"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "status": {
+      "enum": ["not-started", "in-progress", "blocked", "done", "archived"]
+    },
+    "current_task": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 1000 },
+        { "type": "null" }
+      ]
+    },
+    "next_action": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 1000 },
+        { "type": "null" }
+      ]
+    },
+    "blocker": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 1000 },
+        { "type": "null" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "blocked" } } },
+      "then": { "properties": { "blocker": { "type": "string" } } }
+    }
+  ]
+}
