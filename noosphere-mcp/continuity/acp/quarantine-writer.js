@@ -1,5 +1,6 @@
 import { constants } from 'node:fs';
 import { lstat, open, stat } from 'node:fs/promises';
+import { syncDirectoryPath } from './durability.js';
 
 const [filename, expectedDev, expectedIno] = process.argv.slice(2);
 const SAFE_NAME = /^sha256-[0-9a-f]{64}\.json$/;
@@ -36,8 +37,7 @@ try {
   } finally {
     await handle.close();
   }
-  const directoryHandle = await open('.', 'r');
-  try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
+  await syncDirectoryPath('.');
 } catch (error) {
   process.stderr.write(`${error.code || 'quarantine-writer-failed'}\n`);
   process.exitCode = 1;

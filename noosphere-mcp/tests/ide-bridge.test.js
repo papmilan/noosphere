@@ -18,7 +18,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const packageRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -90,7 +90,7 @@ async function readRegistry(noosphereHome) {
  * (process.argv[1] will be the test runner, not ide-bridge.js).
  */
 async function importBridge() {
-  return import(ideBridgeModule);
+  return import(pathToFileURL(ideBridgeModule).href);
 }
 
 // ---------------------------------------------------------------------------
@@ -405,13 +405,16 @@ describe('ide-bridge: daemon process', () => {
     // Give the process a moment to start and finish its first scan
     await delay(300);
 
-    const exitCode = await new Promise((resolve) => {
-      child.once('close', resolve);
+    const result = await new Promise((resolve) => {
+      child.once('close', (code, signal) => resolve({ code, signal }));
       child.kill('SIGTERM');
     });
 
-    // SIGTERM should result in a clean exit (code 0)
-    assert.equal(exitCode, 0, `Expected exit code 0 on SIGTERM, got ${exitCode}`);
+    if (result.code === null && process.platform === 'win32') {
+      assert.equal(result.signal, 'SIGTERM');
+    } else {
+      assert.deepEqual(result, { code: 0, signal: null });
+    }
   });
 
   it('registers projects after a scan cycle', async () => {
