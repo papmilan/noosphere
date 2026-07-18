@@ -91,10 +91,17 @@ describe('CSP storage and runtime-state migration', () => {
   });
 
   it('refuses symlinked state directories and final files', async (t) => {
-    if (process.platform === 'win32') t.skip('symbolic-link coverage requires Windows privileges');
     const outside = await tempRoot();
     const directoryRoot = await tempRoot();
-    await symlink(outside, path.join(directoryRoot, '.noosphere'));
+    try {
+      await symlink(outside, path.join(directoryRoot, '.noosphere'));
+    } catch (error) {
+      if (process.platform === 'win32' && ['EACCES', 'EPERM'].includes(error.code)) {
+        t.skip('symbolic-link coverage requires Windows privileges');
+        return;
+      }
+      throw error;
+    }
     await assert.rejects(loadState(directoryRoot), (error) => error.code === 'state-dir-symlink');
 
     const fileRoot = await tempRoot();

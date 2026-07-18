@@ -291,6 +291,14 @@ async function inspectDirectory(root, dir) {
 }
 
 async function readRawFile(file) {
+  const entry = await lstat(file).catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (entry === null) return null;
+  if (entry.isSymbolicLink()) {
+    throw new PathBoundaryError('state-file-symlink', `refusing symlinked file: ${file}`);
+  }
   let handle;
   try {
     handle = await open(file, fs.constants.O_RDONLY | NOFOLLOW);
