@@ -13,7 +13,7 @@ This is a small monorepo with three packages:
 
 | Directory | npm package | What it is |
 | --- | --- | --- |
-| `noosphere-mcp/` | `noosphere-continuity` | CLI, watcher, lifecycle installer, ACP state |
+| `noosphere-mcp/` | `noosphere-continuity` | CLI, watcher, lifecycle installer, CSP task state, ACP handoff state |
 | `noosphere-relayer/` | `noosphere-relayer` | HTTP memory relay server |
 | `noosphere-acp-protocol/` | `@noosphere/acp-protocol` | Shared ACP envelopes, schemas, validation (bundled, not published separately) |
 
@@ -73,7 +73,8 @@ Every behavior change comes with a test in the package it touches:
 - protocol changes → `noosphere-acp-protocol/tests/` plus the vendor mirror
   sync;
 - relayer routes/queue/security → `noosphere-relayer/tests/`;
-- CLI, watcher, lifecycle, ACP state → `noosphere-mcp/tests/`.
+- CLI, watcher, lifecycle, CSP task state, ACP handoff state →
+  `noosphere-mcp/tests/`.
 
 Bug fixes include a regression test that fails without the fix.
 

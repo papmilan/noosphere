@@ -2,8 +2,8 @@
 
 This repository publishes two npm packages that version independently:
 
-- **`noosphere-continuity`** — the CLI, watcher, lifecycle installer, and ACP
-  state (source in [`noosphere-mcp/`](noosphere-mcp/));
+- **`noosphere-continuity`** — the CLI, watcher, lifecycle installer, CSP task
+  state, and ACP handoff state (source in [`noosphere-mcp/`](noosphere-mcp/));
 - **`noosphere-relayer`** — the HTTP memory relay
   (source in [`noosphere-relayer/`](noosphere-relayer/)).
 
@@ -20,11 +20,18 @@ Dates are npm publish dates. The format follows
   and fail-closed migration of legacy watcher telemetry to the ignored
   `.noosphere/runtime-state.json`. Tracked CSP contains only durable task truth;
   Git, agent, revision, timestamp, and watcher observations remain runtime-only.
+- Fixed legacy `.noosphere/state.json` containing JSON `null` to return the
+  structured `state-file-ambiguous` migration error without changing the file;
+  empty-object and malformed-JSON cases remain covered by fail-closed tests.
 - `noosphere state` is now the CSP interface. ACP state moved to
   `noosphere acp state`; legacy ACP subcommands remain warning aliases for one
   release cycle.
-- Generated agent adapters read durable CSP before observing Git separately and never parse
-  journal prose into machine state when CSP exists.
+- Generated agent adapters read durable CSP before observing Git separately
+  and never parse journal prose into machine state when CSP exists.
+- Stabilized the cross-platform test baseline with deterministic ACP offline
+  retry ordering, portable durability/fsync behavior, permission assertions
+  and ESM paths, native Windows lifecycle fixtures and argument handling, and
+  bounded process-heavy ACP coverage.
 
 ### 2.3.1 — 2026-07-17
 
@@ -118,6 +125,12 @@ Dates are npm publish dates. The format follows
   graceful degradation when Windows blocks `schtasks /Create`.
 
 ## noosphere-relayer
+
+### Unreleased
+
+- Made durability synchronization portable across supported platforms by
+  keeping file handles write-capable, directory handles read-only, and
+  suppressing only the known unsupported Windows directory-sync errors.
 
 ### 2.1.2 — 2026-07-17
 

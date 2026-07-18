@@ -147,7 +147,7 @@ Initialization creates one project folder:
 ├── journal.md
 ├── master-prompt.md
 ├── state.json           Git-tracked canonical CSP project state
-├── runtime-state.json   Ignored internal watcher telemetry
+├── runtime-state.json   Ignored runtime observations and watcher telemetry
 └── protocol.json
 ```
 
