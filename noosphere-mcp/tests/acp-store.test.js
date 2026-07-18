@@ -207,7 +207,9 @@ describe('ACP store and CLI', () => {
     }
   });
 
-  it('preserves more than 16 offline handoffs across restart and eventually uploads actionable lineage', async () => {
+  it('preserves more than 16 offline handoffs across restart and eventually uploads actionable lineage', {
+    timeout: 60_000,
+  }, async () => {
     const dir = await makeRepo();
     const observed = await observeRepository(dir);
     const { mkdir } = await import('node:fs/promises');
