@@ -29,9 +29,10 @@ tests/.tmp-*
 
 # Noosphere local runtime files (protocol.json stays tracked)
 .noosphere/context.md
-.noosphere/state.json
+.noosphere/runtime-state.json
 .noosphere/ide-hint.json
 .noosphere/*.tmp
+.noosphere/*.lock
 .noosphere/journal.md
 noosphere-relayer/.noosphere-local-memory.json
 noosphere-relayer/.noosphere-runtime/

@@ -119,7 +119,8 @@ noosphere register --path "$PWD"   # or just enter it from an integrated shell
 
 noosphere context                  # read current shared context
 noosphere remember --agent me --type decision "Ship v2 with the new queue."
-noosphere state                    # ACP kernel: what is true right now
+noosphere state                    # CSP: current task, blocker, next action
+noosphere acp state                # ACP: rich continuity kernel
 noosphere exec show                # ACP checkpoint: what was I about to do
 ```
 
@@ -215,6 +216,31 @@ Automatic checkpoints preserve observable workspace state. Explicit
 memories preserve intent and conclusions that cannot be inferred from files
 alone.
 
+### Continuation State Protocol (CSP)
+
+CSP is the small, Git-tracked machine state at `.noosphere/state.json`. It
+contains only durable task truth: version, status, current task, next action,
+and blocker. Observed branch/HEAD, agent identity, timestamps, revision, and
+watcher telemetry stay in ignored `.noosphere/runtime-state.json`. It is a
+validated snapshot—not an event log—and never infers completion from Git,
+npm, CI, or journal prose.
+
+```sh
+noosphere state
+noosphere state set status in-progress
+noosphere state set current-task "Prepare the patch release"
+noosphere state next "Run the complete suite"
+noosphere state set blocker "Waiting for maintainer approval"
+noosphere state reopen             # explicit done -> in-progress intent
+noosphere state restore            # explicit archived -> in-progress intent
+```
+
+Concurrent transitions compare the exact tracked-file identity immediately
+before writing. Unambiguous changes merge recursively; conflicting scalar
+edits are reported without writing. Resume, checkpoint, journal, branch, and
+agent changes refresh only ignored runtime observations. The normative schema,
+state machine, migration, and compatibility rules are in [CSP.md](CSP.md).
+
 ### Agent handoff (ACP)
 
 The Agent Cognitive-state Protocol (ACP) hands a project between agents
@@ -222,7 +248,7 @@ through two small validated files:
 
 - **Project State** (`acp.project-state/1`) answers *what is true*:
   objective, decisions, evidence, blockers, next actions. Print with
-  `noosphere state`; hand off with `noosphere handoff`.
+  `noosphere acp state`; hand off with `noosphere handoff`.
 - **Execution checkpoint** (`acp.execution-state/1`) answers *what was I
   about to do*: current step, target file, remaining plan. Record with
   `noosphere exec checkpoint`; resume with `noosphere exec show`.
@@ -242,13 +268,13 @@ sequenceDiagram
     A->>N: handoff (Project State)
     A->>N: exec checkpoint (measured Git state + target hashes)
     Note over N: validate, content-address, store
-    B->>N: noosphere state / exec show
+    B->>N: noosphere acp state / exec show
     N-->>B: advisory kernels with freshness classification
     B->>B: verify claims against working tree and tests
     B->>N: continue: remember, journal, handoff
 ```
 
-`noosphere state sync` extends the same state across machines with
+`noosphere acp state sync` extends the same state across machines with
 confirmation-gated apply and quarantine for invalid bytes. Full protocol
 semantics: [docs/ACP.md](docs/ACP.md).
 
@@ -320,7 +346,8 @@ noosphere recall "What remains broken in auth?"    # or ask a specific question
 noosphere remember --agent codex --type decision "…"   # store what matters
 noosphere journal --agent cursor "Verified the cache fix; timeouts remain."
 
-noosphere state                                    # before stopping: what is true
+noosphere state                                    # current CSP project truth
+noosphere acp state                                # rich ACP project state
 noosphere exec checkpoint --file checkpoint.json   # where work stood
 ```
 
@@ -338,7 +365,8 @@ noosphere recall "query"
 noosphere remember --agent <name> --type <type> "content"
 noosphere journal --agent <name> "note"
 noosphere master-prompt [--replace]
-noosphere state [--json] [validate|sync|push|pull|history|quarantine]
+noosphere state [show|set|next|reopen|restore] [--json]
+noosphere acp state [--json] [validate|sync|push|pull|history|quarantine]
 noosphere handoff --stdin | --file <handoff.json>
 noosphere exec checkpoint|show|import-plan|clear
 noosphere ollama <model> [run "prompt"] [--no-store]
@@ -444,6 +472,8 @@ enabled on the previous machine.
 ├── config.json       Project identity, privacy, and adapter settings
 ├── context.md        Refreshed context for file-reading agents
 ├── journal.md        Local public work notes and handoffs
+├── state.json        Git-tracked canonical CSP project state
+├── runtime-state.json Ignored watcher/baseline/checkpoint telemetry
 ├── protocol.json     Machine-readable continuity protocol
 └── instructions.md   Human-readable universal instructions
 ```

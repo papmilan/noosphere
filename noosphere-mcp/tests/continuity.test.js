@@ -222,15 +222,36 @@ describe('Noosphere continuity CLI', () => {
 
     assert.deepEqual(config.adapters, []);
     assert.match(protocol, /universal agent protocol/i);
+    assert.match(protocol, /\.noosphere\/state\.json/);
+    assert.ok(
+      protocol.indexOf('.noosphere/state.json') < protocol.indexOf('Inspect the current working tree'),
+    );
     assert.match(protocol, /Do not reveal or request hidden chain-of-thought/);
     assert.match(protocolJson, /"filesystem"/);
     assert.match(protocolJson, /"http"/);
     assert.match(protocolJson, /baseline\.md/);
     assert.match(protocolJson, /master-prompt\.md/);
     assert.match(protocolJson, /followups\.jsonl/);
+    assert.equal(JSON.parse(protocolJson).files.state, '.noosphere/state.json');
     assert.match(journal, /public work journal/i);
     assert.equal(masterPrompt, '');
     assert.equal(followups, '');
+    await assert.rejects(
+      readFile(path.join(projectDir, '.noosphere', 'state.json'), 'utf8'),
+      (error) => error.code === 'ENOENT',
+    );
+    const localExclude = await readFile(
+      path.join(projectDir, '.git', 'info', 'exclude'),
+      'utf8',
+    );
+    assert.match(localExclude, /^\.noosphere\/runtime-state\.json$/m);
+    assert.doesNotMatch(localExclude, /^\.noosphere\/state\.json$/m);
+    const initializedRuntime = JSON.parse(await readFile(
+      path.join(projectDir, '.noosphere', 'runtime-state.json'),
+      'utf8',
+    ));
+    assert.equal(initializedRuntime.csp.revision, 0);
+    assert.equal(initializedRuntime.csp.state_identity, null);
     assert.match(
       await readFile(
         path.join(projectDir, '.noosphere', 'baseline.md'),
@@ -252,6 +273,46 @@ describe('Noosphere continuity CLI', () => {
         readFile(path.join(projectDir, adapterPath), 'utf8'),
       );
     }
+    await runCli(['state', 'set', 'status', 'in-progress']);
+  });
+
+  it('migrates legacy runtime telemetry without inventing tracked task truth', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'noosphere-csp-migration-'));
+    try {
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: root });
+      await execFileAsync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+      await execFileAsync('git', ['config', 'user.name', 'CSP Migration'], { cwd: root });
+      await writeFile(path.join(root, 'README.md'), '# Migration\n');
+      await execFileAsync('git', ['add', 'README.md'], { cwd: root });
+      await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: root });
+      await mkdir(path.join(root, '.noosphere'));
+      const legacy = `${JSON.stringify({
+        last_checkpoint_at: '2026-07-17T00:00:00.000Z',
+        last_blob_id: 'legacy-blob',
+      }, null, 2)}\n`;
+      await writeFile(path.join(root, '.noosphere', 'state.json'), legacy);
+      await writeFile(path.join(root, '.gitignore'), '.noosphere/state.json\n');
+
+      await runCli(['init'], root);
+
+      const runtime = JSON.parse(await readFile(
+        path.join(root, '.noosphere', 'runtime-state.json'),
+        'utf8',
+      ));
+      assert.equal(runtime.last_checkpoint_at, '2026-07-17T00:00:00.000Z');
+      assert.equal(runtime.last_blob_id, 'legacy-blob');
+      assert.equal(runtime.baseline.status, 'pending');
+      await assert.rejects(
+        readFile(path.join(root, '.noosphere', 'state.json'), 'utf8'),
+        (error) => error.code === 'ENOENT',
+      );
+      assert.doesNotMatch(
+        await readFile(path.join(root, '.gitignore'), 'utf8').catch(() => ''),
+        /^\.noosphere\/state\.json$/m,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('keeps only the selected agent adapters', async () => {
@@ -267,6 +328,10 @@ describe('Noosphere continuity CLI', () => {
     assert.match(
       await readFile(path.join(projectDir, 'CLAUDE.md'), 'utf8'),
       /Noosphere continuity adapter/,
+    );
+    assert.match(
+      await readFile(path.join(projectDir, 'CLAUDE.md'), 'utf8'),
+      /\.noosphere\/state\.json/,
     );
     await assert.rejects(readFile(path.join(projectDir, 'AGENTS.md'), 'utf8'));
     await assert.rejects(readFile(path.join(projectDir, 'GEMINI.md'), 'utf8'));
@@ -304,7 +369,7 @@ describe('Noosphere continuity CLI', () => {
     );
     const pendingState = JSON.parse(
       await readFile(
-        path.join(recentProjectDir, '.noosphere', 'state.json'),
+        path.join(recentProjectDir, '.noosphere', 'runtime-state.json'),
         'utf8',
       ),
     );
@@ -327,7 +392,7 @@ describe('Noosphere continuity CLI', () => {
     assert.equal(storedActions.length, before + 1);
     const storedState = JSON.parse(
       await readFile(
-        path.join(recentProjectDir, '.noosphere', 'state.json'),
+        path.join(recentProjectDir, '.noosphere', 'runtime-state.json'),
         'utf8',
       ),
     );
@@ -366,6 +431,8 @@ describe('Noosphere continuity CLI', () => {
   });
 
   it('stores metadata-only checkpoints after workspace edits', async () => {
+    const cspPath = path.join(projectDir, '.noosphere', 'state.json');
+    const cspBefore = await readFile(cspPath);
     await writeFile(path.join(projectDir, 'app.js'), 'export const value = 2;\n');
     await runCli(['checkpoint']);
 
@@ -381,6 +448,12 @@ describe('Noosphere continuity CLI', () => {
     assert.ok(action.metadata.checkpoint.changed_files.includes('app.js'));
     assert.equal(action.metadata.privacy.include_diff, false);
     assert.equal('diff' in action.metadata.checkpoint, false);
+    const runtime = JSON.parse(await readFile(
+      path.join(projectDir, '.noosphere', 'runtime-state.json'),
+      'utf8',
+    ));
+    assert.ok(runtime.last_checkpoint_at);
+    assert.deepEqual(await readFile(cspPath), cspBefore);
   });
 
   it('uses a stable checkpoint identity when workspace content is unchanged', async () => {
@@ -394,6 +467,8 @@ describe('Noosphere continuity CLI', () => {
   });
 
   it('shares journal entries to Walrus but does not trigger an extra watcher checkpoint', async () => {
+    const cspPath = path.join(projectDir, '.noosphere', 'state.json');
+    const cspBefore = await readFile(cspPath);
     const child = spawn(process.execPath, [cli, 'watch'], {
       cwd: projectDir,
       env: {
@@ -426,6 +501,7 @@ describe('Noosphere continuity CLI', () => {
       // from the workspace fingerprint.
       assert.equal(storedActions.length, startingCount + 1);
       assert.equal(storedActions.at(-1)?.action_type, 'note');
+      assert.deepEqual(await readFile(cspPath), cspBefore);
     } finally {
       child.kill('SIGTERM');
       await new Promise((resolve) => child.once('close', resolve));
@@ -473,6 +549,38 @@ describe('Noosphere continuity CLI', () => {
     const activationRequests = acpRequests.slice(beforeAcp);
     assert.ok(activationRequests.some((entry) => entry === 'GET /v1/acp/capabilities'));
     assert.equal(activationRequests.some((entry) => entry.startsWith('POST ')), false);
+  });
+
+  it('prints the deterministic CSP resume summary when a project resumes', async () => {
+    await runCli(['activate', '--quiet'], projectDir);
+    const projectId = JSON.parse(await readFile(
+      path.join(projectDir, '.noosphere', 'config.json'),
+      'utf8',
+    )).project_id;
+    const cspPath = path.join(projectDir, '.noosphere', 'state.json');
+    await execFileAsync('git', ['add', '.noosphere/state.json'], { cwd: projectDir });
+    await execFileAsync('git', ['commit', '-m', 'track durable CSP'], { cwd: projectDir });
+    const cspBefore = await readFile(cspPath);
+    const { stdout: statusBefore } = await execFileAsync(
+      'git', ['status', '--porcelain=v1'], { cwd: projectDir },
+    );
+    await runCli(['pause', projectId]);
+    const output = await runCli(['resume', projectId]);
+    assert.match(output, /# CONTINUATION STATE \(CSP v1\)/);
+    assert.match(output, /Status: in-progress/);
+    assert.match(output, /Git branch: main/);
+    assert.match(output, /Runtime revision: /);
+    assert.match(output, /Last observed agent: /);
+    assert.match(output, new RegExp(`Resumed project ${projectId}`));
+    assert.deepEqual(await readFile(cspPath), cspBefore);
+    const { stdout: cspStatus } = await execFileAsync(
+      'git', ['status', '--porcelain=v1', '--', '.noosphere/state.json'], { cwd: projectDir },
+    );
+    assert.equal(cspStatus, '');
+    const { stdout: statusAfter } = await execFileAsync(
+      'git', ['status', '--porcelain=v1'], { cwd: projectDir },
+    );
+    assert.equal(statusAfter, statusBefore);
   });
 
   it('one manager automatically watches every registered project', async () => {
@@ -531,7 +639,7 @@ describe('Noosphere continuity CLI', () => {
         );
       } catch (error) {
         const firstState = await readFile(
-          path.join(projectDir, '.noosphere', 'state.json'),
+          path.join(projectDir, '.noosphere', 'runtime-state.json'),
           'utf8',
         ).catch(() => 'missing');
         const firstDiff = await execFileAsync(

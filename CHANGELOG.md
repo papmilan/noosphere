@@ -12,6 +12,20 @@ Dates are npm publish dates. The format follows
 
 ## noosphere-continuity
 
+### Unreleased
+
+- Added Continuation State Protocol v1: strict Git-tracked
+  `.noosphere/state.json`, deterministic transitions and three-way merging,
+  exact-file-identity optimistic concurrency, explicit terminal-state intent,
+  and fail-closed migration of legacy watcher telemetry to the ignored
+  `.noosphere/runtime-state.json`. Tracked CSP contains only durable task truth;
+  Git, agent, revision, timestamp, and watcher observations remain runtime-only.
+- `noosphere state` is now the CSP interface. ACP state moved to
+  `noosphere acp state`; legacy ACP subcommands remain warning aliases for one
+  release cycle.
+- Generated agent adapters read durable CSP before observing Git separately and never parse
+  journal prose into machine state when CSP exists.
+
 ### 2.3.1 — 2026-07-17
 
 **Security patch.** Publishes the merged SEC-01/03/05 fixes.
