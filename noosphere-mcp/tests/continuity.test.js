@@ -124,7 +124,7 @@ before(async () => {
   lifecycleHome = await mkdtemp(
     path.join(os.tmpdir(), 'noosphere-user-home-'),
   );
-  await execFileAsync('git', ['init'], { cwd: projectDir });
+  await execFileAsync('git', ['init', '-b', 'main'], { cwd: projectDir });
   await execFileAsync('git', ['config', 'user.email', 'test@example.com'], {
     cwd: projectDir,
   });
