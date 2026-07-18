@@ -98,6 +98,7 @@ async function makeFakeHome(extraFiles = {}) {
 function baseEnv(fakeHome, noosphereHome) {
   return {
     HOME: fakeHome,
+    USERPROFILE: fakeHome,
     NOOSPHERE_HOME: noosphereHome,
     NOOSPHERE_SKIP_LAUNCHCTL: '1',
     NOOSPHERE_SKIP_SYSTEMCTL: '1',
@@ -105,6 +106,10 @@ function baseEnv(fakeHome, noosphereHome) {
     NOOSPHERE_SKIP_CLAUDE_HOOK: '1',
     NOOSPHERE_SKIP_NPM: '1',
   };
+}
+
+function normalizePathSeparators(value) {
+  return value.replaceAll('\\', '/');
 }
 
 async function exists(file) {
@@ -136,7 +141,7 @@ describe('Noosphere macOS lifecycle installer', () => {
         path.join(noosphereHome, 'bin', 'noosphere'),
         'utf8',
       );
-      assert.match(wrapper, /continuity\/index\.js/);
+      assert.match(normalizePathSeparators(wrapper), /continuity\/index\.js/);
 
       // zsh shell fragment
       const shell = await readFile(path.join(noosphereHome, 'shell.zsh'), 'utf8');
@@ -284,7 +289,7 @@ describe('Noosphere Linux lifecycle installer', () => {
         path.join(noosphereHome, 'bin', 'noosphere'),
         'utf8',
       );
-      assert.match(wrapper, /continuity\/index\.js/);
+      assert.match(normalizePathSeparators(wrapper), /continuity\/index\.js/);
 
       // Shell fragments
       const shellZsh = await readFile(path.join(noosphereHome, 'shell.zsh'), 'utf8');
@@ -435,7 +440,7 @@ describe('Noosphere Windows lifecycle installer', () => {
         path.join(noosphereHome, 'bin', 'noosphere.cmd'),
         'utf8',
       );
-      assert.match(wrapper, /continuity.index\.js/);
+      assert.match(normalizePathSeparators(wrapper), /continuity\/index\.js/);
       assert.match(wrapper, /@echo off/);
 
       // PowerShell fragment
@@ -567,14 +572,26 @@ describe('npm child-process invocation', () => {
     // filename was looked up. On Windows, only npm.cmd resolves through
     // PATHEXT; npm (extensionless) yields ENOENT.
     const marker = path.join(fakeHome, 'npm-shim.log');
-    const shim =
-      `#!/bin/sh\n` +
-      `printf '%s\\n' "$0" "$@" > "${marker}"\n`;
+    const shim = process.platform === 'win32'
+      ? [
+        '@echo off',
+        `> "${marker}" echo %~f0`,
+        ':args',
+        'if "%~1"=="" goto done',
+        `>> "${marker}" echo %~1`,
+        'shift',
+        'goto args',
+        ':done',
+        'exit /b 0',
+        '',
+      ].join('\r\n')
+      : `#!/bin/sh\nprintf '%s\\n' "$0" "$@" > "${marker}"\n`;
     await writeFile(path.join(fakeBin, 'npm.cmd'), shim, { mode: 0o755 });
 
     try {
       const result = await runInstaller('install', {
         HOME: fakeHome,
+        USERPROFILE: fakeHome,
         NOOSPHERE_HOME: noosphereHome,
         NOOSPHERE_TEST_PLATFORM: 'win32',
         NOOSPHERE_SKIP_SCHTASKS: '1',
