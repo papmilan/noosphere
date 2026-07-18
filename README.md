@@ -162,7 +162,7 @@ flowchart TD
     tools["AI tools<br/>Codex · Claude Code · Cursor · Gemini · IDE · scripts"]
 
     subgraph noosphere["Noosphere continuity layer"]
-        files[".noosphere/ files<br/>context · journal · ACP state"]
+        files[".noosphere/ files<br/>CSP · ACP · context · journal"]
         cli["noosphere CLI"]
         http["HTTP API<br/>(noosphere-relayer)"]
         mcp["MCP"]
@@ -473,7 +473,7 @@ enabled on the previous machine.
 ├── context.md        Refreshed context for file-reading agents
 ├── journal.md        Local public work notes and handoffs
 ├── state.json        Git-tracked canonical CSP project state
-├── runtime-state.json Ignored watcher/baseline/checkpoint telemetry
+├── runtime-state.json Ignored runtime observations and watcher telemetry
 ├── protocol.json     Machine-readable continuity protocol
 └── instructions.md   Human-readable universal instructions
 ```
@@ -533,7 +533,7 @@ Full data path and retention: [docs/PRIVACY.md](docs/PRIVACY.md) and
 
 ```text
 noosphere-mcp/             npm: noosphere-continuity
-  continuity/              CLI, watcher, context refresh, ACP state
+  continuity/              CLI, watcher, CSP, context refresh, ACP state
   lifecycle/               Installer, services, registry, credentials
   hooks/                   Optional tool-specific hooks
   mcp-server/              MCP configuration assets
