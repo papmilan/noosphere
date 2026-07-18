@@ -605,9 +605,12 @@ describe('npm child-process invocation', () => {
         `Installer exited ${result.code}\nSTDERR: ${result.stderr}\nSTDOUT: ${result.stdout}`,
       );
       const log = await readFile(marker, 'utf8');
-      assert.match(log, /npm\.cmd/, 'installer must invoke npm.cmd on win32');
-      assert.match(log, /^ci$/m);
-      assert.match(log, /^--omit=dev$/m);
+      const invocation = log.trim().split(/\r?\n/);
+      assert.match(invocation[0], /npm\.cmd/, 'installer must invoke npm.cmd on win32');
+      assert.deepEqual(
+        invocation.slice(1),
+        process.platform === 'win32' ? ['ci', '--omit', 'dev'] : ['ci', '--omit=dev'],
+      );
     } finally {
       await rm(fakeHome, { recursive: true, force: true });
     }
