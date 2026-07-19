@@ -113,6 +113,7 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
   async createProject({ ownerScope, project } = {}) {
     assertOwnerScope(ownerScope);
     const value = validateProject(project);
+    if (value.latest_checkpoint_id !== null) throw new Error('project-checkpoint-head-mismatch');
     if (getTuple(this.#projects, [ownerScope, value.id])) throw new RepositoryConflictError('project-conflict');
     setTuple(this.#projects, [ownerScope, value.id], value);
     return structuredClone(value);
@@ -136,6 +137,7 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
     validateProject(current);
     const value = validateProject(project);
     if (value.id !== projectId || current.id !== projectId) throw new Error('project-id-mismatch');
+    if (value.latest_checkpoint_id !== current.latest_checkpoint_id) throw new Error('project-checkpoint-head-mismatch');
     setTuple(this.#projects, [ownerScope, projectId], value);
     return structuredClone(value);
   }
@@ -152,6 +154,7 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
   async createSession({ ownerScope, session } = {}) {
     assertOwnerScope(ownerScope);
     const value = validateSession(session);
+    if (value.latest_checkpoint_id !== null) throw new Error('session-checkpoint-head-mismatch');
     const project = getTuple(this.#projects, [ownerScope, value.project_id]);
     if (!project) throw new Error('project-not-found');
     validateProject(project);
@@ -183,6 +186,7 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
     const value = validateSession(session);
     if (value.project_id !== projectId) throw new Error('session-project-mismatch');
     if (value.id !== sessionId) throw new Error('session-id-mismatch');
+    if (value.latest_checkpoint_id !== current.latest_checkpoint_id) throw new Error('session-checkpoint-head-mismatch');
     setTuple(this.#sessions, [ownerScope, projectId, sessionId], value);
     return structuredClone(value);
   }

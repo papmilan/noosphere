@@ -40,6 +40,25 @@ describe('Project Memory repository port', () => {
 });
 
 describe('owner-scoped Project Memory repository operations', () => {
+  it('rejects forged checkpoint heads on Project and Session creation without storing records', async () => {
+    const repository = new InMemoryProjectMemoryRepository();
+    const project = validProject();
+    const session = validSession();
+
+    await assert.rejects(
+      repository.createProject({ ownerScope: ownerA, project: { ...project, latest_checkpoint_id: 'chk_forged' } }),
+      /project-checkpoint-head-mismatch/,
+    );
+    assert.equal(await repository.getProject({ ownerScope: ownerA, projectId: project.id }), null);
+
+    await repository.createProject({ ownerScope: ownerA, project });
+    await assert.rejects(
+      repository.createSession({ ownerScope: ownerA, session: { ...session, latest_checkpoint_id: 'chk_forged' } }),
+      /session-checkpoint-head-mismatch/,
+    );
+    assert.equal(await repository.getSession({ ownerScope: ownerA, projectId: project.id, sessionId: session.id }), null);
+  });
+
   it('lists and replaces only projected Projects under the requested owner', async () => {
     const repository = new InMemoryProjectMemoryRepository();
     const projectA = validProject();
@@ -134,6 +153,72 @@ describe('owner-scoped Project Memory repository operations', () => {
 });
 
 describe('atomic projected checkpoint persistence', () => {
+  it('preserves committed heads across replacement and cannot commit a second revision-one root', async () => {
+    const repository = new InMemoryProjectMemoryRepository();
+    const project = validProject();
+    const session = validSession();
+    const checkpoint = validCheckpoint();
+    const committedProject = projectedProject(project, checkpoint);
+    const committedSession = projectedSession(session, checkpoint);
+    await repository.createProject({ ownerScope: ownerA, project });
+    await repository.createSession({ ownerScope: ownerA, session });
+    await repository.saveCheckpoint({
+      ownerScope: ownerA,
+      checkpoint,
+      project: committedProject,
+      session: committedSession,
+      idempotency: idempotency('save-root', 'hash-root'),
+    });
+
+    for (const forgedHead of [null, 'chk_forged']) {
+      await assert.rejects(
+        repository.replaceProject({
+          ownerScope: ownerA,
+          projectId: project.id,
+          project: { ...committedProject, name: 'Rejected Project Rewrite', latest_checkpoint_id: forgedHead },
+        }),
+        /project-checkpoint-head-mismatch/,
+      );
+      await assert.rejects(
+        repository.replaceSession({
+          ownerScope: ownerA,
+          projectId: project.id,
+          sessionId: session.id,
+          session: { ...committedSession, status: 'paused', latest_checkpoint_id: forgedHead },
+        }),
+        /session-checkpoint-head-mismatch/,
+      );
+    }
+    assert.deepEqual(await repository.getProject({ ownerScope: ownerA, projectId: project.id }), committedProject);
+    assert.deepEqual(await repository.getSession({ ownerScope: ownerA, projectId: project.id, sessionId: session.id }), committedSession);
+
+    const secondRoot = validCheckpoint({ id: 'chk_second_root' });
+    await assert.rejects(
+      repository.saveCheckpoint({
+        ownerScope: ownerA,
+        checkpoint: secondRoot,
+        project: projectedProject(committedProject, secondRoot),
+        session: projectedSession(committedSession, secondRoot),
+        idempotency: idempotency('save-after-rejected-rewrite', 'hash-second-root'),
+      }),
+      (error) => error.code === 'checkpoint-predecessor-conflict',
+    );
+    assert.equal(await repository.getCheckpoint({ ownerScope: ownerA, projectId: project.id, checkpointId: secondRoot.id }), null);
+
+    const revisionTwo = validCheckpoint({
+      id: 'chk_revision_two',
+      revision: 2,
+      previous_checkpoint_id: checkpoint.id,
+    });
+    assert.deepEqual(await repository.saveCheckpoint({
+      ownerScope: ownerA,
+      checkpoint: revisionTwo,
+      project: projectedProject(committedProject, revisionTwo),
+      session: projectedSession(committedSession, revisionTwo),
+      idempotency: idempotency('save-after-rejected-rewrite', 'different-hash-after-failure'),
+    }), { checkpoint: revisionTwo, deduplicated: false });
+  });
+
   it('commits checkpoint, Project head, Session head, and receipt together', async () => {
     const repository = new InMemoryProjectMemoryRepository();
     const project = validProject();
