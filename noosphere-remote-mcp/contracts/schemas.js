@@ -16,7 +16,7 @@ const metadataScalar = {
 };
 const metadataKey = {
   allOf: [
-    text(80),
+    { type: 'string', minLength: 1, maxLength: 80, pattern: '^[a-z][a-z0-9_]{0,79}$' },
     { not: { enum: ['owner', 'tenant', 'user', 'user_id', 'subject', 'token', 'authorization', 'api_key', 'access_token', 'refresh_token', 'password', 'chain_of_thought', 'hidden_chain_of_thought', 'reasoning', 'internal_reasoning', 'model_private_context', 'transcript', 'attachments', 'url', 'urls'] } },
   ],
 };

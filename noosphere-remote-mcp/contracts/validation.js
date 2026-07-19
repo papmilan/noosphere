@@ -11,6 +11,7 @@ const FORBIDDEN_METADATA_KEYS = new Set([
   'owner', 'tenant', 'user', 'user_id', 'subject', 'token', 'authorization',
   'api_key', 'access_token', 'refresh_token', 'password', ...PRIVATE_KEYS,
 ]);
+const METADATA_KEY = /^[a-z][a-z0-9_]{0,79}$/;
 
 function fail(code) {
   throw new Error(code);
@@ -102,10 +103,6 @@ export function validateSession(value) {
   return structuredClone(value);
 }
 
-function normalizeMetadataKey(key) {
-  return key.toLowerCase().replace(/[\s-]+/g, '_');
-}
-
 function assertExactMetadata(value) {
   assertObject(value, 'metadata');
   assertExactKeys(value, new Set(['entries']), new Set(['entries']), 'metadata');
@@ -120,7 +117,8 @@ function assertMetadataEntries(value, path, depth) {
     const entryPath = `${path}[${index}]`;
     assertExactKeys(entry, new Set(['key', 'value']), new Set(['key', 'value']), entryPath);
     assertText(entry.key, `${entryPath}.key`, 80);
-    if (FORBIDDEN_METADATA_KEYS.has(normalizeMetadataKey(entry.key))) fail(`forbidden-metadata-key:${entryPath}.key`);
+    if (!METADATA_KEY.test(entry.key)) fail(`invalid-metadata-key:${entryPath}.key`);
+    if (FORBIDDEN_METADATA_KEYS.has(entry.key)) fail(`forbidden-metadata-key:${entryPath}.key`);
     assertMetadataValue(entry.value, `${entryPath}.value`, depth);
   }
 }

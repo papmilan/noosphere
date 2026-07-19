@@ -10,7 +10,8 @@ derived by the server and is never a tool argument.
 - Every public input and result embeds a closed, versioned schema. Metadata is
   a bounded entry/value tree rather than an open JSON map; identity,
   authentication, secret, and private-reasoning keys are rejected at every
-  nested entry.
+  nested entry. Metadata keys use lowercase snake_case; casing, spaces, and
+  hyphens are rejected before applying the forbidden-key set.
 - Project IDs are opaque and do not authorize access.
 - List results use opaque cursors and a maximum page size of 100.
 - Stored checkpoint fields returned by read tools include

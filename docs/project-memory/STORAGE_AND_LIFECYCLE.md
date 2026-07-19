@@ -16,11 +16,23 @@ project and has exactly the predecessor's revision plus one. Branches and
 cycles are rejected. A PostgreSQL implementation must make head comparison,
 checkpoint insertion, and idempotency receipt insertion one transaction.
 
+The public Project record is the sole source of truth for a project's current
+checkpoint head: a committed checkpoint atomically sets
+`latest_checkpoint_id` to that checkpoint ID. The PR 1 in-memory contract does
+not synthesize time: `updated_at` and `last_activity_at` remain the values
+provided when the Project was created. Server-owned timestamp mutation is
+explicitly deferred to the production repository contract, where it must be
+part of the same transaction as the head update.
+
 Idempotency scope is `(authenticated owner, operation name, idempotency key)`.
 A matching committed request hash replays its committed success; a different
 hash conflicts; a failed transaction commits no receipt. Concurrent retries
 are a transaction/unique-constraint concern for the production adapter.
 Retention/TTL is deliberately deferred to deployment configuration.
+
+Repository tuple identity preserves component boundaries; it must use a
+collision-safe tuple representation (such as nested maps or typed database
+columns), never a delimiter-joined string.
 
 Internal `ProjectRecord` carries `owner_scope`; public project values and MCP
 inputs do not.

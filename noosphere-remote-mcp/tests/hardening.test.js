@@ -9,6 +9,7 @@ import {
   validateSaveCheckpointInput,
   validateSession,
 } from '../index.js';
+import sessionSchema from '../schemas/session-1.0.0.json' with { type: 'json' };
 import { validCheckpoint, validProject, validSession } from './fixtures.js';
 
 const ownerA = 'issuer:https://id.example|subject:user-a';
@@ -84,6 +85,24 @@ describe('public MCP schema hardening', () => {
     );
   });
 
+  it('enforces the same lowercase snake_case metadata-key grammar in schema and validation', () => {
+    const schemaPattern = sessionSchema.$defs.entry.properties.key.allOf[0].pattern;
+    for (const key of ['Authorization', 'access-token', 'USER ID', 'display-name']) {
+      assert.equal(new RegExp(schemaPattern).test(key), false, key);
+      assert.throws(
+        () => validateSession(validSession({ metadata: { entries: [{ key, value: { kind: 'string', value: 'x' } }] } })),
+        /invalid-metadata-key/,
+      );
+    }
+    for (const key of ['authorization', 'access_token']) {
+      assert.equal(new RegExp(schemaPattern).test(key), true, key);
+      assert.throws(
+        () => validateSession(validSession({ metadata: { entries: [{ key, value: { kind: 'string', value: 'x' } }] } })),
+        /forbidden-metadata-key/,
+      );
+    }
+  });
+
   it('uses status as the sole project lifecycle state', async () => {
     const project = validProject({ status: 'archived' });
     const repository = new InMemoryProjectMemoryRepository();
@@ -148,5 +167,30 @@ describe('in-memory repository hardening', () => {
       repository.recordIdempotency({ ownerScope: ownerA, operation: 'save_checkpoint', key: 'shared', requestHash: 'other', result: { accepted: true } }),
       (error) => error.code === 'idempotency-conflict',
     );
+  });
+
+  it('keeps separator-containing owner, operation, and key tuples distinct', async () => {
+    const repository = new InMemoryProjectMemoryRepository();
+    const first = await repository.recordIdempotency({
+      ownerScope: 'owner\u0000save_checkpoint', operation: 'record', key: 'shared', requestHash: 'hash-a', result: { tuple: 'first' },
+    });
+    const second = await repository.recordIdempotency({
+      ownerScope: 'owner', operation: 'save_checkpoint', key: 'record\u0000shared', requestHash: 'hash-b', result: { tuple: 'second' },
+    });
+    assert.equal(first.deduplicated, false);
+    assert.equal(second.deduplicated, false);
+    assert.deepEqual(second.result, { tuple: 'second' });
+  });
+
+  it('updates the public project checkpoint head after every committed revision', async () => {
+    const repository = new InMemoryProjectMemoryRepository();
+    await repository.createProject({ ownerScope: ownerA, project: validProject() });
+    await repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: validCheckpoint(), idempotency: idempotency('one', 'hash-one') });
+    assert.equal((await repository.getProject({ ownerScope: ownerA, projectId: 'prj_01j3bicycle' })).latest_checkpoint_id, 'chk_01j3bicycle');
+    await repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: revisionTwo(), idempotency: idempotency('two', 'hash-two') });
+    const project = await repository.getProject({ ownerScope: ownerA, projectId: 'prj_01j3bicycle' });
+    assert.equal(project.latest_checkpoint_id, 'chk_01j3bicycle_r2');
+    assert.equal(project.updated_at, '2026-07-19T12:00:00.000Z');
+    assert.equal(project.last_activity_at, '2026-07-19T12:00:00.000Z');
   });
 });
