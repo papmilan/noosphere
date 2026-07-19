@@ -30,4 +30,3 @@ EU region but makes no legal-compliance claim.
 - Horizontal operation requires a shared database and later distributed
   rate-limiting; neither is implied by PR 1.
 - Existing JSON stores remain supported only for their current relayer role.
-

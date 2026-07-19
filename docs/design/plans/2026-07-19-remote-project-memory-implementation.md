@@ -48,4 +48,3 @@ Every later PR must retain CSP/ACP compatibility, test untrusted stored content
 handling, prohibit hidden reasoning/transcript capture, and demonstrate that
 the remote service does not require a Git repository, local folder, CLI, or
 user-run MCP process.
-

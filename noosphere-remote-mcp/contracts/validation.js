@@ -132,4 +132,3 @@ export function validateCheckpoint(value) {
   assertTimestamp(value.created_at, 'created_at');
   return structuredClone(value);
 }
-

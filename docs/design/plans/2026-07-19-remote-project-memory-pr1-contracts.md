@@ -165,4 +165,3 @@ Expected: all contract and existing checks pass; package dry-runs list no `noosp
 git add docs/design/plans/2026-07-19-remote-project-memory-implementation.md README.md
 git commit -m "docs: plan remote project-memory delivery"
 ```
-

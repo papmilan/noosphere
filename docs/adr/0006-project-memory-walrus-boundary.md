@@ -29,4 +29,3 @@ Walrus-relayer behavior.
   availability.
 - Full transcripts, attachments, URL fetching, and artifacts remain out of
   scope.
-

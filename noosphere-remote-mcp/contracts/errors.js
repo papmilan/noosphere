@@ -25,4 +25,3 @@ export function createMcpError(code) {
     error: { code, retryable: RETRYABLE.has(code) },
   };
 }
-

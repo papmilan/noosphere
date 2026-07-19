@@ -46,4 +46,3 @@ The reference production deployment will use HTTPS, a Streamable HTTP MCP
 endpoint, externally managed OAuth/OIDC, PostgreSQL, and an EU-region runtime.
 Region selection alone does not establish legal or regulatory compliance.
 PR 1 does not include infrastructure, a container, migrations, or an endpoint.
-

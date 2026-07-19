@@ -27,4 +27,3 @@ encryption keys are secrets and must never enter logs or tool results.
 The first service deployment must separately validate reverse-proxy header
 trust, OAuth provider configuration, database backups, distributed rate limits,
 real-client behavior, data residency, and operational incident response.
-

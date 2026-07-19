@@ -15,4 +15,3 @@ export const PROJECT_MEMORY_LIMITS = Object.freeze({
   pageSizeDefault: 20,
   pageSizeMaximum: 100,
 });
-

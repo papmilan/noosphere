@@ -21,4 +21,3 @@
     "latest_checkpoint_id": { "type": ["string", "null"] }
   }
 }
-

@@ -59,4 +59,3 @@ export const POSTGRESQL_REPOSITORY_CONTRACT = Object.freeze({
   requiredMethods: ['createProject', 'getProject', 'saveCheckpoint', 'findProjects', 'listProjects', 'createSession', 'listSessions', 'getCheckpoint', 'listCheckpoints', 'archiveProject', 'deleteProject', 'exportProject'],
   constraints: ['owner_scope_required', 'transactions_for_revision_and_idempotency', 'cursor_pagination', 'retention_configuration'],
 });
-

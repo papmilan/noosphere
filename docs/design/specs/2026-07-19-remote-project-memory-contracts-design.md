@@ -44,4 +44,3 @@ PR 1 defines contracts and tests. PR 2 implements pure service transitions and
 matching. PR 3 adds PostgreSQL tenancy and OIDC verification. PR 4 adds the
 remote MCP endpoint. PR 5 validates cross-client workflows. PR 6 adds
 deployment and user documentation.
-

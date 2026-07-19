@@ -48,4 +48,3 @@ goal, current status, facts, assumptions, decisions, unresolved questions,
 blockers, next actions, recent sessions, freshness, warnings, and the
 untrusted-data label. It never returns a raw database row or claims to recover
 unpersisted conversation state.
-

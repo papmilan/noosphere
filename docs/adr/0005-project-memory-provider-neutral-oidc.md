@@ -30,4 +30,3 @@ production configuration rejects it.
 - Authentication failures disclose neither project names nor ownership.
 - Selecting an OIDC vendor or local Keycloak example is deployment work for a
   later PR, not a product dependency in PR 1.
-

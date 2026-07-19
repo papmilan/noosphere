@@ -32,4 +32,3 @@ local CLI, filesystem project state, or existing relayer runtime.
   deployment hardening in later PRs.
 - PR 1 supplies no listener, endpoint, deployment image, or public claim that
   the service is available.
-
