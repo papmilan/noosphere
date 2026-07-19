@@ -5,10 +5,34 @@ import {
   InMemoryProjectMemoryRepository,
   MCP_ERROR_CODES,
   MCP_TOOLS,
+  PROJECT_MEMORY_SCHEMA_VERSION,
   assessResumeFreshness,
   createMcpError,
 } from '../index.js';
 import { validCheckpoint, validProject } from './fixtures.js';
+
+function matchesSchema(schema, value, root = schema) {
+  if (schema.$ref) return matchesSchema(root.$defs[schema.$ref.slice('#/$defs/'.length)], value, root);
+  if (schema.allOf && !schema.allOf.every((part) => matchesSchema(part, value, root))) return false;
+  if (schema.oneOf && schema.oneOf.filter((part) => matchesSchema(part, value, root)).length !== 1) return false;
+  if (schema.const !== undefined && value !== schema.const) return false;
+  if (schema.enum && !schema.enum.includes(value)) return false;
+  if (schema.type) {
+    const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (!types.some((type) => (type === 'null' ? value === null : type === 'array' ? Array.isArray(value) : type === 'object' ? value && typeof value === 'object' && !Array.isArray(value) : typeof value === type))) return false;
+  }
+  if (schema.pattern && (typeof value !== 'string' || !new RegExp(schema.pattern).test(value))) return false;
+  if (schema.minLength !== undefined && typeof value === 'string' && value.length < schema.minLength) return false;
+  if (schema.maxLength !== undefined && typeof value === 'string' && value.length > schema.maxLength) return false;
+  if (schema.type === 'array' && schema.maxItems !== undefined && value.length > schema.maxItems) return false;
+  if (schema.type === 'array' && schema.items && !value.every((item) => matchesSchema(schema.items, item, root))) return false;
+  if (schema.type === 'object') {
+    if (!schema.required.every((key) => key in value)) return false;
+    if (schema.additionalProperties === false && Object.keys(value).some((key) => !(key in schema.properties))) return false;
+    if (!Object.entries(schema.properties).every(([key, child]) => !(key in value) || matchesSchema(child, value[key], root))) return false;
+  }
+  return true;
+}
 
 describe('Project Memory MCP contracts', () => {
   it('exposes the small approved tool surface', () => {
@@ -65,6 +89,20 @@ describe('Project Memory MCP contracts', () => {
       'checkpoint-predates-session',
     ]);
     assert.equal(result.freshness, 'incomplete');
+  });
+
+  it('represents all approved freshness outcomes', () => {
+    const timestamp = '2026-07-19T12:00:00.000Z';
+    const later = '2026-07-19T12:05:00.000Z';
+    const cases = [
+      assessResumeFreshness({}),
+      assessResumeFreshness({ latestCheckpointAt: timestamp, latestSessionActivityAt: later }),
+      assessResumeFreshness({ sessionStatus: 'interrupted' }),
+      { freshness: 'incomplete', warnings: [{ schema_version: PROJECT_MEMORY_SCHEMA_VERSION, code: 'repository-state-inconsistent', message: 'The durable project state is incomplete and cannot be safely resumed.' }] },
+    ];
+    const codes = MCP_TOOLS.resume_project.output.properties.warnings.items.properties.code.enum;
+    assert.deepEqual(codes, ['interrupted-session', 'checkpoint-predates-session', 'no-durable-checkpoint', 'repository-state-inconsistent']);
+    for (const { warnings } of cases) for (const warning of warnings) assert.equal(matchesSchema(MCP_TOOLS.resume_project.output.properties.warnings.items, warning), true);
   });
 });
 
