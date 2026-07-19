@@ -5,16 +5,30 @@
 Every repository method accepts a server-derived `ownerScope`. The port must
 support project/session/checkpoint reads and writes, deterministic matching,
 cursor listing, idempotency, archive, deletion, export, quotas, and retention.
-The test-only in-memory implementation proves owner-scoped lookup and
-idempotent checkpoint persistence. It is not a production backend.
+The test-only in-memory implementation proves owner-scoped lookup,
+strictly-linear checkpoint history, immutable checkpoint IDs, and
+operation-scoped idempotent checkpoint persistence. It is not a production
+backend.
 
-The PostgreSQL implementation in PR 3 will use transactional revision and
-idempotency writes. Internal `ProjectRecord` carries `owner_scope`; public
-project values and MCP inputs do not.
+Checkpoint history is strictly linear in v1: revision 1 has no predecessor;
+every later revision points to the current head in the same owner scope and
+project and has exactly the predecessor's revision plus one. Branches and
+cycles are rejected. A PostgreSQL implementation must make head comparison,
+checkpoint insertion, and idempotency receipt insertion one transaction.
+
+Idempotency scope is `(authenticated owner, operation name, idempotency key)`.
+A matching committed request hash replays its committed success; a different
+hash conflicts; a failed transaction commits no receipt. Concurrent retries
+are a transaction/unique-constraint concern for the production adapter.
+Retention/TTL is deliberately deferred to deployment configuration.
+
+Internal `ProjectRecord` carries `owner_scope`; public project values and MCP
+inputs do not.
 
 ## Lifecycle
 
-- **active / paused / completed:** normal Project states.
+- **active / paused / completed:** normal Project states. `status` is the only
+  lifecycle source of truth; there is no redundant `archived` boolean.
 - **archived:** hidden from default listings; retained and retrievable by
   explicit request where policy permits.
 - **deleted:** explicit lifecycle action, not an archive synonym. It must

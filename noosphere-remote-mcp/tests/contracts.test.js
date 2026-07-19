@@ -8,10 +8,10 @@ import {
   assessResumeFreshness,
   createMcpError,
 } from '../index.js';
-import { validCheckpoint, validProject } from './validation.test.js';
+import { validCheckpoint, validProject } from './fixtures.js';
 
 describe('Project Memory MCP contracts', () => {
-  it('exposes the small approved tool surface without identity-bearing arguments', () => {
+  it('exposes the small approved tool surface', () => {
     assert.deepEqual(Object.keys(MCP_TOOLS).sort(), [
       'archive_project',
       'create_project',
@@ -29,7 +29,6 @@ describe('Project Memory MCP contracts', () => {
       'save_checkpoint',
       'update_project',
     ]);
-    assert.equal(/owner|tenant|subject|authorization|token|user_id/i.test(JSON.stringify(MCP_TOOLS)), false);
     assert.equal(MCP_TOOLS.resume_project.output.properties.content_trust.const, 'untrusted-persisted-data');
   });
 

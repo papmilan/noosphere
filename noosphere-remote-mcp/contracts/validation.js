@@ -7,6 +7,10 @@ const PRIVATE_KEYS = new Set([
   'chain_of_thought', 'hidden_chain_of_thought', 'reasoning', 'internal_reasoning',
   'model_private_context', 'transcript', 'attachments', 'url', 'urls',
 ]);
+const FORBIDDEN_METADATA_KEYS = new Set([
+  'owner', 'tenant', 'user', 'user_id', 'subject', 'token', 'authorization',
+  'api_key', 'access_token', 'refresh_token', 'password', ...PRIVATE_KEYS,
+]);
 
 function fail(code) {
   throw new Error(code);
@@ -61,8 +65,8 @@ function assertPayloadBound(value) {
 }
 
 export function validateProject(value) {
-  const allowed = new Set(['id', 'schema_version', 'name', 'normalized_name', 'description', 'category', 'status', 'aliases', 'archived', 'created_at', 'updated_at', 'last_activity_at', 'latest_checkpoint_id']);
-  const required = new Set(['id', 'schema_version', 'name', 'normalized_name', 'status', 'aliases', 'archived', 'created_at', 'updated_at', 'last_activity_at', 'latest_checkpoint_id']);
+  const allowed = new Set(['id', 'schema_version', 'name', 'normalized_name', 'description', 'category', 'status', 'aliases', 'created_at', 'updated_at', 'last_activity_at', 'latest_checkpoint_id']);
+  const required = new Set(['id', 'schema_version', 'name', 'normalized_name', 'status', 'aliases', 'created_at', 'updated_at', 'last_activity_at', 'latest_checkpoint_id']);
   assertExactKeys(value, allowed, required, 'root');
   assertId(value.id, 'id');
   assertSchemaVersion(value.schema_version);
@@ -73,7 +77,6 @@ export function validateProject(value) {
   assertEnum(value.status, 'status', ['active', 'paused', 'completed', 'archived']);
   assertArray(value.aliases, 'aliases', PROJECT_MEMORY_LIMITS.aliasesPerProject);
   for (const [index, alias] of value.aliases.entries()) assertText(alias, `aliases[${index}]`, PROJECT_MEMORY_LIMITS.aliasChars);
-  if (typeof value.archived !== 'boolean') fail('invalid-boolean:archived');
   assertTimestamp(value.created_at, 'created_at');
   assertTimestamp(value.updated_at, 'updated_at');
   assertTimestamp(value.last_activity_at, 'last_activity_at');
@@ -99,14 +102,53 @@ export function validateSession(value) {
   return structuredClone(value);
 }
 
+function normalizeMetadataKey(key) {
+  return key.toLowerCase().replace(/[\s-]+/g, '_');
+}
+
 function assertExactMetadata(value) {
   assertObject(value, 'metadata');
-  if (Object.keys(value).length > 20 || Buffer.byteLength(JSON.stringify(value), 'utf8') > PROJECT_MEMORY_LIMITS.metadataBytes) fail('metadata-limit');
-  for (const [key, item] of Object.entries(value)) {
-    assertText(key, 'metadata-key', 80);
-    if (!['string', 'number', 'boolean'].includes(typeof item) && item !== null) fail('invalid-metadata');
-    if (typeof item === 'string') assertText(item, `metadata.${key}`, PROJECT_MEMORY_LIMITS.itemChars);
+  assertExactKeys(value, new Set(['entries']), new Set(['entries']), 'metadata');
+  if (Buffer.byteLength(JSON.stringify(value), 'utf8') > PROJECT_MEMORY_LIMITS.metadataBytes) fail('metadata-limit');
+  assertMetadataEntries(value.entries, 'metadata.entries', 3);
+}
+
+function assertMetadataEntries(value, path, depth) {
+  if (!Array.isArray(value)) fail(`invalid-array:${path}`);
+  if (value.length > 20) fail(`metadata-limit:${path}`);
+  for (const [index, entry] of value.entries()) {
+    const entryPath = `${path}[${index}]`;
+    assertExactKeys(entry, new Set(['key', 'value']), new Set(['key', 'value']), entryPath);
+    assertText(entry.key, `${entryPath}.key`, 80);
+    if (FORBIDDEN_METADATA_KEYS.has(normalizeMetadataKey(entry.key))) fail(`forbidden-metadata-key:${entryPath}.key`);
+    assertMetadataValue(entry.value, `${entryPath}.value`, depth);
   }
+}
+
+function assertMetadataValue(value, path, depth) {
+  assertObject(value, 'metadata-value');
+  if (typeof value.kind !== 'string') fail(`invalid-metadata:${path}`);
+  if (['string', 'number', 'boolean', 'null'].includes(value.kind)) {
+    assertExactKeys(value, new Set(['kind', 'value']), new Set(['kind', 'value']), 'metadata-value');
+    if (value.kind === 'string') assertText(value.value, `${path}.value`, PROJECT_MEMORY_LIMITS.itemChars);
+    if (value.kind === 'number' && (typeof value.value !== 'number' || !Number.isFinite(value.value))) fail(`invalid-metadata:${path}`);
+    if (value.kind === 'boolean' && typeof value.value !== 'boolean') fail(`invalid-metadata:${path}`);
+    if (value.kind === 'null' && value.value !== null) fail(`invalid-metadata:${path}`);
+    return;
+  }
+  if (depth <= 0) fail(`metadata-depth:${path}`);
+  if (value.kind === 'list') {
+    assertExactKeys(value, new Set(['kind', 'items']), new Set(['kind', 'items']), 'metadata-value');
+    if (!Array.isArray(value.items) || value.items.length > 20) fail(`metadata-limit:${path}`);
+    for (const [index, item] of value.items.entries()) assertMetadataValue(item, `${path}.items[${index}]`, depth - 1);
+    return;
+  }
+  if (value.kind === 'record') {
+    assertExactKeys(value, new Set(['kind', 'entries']), new Set(['kind', 'entries']), 'metadata-value');
+    assertMetadataEntries(value.entries, `${path}.entries`, depth - 1);
+    return;
+  }
+  fail(`invalid-metadata:${path}`);
 }
 
 export function validateCheckpoint(value) {
@@ -130,5 +172,18 @@ export function validateCheckpoint(value) {
   assertText(value.source.client, 'source.client', PROJECT_MEMORY_LIMITS.sourceClientChars);
   assertText(value.source.model, 'source.model', PROJECT_MEMORY_LIMITS.sourceModelChars, { nullable: true });
   assertTimestamp(value.created_at, 'created_at');
+  return structuredClone(value);
+}
+
+export function validateSaveCheckpointInput(value) {
+  const allowed = new Set(['project_id', 'session_id', 'checkpoint', 'idempotency_key']);
+  const required = new Set(['project_id', 'checkpoint', 'idempotency_key']);
+  assertExactKeys(value, allowed, required, 'root');
+  assertId(value.project_id, 'project_id');
+  if ('session_id' in value) assertId(value.session_id, 'session_id', { nullable: true });
+  assertText(value.idempotency_key, 'idempotency_key', 128);
+  const checkpoint = validateCheckpoint(value.checkpoint);
+  if (checkpoint.project_id !== value.project_id) fail('checkpoint-project-mismatch');
+  if (value.session_id !== undefined && checkpoint.session_id !== value.session_id) fail('checkpoint-session-mismatch');
   return structuredClone(value);
 }
