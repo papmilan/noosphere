@@ -93,6 +93,19 @@ describe('Project Memory core primitives', () => {
       error: { code: 'internal', retryable: false },
     });
   });
+
+  it('redacts hostile error-envelope inspection failures without throwing', () => {
+    const hostileError = new Proxy({}, {
+      get() {
+        throw new Error('hostile getter');
+      },
+    });
+
+    assert.deepEqual(toPublicError(hostileError), {
+      isError: true,
+      error: { code: 'internal', retryable: false },
+    });
+  });
 });
 
 function flipBase64urlCharacter(value) {
