@@ -5,8 +5,8 @@ import {
   InMemoryProjectMemoryRepository,
   MCP_ERROR_CODES,
   MCP_TOOLS,
-  PROJECT_MEMORY_SCHEMA_VERSION,
   assessResumeFreshness,
+  createFreshnessWarning,
   createMcpError,
 } from '../index.js';
 import { validCheckpoint, validProject } from './fixtures.js';
@@ -98,7 +98,7 @@ describe('Project Memory MCP contracts', () => {
       assessResumeFreshness({}),
       assessResumeFreshness({ latestCheckpointAt: timestamp, latestSessionActivityAt: later }),
       assessResumeFreshness({ sessionStatus: 'interrupted' }),
-      { freshness: 'incomplete', warnings: [{ schema_version: PROJECT_MEMORY_SCHEMA_VERSION, code: 'repository-state-inconsistent', message: 'The durable project state is incomplete and cannot be safely resumed.' }] },
+      { freshness: 'incomplete', warnings: [createFreshnessWarning('repository-state-inconsistent', 'The durable project state is incomplete and cannot be safely resumed.')] },
     ];
     const codes = MCP_TOOLS.resume_project.output.properties.warnings.items.properties.code.enum;
     assert.deepEqual(codes, ['interrupted-session', 'checkpoint-predates-session', 'no-durable-checkpoint', 'repository-state-inconsistent']);
