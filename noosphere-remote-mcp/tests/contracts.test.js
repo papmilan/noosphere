@@ -9,7 +9,7 @@ import {
   createFreshnessWarning,
   createMcpError,
 } from '../index.js';
-import { validCheckpoint, validProject } from './fixtures.js';
+import { validCheckpoint, validProject, validSession } from './fixtures.js';
 
 function matchesSchema(schema, value, root = schema) {
   if (schema.$ref) return matchesSchema(root.$defs[schema.$ref.slice('#/$defs/'.length)], value, root);
@@ -136,16 +136,25 @@ describe('In-memory Project Memory repository contract', () => {
   it('keeps checkpoint writes owner-scoped and idempotency keys conflict-safe', async () => {
     const repository = new InMemoryProjectMemoryRepository();
     const ownerScope = 'issuer:https://id.example|subject:user-a';
-    await repository.createProject({ ownerScope, project: validProject() });
+    const project = validProject();
+    const session = validSession();
+    await repository.createProject({ ownerScope, project });
+    await repository.createSession({ ownerScope, session });
     const checkpoint = validCheckpoint();
+    const projectedProject = { ...project, latest_checkpoint_id: checkpoint.id };
+    const projectedSession = { ...session, latest_checkpoint_id: checkpoint.id };
     const first = await repository.saveCheckpoint({
       ownerScope,
       checkpoint,
+      project: projectedProject,
+      session: projectedSession,
       idempotency: { key: 'save-1', requestHash: 'sha256:request-a' },
     });
     const repeated = await repository.saveCheckpoint({
       ownerScope,
       checkpoint,
+      project: projectedProject,
+      session: projectedSession,
       idempotency: { key: 'save-1', requestHash: 'sha256:request-a' },
     });
     assert.equal(first.deduplicated, false);
@@ -154,6 +163,8 @@ describe('In-memory Project Memory repository contract', () => {
       repository.saveCheckpoint({
         ownerScope,
         checkpoint,
+        project: projectedProject,
+        session: projectedSession,
         idempotency: { key: 'save-1', requestHash: 'sha256:different' },
       }),
       /idempotency-conflict/,
