@@ -2,7 +2,7 @@ import { PROJECT_MEMORY_LIMITS, PROJECT_MEMORY_SCHEMA_VERSION } from './constant
 
 const ID = /^[a-z][a-z0-9_]{2,127}$/;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-const CONTROL = /[\u0000-\u001F\u007F-\u009F]/;
+const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/;
 const PRIVATE_KEYS = new Set([
   'chain_of_thought', 'hidden_chain_of_thought', 'reasoning', 'internal_reasoning',
   'model_private_context', 'transcript', 'attachments', 'url', 'urls',
@@ -73,8 +73,8 @@ export function validateProject(value) {
   assertSchemaVersion(value.schema_version);
   assertText(value.name, 'name', PROJECT_MEMORY_LIMITS.projectNameChars);
   assertText(value.normalized_name, 'normalized_name', PROJECT_MEMORY_LIMITS.projectNameChars);
-  assertText(value.description, 'description', PROJECT_MEMORY_LIMITS.descriptionChars, { nullable: true });
-  assertText(value.category, 'category', PROJECT_MEMORY_LIMITS.categoryChars, { nullable: true });
+  if ('description' in value) assertText(value.description, 'description', PROJECT_MEMORY_LIMITS.descriptionChars, { nullable: true });
+  if ('category' in value) assertText(value.category, 'category', PROJECT_MEMORY_LIMITS.categoryChars, { nullable: true });
   assertEnum(value.status, 'status', ['active', 'paused', 'completed', 'archived']);
   assertArray(value.aliases, 'aliases', PROJECT_MEMORY_LIMITS.aliasesPerProject);
   for (const [index, alias] of value.aliases.entries()) assertText(alias, `aliases[${index}]`, PROJECT_MEMORY_LIMITS.aliasChars);

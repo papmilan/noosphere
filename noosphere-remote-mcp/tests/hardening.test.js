@@ -5,6 +5,7 @@ import {
   CHECKPOINT_SCHEMA,
   InMemoryProjectMemoryRepository,
   MCP_TOOLS,
+  METADATA_SCHEMA,
   SESSION_SCHEMA,
   validateSaveCheckpointInput,
   validateSession,
@@ -40,6 +41,55 @@ function revisionTwo(overrides = {}) {
     ...overrides,
   });
 }
+
+function schemaAccepts(schema, value, root = schema) {
+  if (schema.$ref) return schemaAccepts(root.$defs[schema.$ref.slice('#/$defs/'.length)], value, root);
+  if (schema.allOf && !schema.allOf.every((part) => schemaAccepts(part, value, root))) return false;
+  if (schema.oneOf && schema.oneOf.filter((part) => schemaAccepts(part, value, root)).length !== 1) return false;
+  if (schema.const !== undefined && value !== schema.const) return false;
+  if (schema.enum && !schema.enum.includes(value)) return false;
+  if (schema.type) {
+    const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (!types.some((type) => (type === 'null' ? value === null : type === 'array' ? Array.isArray(value) : type === 'object' ? value && typeof value === 'object' && !Array.isArray(value) : typeof value === type))) return false;
+  }
+  if (schema.pattern && (typeof value !== 'string' || !new RegExp(schema.pattern).test(value))) return false;
+  if (schema.minLength !== undefined && typeof value === 'string' && value.length < schema.minLength) return false;
+  if (schema.maxLength !== undefined && typeof value === 'string' && value.length > schema.maxLength) return false;
+  if (schema.type === 'array' && schema.maxItems !== undefined && value.length > schema.maxItems) return false;
+  if (schema.type === 'array' && schema.items && !value.every((item) => schemaAccepts(schema.items, item, root))) return false;
+  if (schema.type === 'object') {
+    if (!schema.required.every((key) => key in value)) return false;
+    if (schema.additionalProperties === false && Object.keys(value).some((key) => !(key in schema.properties))) return false;
+    if (!Object.entries(schema.properties).every(([key, child]) => !(key in value) || schemaAccepts(child, value[key], root))) return false;
+  }
+  return true;
+}
+
+const nestedMetadata = {
+  entries: [{
+    key: 'context',
+    value: { kind: 'record', entries: [{
+      key: 'items',
+      value: { kind: 'list', items: [{
+        kind: 'record', entries: [{ key: 'value', value: { kind: 'string', value: 'present' } }],
+      }] },
+    }] },
+  }],
+};
+
+const tooDeepMetadata = {
+  entries: [{
+    key: 'context',
+    value: { kind: 'record', entries: [{
+      key: 'items',
+      value: { kind: 'list', items: [{
+        kind: 'record', entries: [{
+          key: 'too_deep', value: { kind: 'list', items: [{ kind: 'string', value: 'nope' }] },
+        }],
+      }] },
+    }] },
+  }],
+};
 
 describe('public MCP schema hardening', () => {
   it('embeds only closed, bounded object schemas in every public MCP input and output', () => {
@@ -86,7 +136,7 @@ describe('public MCP schema hardening', () => {
   });
 
   it('enforces the same lowercase snake_case metadata-key grammar in schema and validation', () => {
-    const schemaPattern = sessionSchema.$defs.entry.properties.key.allOf[0].pattern;
+    const schemaPattern = sessionSchema.$defs.key.allOf[0].pattern;
     for (const key of ['Authorization', 'access-token', 'USER ID', 'display-name']) {
       assert.equal(new RegExp(schemaPattern).test(key), false, key);
       assert.throws(
@@ -101,6 +151,20 @@ describe('public MCP schema hardening', () => {
         /forbidden-metadata-key/,
       );
     }
+  });
+
+  it('keeps exported, committed, and runtime metadata schemas aligned at the depth limit', () => {
+    const session = validSession({ metadata: nestedMetadata });
+    assert.equal(schemaAccepts(METADATA_SCHEMA, nestedMetadata), true);
+    assert.equal(schemaAccepts(SESSION_SCHEMA, session), true);
+    assert.equal(schemaAccepts(sessionSchema, session), true);
+    assert.deepEqual(validateSession(session), session);
+
+    const tooDeepSession = validSession({ metadata: tooDeepMetadata });
+    assert.equal(schemaAccepts(METADATA_SCHEMA, tooDeepMetadata), false);
+    assert.equal(schemaAccepts(SESSION_SCHEMA, tooDeepSession), false);
+    assert.equal(schemaAccepts(sessionSchema, tooDeepSession), false);
+    assert.throws(() => validateSession(tooDeepSession), /metadata-depth/);
   });
 
   it('uses status as the sole project lifecycle state', async () => {

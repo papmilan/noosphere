@@ -30,6 +30,24 @@ describe('Project Memory versioned schemas', () => {
     assert.deepEqual(validateCheckpoint(validCheckpoint()), validCheckpoint());
   });
 
+  it('treats description and category as optional nullable project fields', () => {
+    const omitted = validProject();
+    delete omitted.description;
+    delete omitted.category;
+    assert.deepEqual(validateProject(omitted), omitted);
+    assert.deepEqual(validateProject(validProject({ description: null, category: null })), validProject({ description: null, category: null }));
+    assert.deepEqual(validateProject(validProject({ description: 'Line one', category: 'project_work' })), validProject({ description: 'Line one', category: 'project_work' }));
+    assert.throws(() => validateProject(validProject({ description: 7 })), /invalid-string:description/);
+    assert.throws(() => validateProject(validProject({ category: 7 })), /invalid-string:category/);
+  });
+
+  it('accepts standard formatting whitespace but rejects other controls in text', () => {
+    assert.deepEqual(validateProject(validProject({ description: 'First line\nSecond line\tIndented\rCarriage return' })), validProject({ description: 'First line\nSecond line\tIndented\rCarriage return' }));
+    assert.deepEqual(validateCheckpoint(validCheckpoint({ goal: 'First line\nSecond line\tIndented\rCarriage return' })), validCheckpoint({ goal: 'First line\nSecond line\tIndented\rCarriage return' }));
+    assert.throws(() => validateProject(validProject({ description: 'NUL\u0000value' })), /control-character:description/);
+    assert.throws(() => validateCheckpoint(validCheckpoint({ goal: 'Vertical\u000Btab' })), /control-character:goal/);
+  });
+
   it('rejects hidden reasoning, transcripts, and arbitrary extension fields', () => {
     assert.throws(
       () => validateCheckpoint(validCheckpoint({ hidden_chain_of_thought: 'private' })),

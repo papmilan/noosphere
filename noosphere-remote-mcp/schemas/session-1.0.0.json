@@ -24,29 +24,70 @@
       "additionalProperties": false,
       "required": ["entries"],
       "properties": {
-        "entries": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/entry" } }
+        "entries": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/entry3" } }
       }
     },
-    "entry": {
+    "key": {
+      "allOf": [
+        { "type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[a-z][a-z0-9_]{0,79}$" },
+        { "not": { "enum": ["owner", "tenant", "user", "user_id", "subject", "token", "authorization", "api_key", "access_token", "refresh_token", "password", "chain_of_thought", "hidden_chain_of_thought", "reasoning", "internal_reasoning", "model_private_context", "transcript", "attachments", "url", "urls"] } }
+      ]
+    },
+    "entry0": {
       "type": "object",
       "additionalProperties": false,
       "required": ["key", "value"],
       "properties": {
-        "key": {
-          "allOf": [
-            { "type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[a-z][a-z0-9_]{0,79}$" },
-            { "not": { "enum": ["owner", "tenant", "user", "user_id", "subject", "token", "authorization", "api_key", "access_token", "refresh_token", "password", "chain_of_thought", "hidden_chain_of_thought", "reasoning", "internal_reasoning", "model_private_context", "transcript", "attachments", "url", "urls"] } }
-          ]
-        },
-        "value": { "$ref": "#/$defs/value" }
+        "key": { "$ref": "#/$defs/key" },
+        "value": { "$ref": "#/$defs/value0" }
       }
     },
-    "value": {
+    "entry1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value"],
+      "properties": { "key": { "$ref": "#/$defs/key" }, "value": { "$ref": "#/$defs/value1" } }
+    },
+    "entry2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value"],
+      "properties": { "key": { "$ref": "#/$defs/key" }, "value": { "$ref": "#/$defs/value2" } }
+    },
+    "entry3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value"],
+      "properties": { "key": { "$ref": "#/$defs/key" }, "value": { "$ref": "#/$defs/value3" } }
+    },
+    "scalar": {
       "oneOf": [
         { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "string" }, "value": { "type": "string", "minLength": 1, "maxLength": 4000 } } },
         { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "number" }, "value": { "type": "number" } } },
         { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "boolean" }, "value": { "type": "boolean" } } },
         { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "null" }, "value": { "type": "null" } } }
+      ]
+    },
+    "value0": { "$ref": "#/$defs/scalar" },
+    "value1": {
+      "oneOf": [
+        { "$ref": "#/$defs/scalar" },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "items"], "properties": { "kind": { "const": "list" }, "items": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/value0" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "entries"], "properties": { "kind": { "const": "record" }, "entries": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/entry0" } } } }
+      ]
+    },
+    "value2": {
+      "oneOf": [
+        { "$ref": "#/$defs/scalar" },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "items"], "properties": { "kind": { "const": "list" }, "items": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/value1" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "entries"], "properties": { "kind": { "const": "record" }, "entries": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/entry1" } } } }
+      ]
+    },
+    "value3": {
+      "oneOf": [
+        { "$ref": "#/$defs/scalar" },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "items"], "properties": { "kind": { "const": "list" }, "items": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/value2" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "entries"], "properties": { "kind": { "const": "record" }, "entries": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/entry2" } } } }
       ]
     }
   }
