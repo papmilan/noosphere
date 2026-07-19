@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noosphere.dev/schemas/project-memory/checkpoint-1.0.0.json",
+  "title": "Noosphere Project Memory Checkpoint",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "schema_version", "project_id", "session_id", "revision", "previous_checkpoint_id", "goal", "current_status", "established_facts", "decisions", "rejected_options", "assumptions", "constraints", "completed_work", "unresolved_questions", "blockers", "next_actions", "verification_or_evidence", "source_summary", "source", "created_at"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,127}$" },
+    "schema_version": { "const": "noosphere.project-memory/1.0.0" },
+    "project_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,127}$" },
+    "session_id": { "type": ["string", "null"] },
+    "revision": { "type": "integer", "minimum": 1 },
+    "previous_checkpoint_id": { "type": ["string", "null"] },
+    "goal": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "current_status": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "established_facts": { "$ref": "#/$defs/items" },
+    "decisions": { "$ref": "#/$defs/items" },
+    "rejected_options": { "$ref": "#/$defs/items" },
+    "assumptions": { "$ref": "#/$defs/items" },
+    "constraints": { "$ref": "#/$defs/items" },
+    "completed_work": { "$ref": "#/$defs/items" },
+    "unresolved_questions": { "$ref": "#/$defs/items" },
+    "blockers": { "$ref": "#/$defs/items" },
+    "next_actions": { "$ref": "#/$defs/items" },
+    "verification_or_evidence": { "$ref": "#/$defs/items" },
+    "source_summary": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "source": { "type": "object", "additionalProperties": false, "required": ["client", "model"], "properties": { "client": { "type": "string", "minLength": 1, "maxLength": 80 }, "model": { "type": ["string", "null"], "maxLength": 160 } } },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "items": { "type": "array", "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 4000 } }
+  }
+}

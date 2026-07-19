@@ -1,0 +1,12 @@
+{
+  "name": "@noosphere/remote-mcp-contracts",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Versioned Project Memory contracts; no remote service runtime in PR 1",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "check": "node --check index.js && node --check contracts/constants.js && node --check contracts/schemas.js && node --check contracts/validation.js && node --check contracts/errors.js && node --check contracts/freshness.js && node --check contracts/mcp-tools.js && node --check contracts/repository.js",
+    "test": "npm run check && node --test tests/*.test.js"
+  }
+}

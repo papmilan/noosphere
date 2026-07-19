@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noosphere.dev/schemas/project-memory/session-1.0.0.json",
+  "title": "Noosphere Project Memory Session",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "schema_version", "project_id", "source_client", "source_model", "status", "source_conversation_reference", "metadata", "created_at", "updated_at", "latest_checkpoint_id"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,127}$" },
+    "schema_version": { "const": "noosphere.project-memory/1.0.0" },
+    "project_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,127}$" },
+    "source_client": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "source_model": { "type": ["string", "null"], "maxLength": 160 },
+    "status": { "enum": ["active", "paused", "interrupted", "completed", "archived"] },
+    "source_conversation_reference": { "type": ["string", "null"], "maxLength": 160 },
+    "metadata": { "$ref": "#/$defs/metadata" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "latest_checkpoint_id": { "type": ["string", "null"] }
+  },
+  "$defs": {
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entries"],
+      "properties": {
+        "entries": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/entry3" } }
+      }
+    },
+    "key": {
+      "allOf": [
+        { "type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[a-z][a-z0-9_]{0,79}$" },
+        { "not": { "enum": ["owner", "tenant", "user", "user_id", "subject", "token", "authorization", "api_key", "access_token", "refresh_token", "password", "chain_of_thought", "hidden_chain_of_thought", "reasoning", "internal_reasoning", "model_private_context", "transcript", "attachments", "url", "urls"] } }
+      ]
+    },
+    "entry0": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value"],
+      "properties": {
+        "key": { "$ref": "#/$defs/key" },
+        "value": { "$ref": "#/$defs/value0" }
+      }
+    },
+    "entry1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value"],
+      "properties": { "key": { "$ref": "#/$defs/key" }, "value": { "$ref": "#/$defs/value1" } }
+    },
+    "entry2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value"],
+      "properties": { "key": { "$ref": "#/$defs/key" }, "value": { "$ref": "#/$defs/value2" } }
+    },
+    "entry3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value"],
+      "properties": { "key": { "$ref": "#/$defs/key" }, "value": { "$ref": "#/$defs/value3" } }
+    },
+    "scalar": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "string" }, "value": { "type": "string", "minLength": 1, "maxLength": 4000 } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "number" }, "value": { "type": "number" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "boolean" }, "value": { "type": "boolean" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "null" }, "value": { "type": "null" } } }
+      ]
+    },
+    "value0": { "$ref": "#/$defs/scalar" },
+    "value1": {
+      "oneOf": [
+        { "$ref": "#/$defs/scalar" },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "items"], "properties": { "kind": { "const": "list" }, "items": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/value0" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "entries"], "properties": { "kind": { "const": "record" }, "entries": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/entry0" } } } }
+      ]
+    },
+    "value2": {
+      "oneOf": [
+        { "$ref": "#/$defs/scalar" },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "items"], "properties": { "kind": { "const": "list" }, "items": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/value1" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "entries"], "properties": { "kind": { "const": "record" }, "entries": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/entry1" } } } }
+      ]
+    },
+    "value3": {
+      "oneOf": [
+        { "$ref": "#/$defs/scalar" },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "items"], "properties": { "kind": { "const": "list" }, "items": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/value2" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "entries"], "properties": { "kind": { "const": "record" }, "entries": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/entry2" } } } }
+      ]
+    }
+  }
+}

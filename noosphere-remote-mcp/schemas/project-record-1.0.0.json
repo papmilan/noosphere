@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noosphere.dev/schemas/project-memory/project-record-1.0.0.json",
+  "title": "Noosphere Project Memory Project Record (storage only)",
+  "description": "Never expose owner_scope through MCP tools or project results.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["owner_scope", "project"],
+  "properties": {
+    "owner_scope": { "type": "string", "minLength": 3, "maxLength": 512 },
+    "project": { "$ref": "./project-1.0.0.json" }
+  }
+}
