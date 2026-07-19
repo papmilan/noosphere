@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noosphere.dev/schemas/project-memory/project-1.0.0.json",
+  "title": "Noosphere Project Memory Project",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "schema_version", "name", "normalized_name", "status", "aliases", "archived", "created_at", "updated_at", "last_activity_at", "latest_checkpoint_id"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,127}$" },
+    "schema_version": { "const": "noosphere.project-memory/1.0.0" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "normalized_name": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "description": { "type": ["string", "null"], "maxLength": 2000 },
+    "category": { "type": ["string", "null"], "maxLength": 80 },
+    "status": { "enum": ["active", "paused", "completed", "archived"] },
+    "aliases": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
+    "archived": { "type": "boolean" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "last_activity_at": { "type": "string", "format": "date-time" },
+    "latest_checkpoint_id": { "type": ["string", "null"] }
+  }
+}
+

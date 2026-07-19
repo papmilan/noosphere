@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noosphere.dev/schemas/project-memory/session-1.0.0.json",
+  "title": "Noosphere Project Memory Session",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "schema_version", "project_id", "source_client", "source_model", "status", "source_conversation_reference", "metadata", "created_at", "updated_at", "latest_checkpoint_id"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,127}$" },
+    "schema_version": { "const": "noosphere.project-memory/1.0.0" },
+    "project_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,127}$" },
+    "source_client": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "source_model": { "type": ["string", "null"], "maxLength": 160 },
+    "status": { "enum": ["active", "paused", "interrupted", "completed", "archived"] },
+    "source_conversation_reference": { "type": ["string", "null"], "maxLength": 160 },
+    "metadata": { "type": "object", "maxProperties": 20 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "latest_checkpoint_id": { "type": ["string", "null"] }
+  }
+}
+
