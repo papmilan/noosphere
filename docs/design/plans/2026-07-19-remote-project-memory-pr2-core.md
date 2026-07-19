@@ -18,6 +18,8 @@
 - Cursors are opaque and bound to owner, operation, normalized query, and filters. An unchanged dataset has deterministic duplicate-free pagination; snapshot isolation is not required.
 - Project and Session status are the only lifecycle fields. Same-state Session transitions are no-op replays with no timestamp changes.
 - Checkpoint IDs are immutable and history is strictly linear. An atomic successful checkpoint write advances the Project head and linked Session head; a replay changes no timestamps.
+- Every freshness/resume warning is emitted directly as a complete public object with the existing Project Memory `schema_version`; no adapter may add that field later.
+- Project-scoped idempotency receipts retain an internal `projectId` association for cascade deletion only. Lookup and conflict scope remain exactly `(ownerScope, operation, idempotencyKey)`.
 - Any inconsistent committed head returns `incomplete`, null checkpoint, and only the generic `repository-state-inconsistent` warning.
 - Any result carrying persisted checkpoint-derived content sets `content_trust: "untrusted-persisted-data"`.
 - Every behavior starts with a focused failing test, then the smallest implementation, then a focused green run.
@@ -33,17 +35,21 @@
 
 **Interfaces:**
 - Produces: `assessResumeFreshness({ latestSessionActivityAt, latestCheckpointAt, sessionStatus })` with `fresh | stale | incomplete`.
-- Produces: closed warning code enum `interrupted-session | checkpoint-predates-session | no-durable-checkpoint | repository-state-inconsistent`.
+- Produces: complete, closed public warnings with `schema_version: PROJECT_MEMORY_SCHEMA_VERSION` and code `interrupted-session | checkpoint-predates-session | no-durable-checkpoint | repository-state-inconsistent`.
 
 - [ ] **Step 1: Write the failing contract test**
 
 ```js
 it('represents all approved freshness outcomes', () => {
-  assert.equal(assessResumeFreshness({ latestCheckpointAt: timestamp }).freshness, 'fresh');
-  assert.equal(assessResumeFreshness({ latestCheckpointAt: timestamp, latestSessionActivityAt: later }).freshness, 'stale');
-  assert.equal(assessResumeFreshness({ sessionStatus: 'interrupted' }).freshness, 'incomplete');
+  const cases = [
+    assessResumeFreshness({}),
+    assessResumeFreshness({ latestCheckpointAt: timestamp, latestSessionActivityAt: later }),
+    assessResumeFreshness({ sessionStatus: 'interrupted' }),
+    { freshness: 'incomplete', warnings: [{ schema_version: PROJECT_MEMORY_SCHEMA_VERSION, code: 'repository-state-inconsistent', message: 'The durable project state is incomplete and cannot be safely resumed.' }] },
+  ];
   const codes = MCP_TOOLS.resume_project.output.properties.warnings.items.properties.code.enum;
   assert.deepEqual(codes, ['interrupted-session', 'checkpoint-predates-session', 'no-durable-checkpoint', 'repository-state-inconsistent']);
+  for (const { warnings } of cases) for (const warning of warnings) assert.equal(matchesSchema(MCP_TOOLS.resume_project.output.properties.warnings.items, warning), true);
 });
 ```
 
@@ -51,21 +57,22 @@ it('represents all approved freshness outcomes', () => {
 
 Run: `node --test noosphere-remote-mcp/tests/contracts.test.js --test-name-pattern "represents all approved freshness"`
 
-Expected: FAIL because the current helper emits `current` and the static schema lacks required warnings.
+Expected: FAIL because the current helper emits partial warnings, returns `current`, and the static schema lacks required warnings.
 
 - [ ] **Step 3: Implement the minimum parity change**
 
 ```js
 export function assessResumeFreshness({ latestSessionActivityAt = null, latestCheckpointAt = null, sessionStatus = null } = {}) {
   const warnings = [];
-  if (!latestCheckpointAt) warnings.push({ code: 'no-durable-checkpoint', message: 'No durable checkpoint exists for this project.' });
-  if (sessionStatus === 'interrupted') warnings.push({ code: 'interrupted-session', message: 'The latest session was interrupted; no final handoff is implied.' });
-  if (latestCheckpointAt && latestSessionActivityAt > latestCheckpointAt) warnings.push({ code: 'checkpoint-predates-session', message: 'Session activity is newer than the latest durable checkpoint.' });
+  const warning = (code, message) => ({ schema_version: PROJECT_MEMORY_SCHEMA_VERSION, code, message });
+  if (!latestCheckpointAt) warnings.push(warning('no-durable-checkpoint', 'No durable checkpoint exists for this project.'));
+  if (sessionStatus === 'interrupted') warnings.push(warning('interrupted-session', 'The latest session was interrupted; no final handoff is implied.'));
+  if (latestCheckpointAt && latestSessionActivityAt > latestCheckpointAt) warnings.push(warning('checkpoint-predates-session', 'Session activity is newer than the latest durable checkpoint.'));
   return { freshness: warnings.some(({ code }) => code === 'no-durable-checkpoint' || code === 'interrupted-session') ? 'incomplete' : warnings.length ? 'stale' : 'fresh', warnings };
 }
 ```
 
-Add the four-code warning enum and change summary `current_status` to nullable text so a project without a checkpoint has a valid summary.
+Add the four-code warning enum and change summary `current_status` to nullable text so a project without a checkpoint has a valid summary. Copy the existing closed-schema test matcher from `tests/hardening.test.js` into `tests/contracts.test.js` and use it against `MCP_TOOLS.resume_project.output.properties.warnings.items`. Reuse the same complete warning constructor for `repository-state-inconsistent` in the service and prove all four warning paths validate against the published nested warning schema.
 
 - [ ] **Step 4: Run focused tests and confirm GREEN**
 
@@ -89,7 +96,7 @@ git commit -m "fix: align project-memory freshness contracts"
 
 **Interfaces:**
 - Produces: `listProjects`, `replaceProject`, `deleteProject`, `createSession`, `getSession`, `listSessions`, `replaceSession`, `getCheckpoint`, `listCheckpoints`, and `inspectProjectState`, all receiving `ownerScope`.
-- Produces: `saveCheckpoint({ ownerScope, checkpoint, idempotency, project, session })`, which atomically writes only pre-projected values.
+- Produces: `saveCheckpoint({ ownerScope, checkpoint, idempotency, project, session })`, which atomically writes only pre-projected values and a receipt internally associated with `checkpoint.project_id`.
 
 - [ ] **Step 1: Write failing repository tests**
 
@@ -107,6 +114,16 @@ it('commits checkpoint, Project head, Session head, and receipt together', async
   await repository.saveCheckpoint({ ownerScope: ownerA, checkpoint, project: nextProject, session: nextSession, idempotency });
   assert.equal((await repository.getProject({ ownerScope: ownerA, projectId })).latest_checkpoint_id, checkpoint.id);
   assert.equal((await repository.getSession({ ownerScope: ownerA, projectId, sessionId })).latest_checkpoint_id, checkpoint.id);
+});
+
+it('removes only idempotency receipts associated with the deleted owner project', async () => {
+  await repository.recordIdempotency({ ownerScope: ownerA, operation: 'save_checkpoint', key: 'same', requestHash: 'a', result: { checkpoint: checkpointA }, projectId: projectA.id });
+  await repository.recordIdempotency({ ownerScope: ownerA, operation: 'save_checkpoint', key: 'other', requestHash: 'b', result: { checkpoint: checkpointB }, projectId: projectB.id });
+  await repository.recordIdempotency({ ownerScope: ownerB, operation: 'save_checkpoint', key: 'same', requestHash: 'c', result: { checkpoint: checkpointA }, projectId: projectA.id });
+  await repository.deleteProject({ ownerScope: ownerA, projectId: projectA.id });
+  assert.equal((await repository.recordIdempotency({ ownerScope: ownerA, operation: 'save_checkpoint', key: 'same', requestHash: 'replacement', result: {}, projectId: projectA.id })).deduplicated, false);
+  assert.equal((await repository.recordIdempotency({ ownerScope: ownerA, operation: 'save_checkpoint', key: 'other', requestHash: 'b', result: {} })).deduplicated, true);
+  assert.equal((await repository.recordIdempotency({ ownerScope: ownerB, operation: 'save_checkpoint', key: 'same', requestHash: 'c', result: {} })).deduplicated, true);
 });
 ```
 
@@ -134,7 +151,7 @@ async deleteProject({ ownerScope, projectId } = {}) {
 }
 ```
 
-Use nested owner/project/session maps and retain existing collision-safe tuple maps. Validate current heads and every supplied projected record before changing any map. Do not add normalization, matching, clock, or public error logic here.
+Store an optional internal `projectId` with each receipt. `recordIdempotency` keeps the exact existing tuple lookup and conflict behavior; `projectId` is not part of its key and is never returned publicly. `deleteOwnerProjectReceipts` deletes only matching owner/project associations. A failed mutation creates no receipt; matching committed retries replay without timestamp movement. Use nested owner/project/session maps and retain existing collision-safe tuple maps. Validate current heads and every supplied projected record before changing any map. Do not add normalization, matching, clock, or public error logic here.
 
 - [ ] **Step 4: Run repository and hardening tests and confirm GREEN**
 

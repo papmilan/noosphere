@@ -134,8 +134,12 @@ Idempotency stays scoped to `(ownerScope, operation, idempotency key)`. The
 service hashes a canonical representation of the public command input. A retry
 with the same hash replays the committed success without timestamp changes; a
 different hash produces `idempotency-conflict`; no receipt is committed for a
-failed mutation. Retention/TTL stays explicitly deferred to the PostgreSQL
-deployment configuration in PR 3.
+failed mutation. Receipts for a project-scoped operation additionally store the
+owning `projectId` as an internal lifecycle/indexing field. It does not alter
+the lookup or conflict tuple. Deletion removes only receipts with the same owner
+and associated project; receipts for another project, another owner, or an
+operation with no project association remain intact. Retention/TTL stays
+explicitly deferred to the PostgreSQL deployment configuration in PR 3.
 
 `resumeProject` derives freshness from committed repository state, not timestamps
 alone. Before projecting a result, it verifies that the Project head references
@@ -148,17 +152,20 @@ cover all later relevant session activity.
 
 If any repository-head invariant is inconsistent, `resumeProject` returns an
 `incomplete` result with `latest_checkpoint: null` and exactly one stable public
-warning: `{ code: "repository-state-inconsistent", message: "The durable project
-state is incomplete and cannot be safely resumed." }`. It must not disclose
-identifiers, whether a row is missing, or other persistence details, and it must
-never return `fresh`. A valid project with no checkpoint is also `incomplete`,
-but uses the distinct `no-durable-checkpoint` warning. For consistent state,
-`fresh` requires a durable checkpoint covering all relevant session activity;
-`stale` means later non-interrupted session activity exists; and `incomplete`
-means the latest relevant session is interrupted. Warnings are bounded, stable
-public objects. This implementation corrects the existing contract parity gap
-so freshness values and warning codes emitted by the core are accepted by the
-published MCP output schema.
+warning with the existing Project Memory `schema_version`: `{ schema_version:
+"noosphere.project-memory/1.0.0", code: "repository-state-inconsistent",
+message: "The durable project state is incomplete and cannot be safely resumed."
+}`. The freshness and resume helpers emit these complete public warning objects
+directly; no later transport adapter fills in fields. They must not disclose
+identifiers, whether a row is missing, or other persistence details, and they
+must never return `fresh`. A valid project with no checkpoint is also
+`incomplete`, but uses the complete `no-durable-checkpoint` warning. For
+consistent state, `fresh` requires a durable checkpoint covering all relevant
+session activity; `stale` means later non-interrupted session activity exists;
+and `incomplete` means the latest relevant session is interrupted. Warnings are
+bounded, schema-valid public objects. This implementation corrects the existing
+contract parity gap so freshness values and warning codes emitted by the core
+are accepted by the published MCP output schema.
 
 `getProjectSummary` is a bounded projection: project identity and lifecycle,
 the latest checkpoint's current status when present, counts, and head ID. Every
@@ -183,8 +190,8 @@ owner-scope isolation; no-local-environment operation; deterministic name/alias
 matching and ambiguity; archive/delete filtering and cascades; session/project
 timestamp and checkpoint-head updates; session/project consistency; checkpoint
 revision, session, and idempotency behavior; stable pagination; fresh/stale/
-incomplete resume outcomes; untrusted result marking; and Bicycle Repair plus
-separate ESS Design continuity scenarios.
+incomplete resume outcomes; schema validation of every warning path; untrusted
+result marking; and Bicycle Repair plus separate ESS Design continuity scenarios.
 
 The PR retains the full PR 1 contract suite and runs ACP, relayer, package
 dry-run, and diff checks before review. No compatibility claim for ChatGPT or
