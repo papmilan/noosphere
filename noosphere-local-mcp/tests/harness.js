@@ -18,6 +18,9 @@ import { createMcpServer } from '../../noosphere-remote-mcp-server/src/server.js
 const ISS = 'https://issuer.example/';
 const AUD = 'https://noosphere.example/project-memory';
 const BIN = path.resolve(fileURLToPath(new URL('../bin/noosphere-local-mcp.js', import.meta.url)));
+// Test-only launcher: the production CLI, but with a fixed clock injected via the
+// existing `now` seam. Used for deterministic parity; never shipped.
+const FIXED_CLOCK_LAUNCHER = path.resolve(fileURLToPath(new URL('./fixtures/stdio-fixed-clock.js', import.meta.url)));
 
 export const structured = (result) => result.structuredContent;
 
@@ -61,9 +64,10 @@ export async function startHttpClient({ now } = {}) {
 // MCP host launches it) and connects an SDK client over stdio. Nothing is stubbed
 // — this exercises the published CLI entry point.
 export async function startStdioClient({ nowIso } = {}) {
-  const env = { ...process.env };
-  if (nowIso) env.NOOSPHERE_LOCAL_MCP_CLOCK = nowIso;
-  const transport = new StdioClientTransport({ command: process.execPath, args: [BIN], env });
+  // A fixed instant → the test-only fixed-clock launcher (deterministic parity);
+  // otherwise the real production CLI, exercised as an MCP host would.
+  const args = nowIso ? [FIXED_CLOCK_LAUNCHER, nowIso] : [BIN];
+  const transport = new StdioClientTransport({ command: process.execPath, args });
   const client = new Client({ name: 'stdio-client', version: '0.0.0' }, { capabilities: {} });
   await client.connect(transport);
   return {

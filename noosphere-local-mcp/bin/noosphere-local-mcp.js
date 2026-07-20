@@ -30,11 +30,10 @@ process.on('SIGINT', () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
 
 const { createLocalStdioServer } = await import('../src/stdio-server.js');
-// Determinism hook: NOOSPHERE_LOCAL_MCP_CLOCK pins the server clock to a fixed
-// ISO instant (used by the transport-parity suite so freshness/warnings are
-// reproducible). Unset in normal use → real wall-clock time.
-const fixedNow = process.env.NOOSPHERE_LOCAL_MCP_CLOCK;
-server = createLocalStdioServer(fixedNow ? { now: () => fixedNow } : {});
+// Always the real system clock. There is no environment or CLI override — a
+// fixed clock is supplied only via the injected `now` seam of
+// createLocalStdioServer, used by the test-only fixture launcher.
+server = createLocalStdioServer();
 server.start().catch((error) => {
   process.stderr.write(`noosphere-local-mcp failed to start: ${error && error.message ? error.message : error}\n`);
   process.exit(1);

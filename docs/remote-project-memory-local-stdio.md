@@ -54,17 +54,17 @@ a verified OIDC identity for every request and never accepts a `local:` scope.
 
 ## Configuration
 
-The executable takes no required arguments and reads no config file.
+The executable takes no required arguments, reads no config file, and has no
+environment or CLI override of any kind. It always uses the real system clock.
 
 ```
 noosphere-local-mcp
 ```
 
-Optional environment variable:
-
-- `NOOSPHERE_LOCAL_MCP_CLOCK` — pin the server clock to a fixed ISO-8601 instant
-  (e.g. `2026-07-20T10:00:00.000Z`). Used by the transport-parity test suite for
-  deterministic freshness/warnings. Unset in normal use → real wall-clock time.
+The server factory (`createLocalStdioServer`) accepts an injected `now` for
+determinism, but that seam is used **only** by a test-only fixture launcher
+(`tests/fixtures/stdio-fixed-clock.js`); it is never part of the published
+package or the production CLI.
 
 ### Example MCP host configuration
 
