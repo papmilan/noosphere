@@ -73,12 +73,12 @@ The suite must demonstrate, through assertions, that the remote service:
 
 ## 5. Decision forks — need approval before implementation
 
-| # | Fork | Recommended | Rationale |
-|---|------|-------------|-----------|
-| F1 | **Harness location** | New `noosphere-remote-mcp-acceptance` package (dev-only deps on server + core; OIDC verifier via the PR3 sibling like PR4's harness) | Cross-package E2E; a dedicated package keeps a clean boundary and its own CI job, consistent with one-package-per-PR. Alternative: `noosphere-remote-mcp-server/tests/acceptance` (no 4th package, but mixes unit and acceptance scope). |
-| F2 | **Client driver** | Official MCP SDK `Client` over Streamable HTTP as the protocol stand-in; real ChatGPT/Claude validated by documented manual matrix | CI cannot drive real client apps; the SDK client is the faithful protocol proxy. |
-| F3 | **Repository backend** | In-memory for CI determinism (matches PR4 F4); optional Postgres-backed acceptance variant deferred behind the PR3 service | Continuity semantics are storage-agnostic; the PG path is already proven in PR3. |
-| F4 | **Supported-client matrix** | Ship a `docs/` matrix enumerating exactly the ChatGPT/Claude configs claimed, with an explicit "no universal support" statement | Directly discharges the plan's honesty constraint. |
+| # | Fork | Decision | Rationale |
+|---|------|----------|-----------|
+| F1 | **Harness location** | **APPROVED:** new `noosphere-remote-mcp-acceptance` package (dev-only deps; core by specifier, server + PR3 OIDC verifier via sibling source like PR4's harness) | Cross-package E2E; a dedicated package keeps a clean boundary and its own CI job, consistent with one-package-per-PR. |
+| F2 | **Client driver** | **APPROVED:** official MCP SDK `Client` over Streamable HTTP as the protocol stand-in; real ChatGPT/Claude validated by documented manual matrix | CI cannot drive real client apps; the SDK client is the faithful protocol proxy. |
+| F3 | **Repository backend** | **APPROVED:** in-memory only for CI determinism (matches PR4 F4); a Postgres-backed acceptance variant stays a deferred follow-up | Continuity semantics are storage-agnostic; the PG path is already proven in PR3. |
+| F4 | **Supported-client matrix** | **APPROVED:** ship a `docs/` matrix enumerating exactly the ChatGPT/Claude configs claimed, with an explicit "no universal support" statement | Directly discharges the plan's honesty constraint. |
 
 ## 6. Proposed slice plan (TDD, one reviewable slice per commit)
 
