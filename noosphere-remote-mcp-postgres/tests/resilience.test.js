@@ -41,6 +41,83 @@ describe('concurrency', () => {
   });
 });
 
+describe('concurrent idempotent saveCheckpoint (separate connections)', () => {
+  it('replays identical simultaneous retries: one success, one dedup, one checkpoint, one receipt', async () => {
+    const repo = new PostgresProjectMemoryRepository({ pool: harness.pool });
+    // Repeat to expose interleaving flakiness.
+    for (let i = 0; i < 25; i += 1) {
+      const project = validProject({ id: `prj_${i}`, normalized_name: `p${i}` });
+      const session = validSession({ id: `ses_${i}`, project_id: `prj_${i}` });
+      const checkpoint = validCheckpoint({ id: `chk_${i}`, project_id: `prj_${i}`, session_id: `ses_${i}` });
+      await repo.createProject({ ownerScope: ownerA, project });
+      await repo.createSession({ ownerScope: ownerA, session });
+      const input = { ownerScope: ownerA, checkpoint, project: proj(project, checkpoint), session: sess(session, checkpoint), idempotency: { key: `k_${i}`, requestHash: `h_${i}` } };
+
+      const results = await Promise.allSettled([repo.saveCheckpoint({ ...input }), repo.saveCheckpoint({ ...input })]);
+      assert.equal(results.filter((r) => r.status === 'rejected').length, 0, `no conflict on identical retry (iter ${i})`);
+      const dedup = results.map((r) => r.value.deduplicated).sort();
+      assert.deepEqual(dedup, [false, true], `exactly one success + one replay (iter ${i})`);
+
+      assert.equal((await repo.listCheckpoints({ ownerScope: ownerA, projectId: project.id })).length, 1, 'one checkpoint');
+      const receipts = await harness.pool.query("select count(*)::int n from idempotency_receipts where owner_scope = $1 and operation = 'save_checkpoint' and idempotency_key = $2", [ownerA, `k_${i}`]);
+      assert.equal(receipts.rows[0].n, 1, 'one receipt');
+      const revs = await harness.pool.query('select count(*)::int n from checkpoints where owner_scope = $1 and project_id = $2 and revision = 1', [ownerA, project.id]);
+      assert.equal(revs.rows[0].n, 1, 'no duplicate revision');
+    }
+  });
+
+  it('returns idempotency-conflict for concurrent same-key different-payload retries', async () => {
+    const repo = new PostgresProjectMemoryRepository({ pool: harness.pool });
+    for (let i = 0; i < 15; i += 1) {
+      const project = validProject({ id: `prj_${i}`, normalized_name: `p${i}` });
+      await repo.createProject({ ownerScope: ownerA, project });
+      const a = validCheckpoint({ id: `chk_a_${i}`, project_id: `prj_${i}`, session_id: null });
+      const b = validCheckpoint({ id: `chk_b_${i}`, project_id: `prj_${i}`, session_id: null });
+      const mk = (c, hash) => ({ ownerScope: ownerA, checkpoint: c, project: { ...project, updated_at: later, last_activity_at: later, latest_checkpoint_id: c.id }, session: undefined, idempotency: { key: `k_${i}`, requestHash: hash } });
+      const results = await Promise.allSettled([repo.saveCheckpoint(mk(a, 'ha')), repo.saveCheckpoint(mk(b, 'hb'))]);
+      const ok = results.filter((r) => r.status === 'fulfilled');
+      const rejected = results.filter((r) => r.status === 'rejected');
+      assert.equal(ok.length, 1, `one commits (iter ${i})`);
+      assert.equal(rejected.length, 1, `one rejected (iter ${i})`);
+      // The loser is a conflict (idempotency-conflict when it lost the receipt race,
+      // or a checkpoint conflict when it lost the head race) — never a silent success.
+      assert.ok(['idempotency-conflict', 'checkpoint-conflict', 'checkpoint-predecessor-conflict'].includes(rejected[0].reason.code), `conflict code, got ${rejected[0].reason.code}`);
+      assert.equal((await repo.listCheckpoints({ ownerScope: ownerA, projectId: project.id })).length, 1);
+    }
+  });
+});
+
+describe('project delete racing child inserts leaves no orphan', () => {
+  it('createSession vs deleteProject: child is either cascaded or fails cleanly', async () => {
+    const repo = new PostgresProjectMemoryRepository({ pool: harness.pool });
+    for (let i = 0; i < 25; i += 1) {
+      const project = validProject({ id: `prj_${i}`, normalized_name: `p${i}` });
+      const session = validSession({ id: `ses_${i}`, project_id: `prj_${i}` });
+      await repo.createProject({ ownerScope: ownerA, project });
+      const ops = i % 2 === 0
+        ? [repo.deleteProject({ ownerScope: ownerA, projectId: project.id }), repo.createSession({ ownerScope: ownerA, session })]
+        : [repo.createSession({ ownerScope: ownerA, session }), repo.deleteProject({ ownerScope: ownerA, projectId: project.id })];
+      await Promise.allSettled(ops);
+      const orphans = await harness.pool.query('select count(*)::int n from sessions where owner_scope = $1 and project_id = $2 and not exists (select 1 from projects p where p.owner_scope = sessions.owner_scope and p.id = sessions.project_id)', [ownerA, project.id]);
+      assert.equal(orphans.rows[0].n, 0, `no orphan session (iter ${i})`);
+    }
+  });
+
+  it('setRetentionMarker vs deleteProject: marker is either cascaded or fails cleanly', async () => {
+    const repo = new PostgresProjectMemoryRepository({ pool: harness.pool });
+    for (let i = 0; i < 25; i += 1) {
+      const project = validProject({ id: `prj_${i}`, normalized_name: `p${i}` });
+      await repo.createProject({ ownerScope: ownerA, project });
+      const ops = i % 2 === 0
+        ? [repo.deleteProject({ ownerScope: ownerA, projectId: project.id }), repo.setRetentionMarker({ ownerScope: ownerA, projectId: project.id, retainUntil: '2999-01-01T00:00:00.000Z' })]
+        : [repo.setRetentionMarker({ ownerScope: ownerA, projectId: project.id, retainUntil: '2999-01-01T00:00:00.000Z' }), repo.deleteProject({ ownerScope: ownerA, projectId: project.id })];
+      await Promise.allSettled(ops);
+      const orphans = await harness.pool.query('select count(*)::int n from retention_markers where owner_scope = $1 and project_id = $2 and not exists (select 1 from projects p where p.owner_scope = retention_markers.owner_scope and p.id = retention_markers.project_id)', [ownerA, project.id]);
+      assert.equal(orphans.rows[0].n, 0, `no orphan marker (iter ${i})`);
+    }
+  });
+});
+
 describe('storage unavailable', () => {
   it('rejects when the database is unreachable', async () => {
     const deadPool = new pg.Pool({ connectionString: 'postgres://noosphere:noosphere@127.0.0.1:1/none', connectionTimeoutMillis: 500 });

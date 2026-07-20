@@ -118,16 +118,20 @@ export class PostgresProjectMemoryRepository extends ProjectMemoryRepository {
     assertOwnerScope(ownerScope);
     const value = validateSession(session);
     if (value.latest_checkpoint_id !== null) throw new Error('session-checkpoint-head-mismatch');
-    const project = await this.getProject({ ownerScope, projectId: value.project_id });
-    if (!project) throw new RepositoryNotFoundError('project-not-found');
-    validateProject(project);
-    try {
-      await this.#pool.query('insert into sessions (owner_scope, document) values ($1, $2)', [ownerScope, value]);
-    } catch (error) {
-      if (error.code === '23505') throw new RepositoryConflictError('session-conflict');
-      throw error;
-    }
-    return value;
+    // Lock the project row so a concurrent deleteProject cannot commit between
+    // the existence check and the insert and leave an orphan session.
+    return withTransaction(this.#pool, async (client) => {
+      const project = await selectOne(client, 'select document from projects where owner_scope = $1 and id = $2 for update', [ownerScope, value.project_id]);
+      if (!project) throw new RepositoryNotFoundError('project-not-found');
+      validateProject(project.document);
+      try {
+        await client.query('insert into sessions (owner_scope, document) values ($1, $2)', [ownerScope, value]);
+      } catch (error) {
+        if (error.code === '23505') throw new RepositoryConflictError('session-conflict');
+        throw error;
+      }
+      return value;
+    });
   }
 
   async getSession({ ownerScope, projectId, sessionId } = {}) {
@@ -209,15 +213,20 @@ export class PostgresProjectMemoryRepository extends ProjectMemoryRepository {
     const value = validateCheckpoint(checkpoint);
     assertIdempotency(idempotency ?? {});
     return withTransaction(this.#pool, async (client) => {
+      // Serialize concurrent checkpoint writers on the project head row BEFORE
+      // evaluating the idempotency receipt. This guarantees that a concurrent
+      // identical retry blocks here, then reads the winner's committed receipt
+      // and replays it (deduplicated) rather than racing past a not-yet-visible
+      // receipt and later failing with a spurious checkpoint-conflict.
+      const currentProject = await selectOne(client, 'select document from projects where owner_scope = $1 and id = $2 for update', [ownerScope, value.project_id]);
+      if (!currentProject) throw new RepositoryNotFoundError('project-not-found');
+
       const prior = await selectOne(client, "select request_hash, result from idempotency_receipts where owner_scope = $1 and operation = 'save_checkpoint' and idempotency_key = $2", [ownerScope, idempotency.key]);
       if (prior) {
         if (prior.request_hash !== idempotency.requestHash) throw new RepositoryConflictError('idempotency-conflict');
         return { checkpoint: prior.result.checkpoint, deduplicated: true };
       }
 
-      // Serialize concurrent checkpoint writers on the project head row.
-      const currentProject = await selectOne(client, 'select document from projects where owner_scope = $1 and id = $2 for update', [ownerScope, value.project_id]);
-      if (!currentProject) throw new RepositoryNotFoundError('project-not-found');
       validateProject(currentProject.document);
       const nextProject = validateProject(project);
       if (nextProject.id !== value.project_id) throw new Error('checkpoint-project-mismatch');
@@ -270,13 +279,18 @@ export class PostgresProjectMemoryRepository extends ProjectMemoryRepository {
   async setRetentionMarker({ ownerScope, projectId, retainUntil, reason = null } = {}) {
     assertOwnerScope(ownerScope);
     if (typeof retainUntil !== 'string' || retainUntil.length === 0) throw new Error('invalid-retain-until');
-    if (!(await this.getProject({ ownerScope, projectId }))) throw new RepositoryNotFoundError('project-not-found');
-    await this.#pool.query(
-      `insert into retention_markers (owner_scope, project_id, retain_until, reason) values ($1, $2, $3, $4)
-       on conflict (owner_scope, project_id) do update set retain_until = excluded.retain_until, reason = excluded.reason`,
-      [ownerScope, projectId, retainUntil, reason],
-    );
-    return { ownerScope, projectId, retainUntil, reason };
+    // Lock the project row so a concurrent deleteProject cannot commit between
+    // the existence check and the upsert and leave an orphan marker.
+    return withTransaction(this.#pool, async (client) => {
+      const project = await selectOne(client, 'select 1 from projects where owner_scope = $1 and id = $2 for update', [ownerScope, projectId]);
+      if (!project) throw new RepositoryNotFoundError('project-not-found');
+      await client.query(
+        `insert into retention_markers (owner_scope, project_id, retain_until, reason) values ($1, $2, $3, $4)
+         on conflict (owner_scope, project_id) do update set retain_until = excluded.retain_until, reason = excluded.reason`,
+        [ownerScope, projectId, retainUntil, reason],
+      );
+      return { ownerScope, projectId, retainUntil, reason };
+    });
   }
 
   async listExpiredProjects({ ownerScope, now } = {}) {
