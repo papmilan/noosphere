@@ -113,6 +113,40 @@ jobs:
       - run: npm test
       - run: npm audit --audit-level=high
 
+  project-memory-acceptance:
+    name: noosphere-remote-mcp-acceptance
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: noosphere-remote-mcp-acceptance
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: noosphere-remote-mcp-acceptance/package-lock.json
+
+      - run: npm ci
+
+      # The acceptance suite drives the merged PR4 server and reuses the PR3
+      # OIDC verifier via monorepo sibling-source imports, so both siblings'
+      # dependencies must be installed — the same pattern the server and
+      # noosphere-mcp jobs use above. The suite runs against the in-memory
+      # repository, so no PostgreSQL service is needed here.
+      - working-directory: noosphere-remote-mcp-server
+        run: npm ci
+      - working-directory: noosphere-remote-mcp-postgres
+        run: npm ci
+
+      - run: npm test
+      - run: npm audit --audit-level=high
+
   security:
     name: Secret and container scan
     runs-on: ubuntu-latest
