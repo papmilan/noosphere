@@ -4,6 +4,7 @@ import { PROJECT_MEMORY_LIMITS, PROJECT_MEMORY_SCHEMA_VERSION } from '../contrac
 import { MCP_ERROR_CODES, createMcpError } from '../contracts/errors.js';
 import { assessResumeFreshness } from '../contracts/freshness.js';
 import { validateSaveCheckpointInput } from '../contracts/validation.js';
+import { RepositoryNotFoundError } from '../contracts/repository.js';
 import { normalizeProjectText } from './normalization.js';
 import { decodeCursor, encodeCursor } from './cursor.js';
 import { requestHash } from './stable-json.js';
@@ -11,36 +12,32 @@ import { requestHash } from './stable-json.js';
 const CONTENT_TRUST = 'untrusted-persisted-data';
 
 // A locally committed durable state that violates a checkpoint/session/head
-// invariant is treated as untrusted persisted data, never projected.
+// invariant is treated as untrusted persisted data, never projected. The
+// schema_version is the server-owned contract constant so the warning validates
+// against the published warning schema exactly like freshness warnings — it is
+// never derived from the corrupt persisted state that triggered it.
 const INCONSISTENT_WARNING = Object.freeze({
+  schema_version: PROJECT_MEMORY_SCHEMA_VERSION,
   code: 'repository-state-inconsistent',
   message: 'The durable project state is incomplete and cannot be safely resumed.',
 });
-
-const CONFLICT_CODE = new Set([
-  'project-conflict',
-  'session-conflict',
-  'checkpoint-conflict',
-  'checkpoint-predecessor-conflict',
-  'checkpoint-predecessor-not-found',
-  'checkpoint-revision-conflict',
-]);
 
 function isPublicError(value) {
   return Boolean(value && typeof value === 'object' && value.isError === true && value.error);
 }
 
-// The repository throws plain domain Errors and RepositoryConflictError; the
-// service is the trust boundary that converts them into public MCP codes.
+// The repository throws typed RepositoryConflictError/RepositoryNotFoundError
+// plus plain validation Errors; the service is the trust boundary that converts
+// them into public MCP codes. Not-found is matched by type, not message
+// substring, so codes like `checkpoint-predecessor-not-found` (a conflict) are
+// never misclassified.
 function mapRepositoryError(error) {
   if (isPublicError(error)) return error;
+  if (error instanceof RepositoryNotFoundError) return createMcpError(MCP_ERROR_CODES.NOT_FOUND);
   if (error && error.name === 'RepositoryConflictError') {
     if (error.code === 'idempotency-conflict') return createMcpError(MCP_ERROR_CODES.IDEMPOTENCY_CONFLICT);
-    if (CONFLICT_CODE.has(error.code)) return createMcpError(MCP_ERROR_CODES.CONFLICT);
     return createMcpError(MCP_ERROR_CODES.CONFLICT);
   }
-  const message = typeof error?.message === 'string' ? error.message : '';
-  if (/not-found/.test(message)) return createMcpError(MCP_ERROR_CODES.NOT_FOUND);
   return createMcpError(MCP_ERROR_CODES.INVALID_ARGUMENT);
 }
 

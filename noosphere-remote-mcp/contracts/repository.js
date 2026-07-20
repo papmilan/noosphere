@@ -76,6 +76,20 @@ export class RepositoryConflictError extends Error {
   }
 }
 
+// Typed missing-record signal so callers map not-found without fragile message
+// matching (which would otherwise also catch codes like
+// `checkpoint-predecessor-not-found`). The message is the machine code, so
+// existing message-regex assertions continue to hold.
+export class RepositoryNotFoundError extends Error {
+  constructor(code) {
+    super(code);
+    this.name = 'RepositoryNotFoundError';
+    this.code = code;
+    this.status = 404;
+    this.retryable = false;
+  }
+}
+
 function assertIdempotency({ key: idempotencyKey, requestHash }) {
   if (typeof idempotencyKey !== 'string' || idempotencyKey.length < 1 || idempotencyKey.length > 128 || typeof requestHash !== 'string' || requestHash.length < 1 || requestHash.length > 512) throw new Error('invalid-idempotency');
 }
@@ -99,9 +113,6 @@ export class ProjectMemoryRepository {
   async inspectProjectState() { throw new Error('repository-method-not-implemented'); }
   async recordIdempotency() { throw new Error('repository-method-not-implemented'); }
   async saveCheckpoint() { throw new Error('repository-method-not-implemented'); }
-  async findProjects() { throw new Error('repository-method-not-implemented'); }
-  async archiveProject() { throw new Error('repository-method-not-implemented'); }
-  async exportProject() { throw new Error('repository-method-not-implemented'); }
 }
 
 export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
@@ -133,7 +144,7 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
   async replaceProject({ ownerScope, projectId, project } = {}) {
     assertOwnerScope(ownerScope);
     const current = getTuple(this.#projects, [ownerScope, projectId]);
-    if (!current) throw new Error('project-not-found');
+    if (!current) throw new RepositoryNotFoundError('project-not-found');
     validateProject(current);
     const value = validateProject(project);
     if (value.id !== projectId || current.id !== projectId) throw new Error('project-id-mismatch');
@@ -144,7 +155,7 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
 
   async deleteProject({ ownerScope, projectId } = {}) {
     assertOwnerScope(ownerScope);
-    if (!getTuple(this.#projects, [ownerScope, projectId])) throw new Error('project-not-found');
+    if (!getTuple(this.#projects, [ownerScope, projectId])) throw new RepositoryNotFoundError('project-not-found');
     deleteTuple(this.#projects, [ownerScope, projectId]);
     deleteOwnerProjectRecords(this.#sessions, ownerScope, projectId);
     deleteOwnerProjectRecords(this.#checkpoints, ownerScope, projectId);
@@ -156,7 +167,7 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
     const value = validateSession(session);
     if (value.latest_checkpoint_id !== null) throw new Error('session-checkpoint-head-mismatch');
     const project = getTuple(this.#projects, [ownerScope, value.project_id]);
-    if (!project) throw new Error('project-not-found');
+    if (!project) throw new RepositoryNotFoundError('project-not-found');
     validateProject(project);
     const tuple = [ownerScope, value.project_id, value.id];
     if (getTuple(this.#sessions, tuple)) throw new RepositoryConflictError('session-conflict');
@@ -178,10 +189,10 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
   async replaceSession({ ownerScope, projectId, sessionId, session } = {}) {
     assertOwnerScope(ownerScope);
     const project = getTuple(this.#projects, [ownerScope, projectId]);
-    if (!project) throw new Error('project-not-found');
+    if (!project) throw new RepositoryNotFoundError('project-not-found');
     validateProject(project);
     const current = getTuple(this.#sessions, [ownerScope, projectId, sessionId]);
-    if (!current) throw new Error('session-not-found');
+    if (!current) throw new RepositoryNotFoundError('session-not-found');
     validateSession(current);
     const value = validateSession(session);
     if (value.project_id !== projectId) throw new Error('session-project-mismatch');
@@ -205,7 +216,7 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
   async inspectProjectState({ ownerScope, projectId } = {}) {
     assertOwnerScope(ownerScope);
     const project = getTuple(this.#projects, [ownerScope, projectId]);
-    if (!project) throw new Error('project-not-found');
+    if (!project) throw new RepositoryNotFoundError('project-not-found');
     return {
       project: structuredClone(project),
       sessions: listTupleValues(this.#sessions, [ownerScope, projectId]),
@@ -243,7 +254,7 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
     }
 
     const currentProjectValue = getTuple(this.#projects, [ownerScope, value.project_id]);
-    if (!currentProjectValue) throw new Error('project-not-found');
+    if (!currentProjectValue) throw new RepositoryNotFoundError('project-not-found');
     const currentProject = validateProject(currentProjectValue);
     const nextProject = validateProject(project);
     if (nextProject.id !== value.project_id) throw new Error('checkpoint-project-mismatch');
@@ -267,7 +278,7 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
       if (session !== undefined && session !== null) throw new Error('checkpoint-session-mismatch');
     } else {
       const currentSessionValue = getTuple(this.#sessions, [ownerScope, value.project_id, value.session_id]);
-      if (!currentSessionValue) throw new Error('session-not-found');
+      if (!currentSessionValue) throw new RepositoryNotFoundError('session-not-found');
       validateSession(currentSessionValue);
       nextSession = validateSession(session);
       if (nextSession.project_id !== value.project_id || nextSession.id !== value.session_id) throw new Error('checkpoint-session-mismatch');
@@ -289,6 +300,9 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
 }
 
 export const POSTGRESQL_REPOSITORY_CONTRACT = Object.freeze({
-  requiredMethods: ['createProject', 'getProject', 'saveCheckpoint', 'findProjects', 'listProjects', 'replaceProject', 'createSession', 'getSession', 'listSessions', 'replaceSession', 'getCheckpoint', 'listCheckpoints', 'inspectProjectState', 'recordIdempotency', 'archiveProject', 'deleteProject', 'exportProject'],
+  // Persistence primitives only. Matching, archiving lifecycle, and summaries
+  // are orchestrated by ProjectMemoryService on top of these; they are not
+  // repository methods.
+  requiredMethods: ['createProject', 'getProject', 'saveCheckpoint', 'listProjects', 'replaceProject', 'createSession', 'getSession', 'listSessions', 'replaceSession', 'getCheckpoint', 'listCheckpoints', 'inspectProjectState', 'recordIdempotency', 'deleteProject'],
   constraints: ['owner_scope_required', 'collision_safe_tuple_keys', 'project_latest_checkpoint_is_head_source_of_truth', 'strictly_linear_checkpoint_history_v1', 'transactions_for_revision_and_idempotency', 'operation_scoped_idempotency', 'cursor_pagination', 'retention_configuration'],
 });

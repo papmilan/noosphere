@@ -3,11 +3,26 @@ import { describe, it } from 'node:test';
 
 import {
   InMemoryProjectMemoryRepository,
+  MCP_TOOLS,
   MCP_ERROR_CODES,
   PROJECT_MEMORY_SCHEMA_VERSION,
   ProjectMemoryService,
 } from '../index.js';
 import { validCheckpoint, validProject, validSession } from './fixtures.js';
+
+// Structural check against the published resume_project warning item schema so
+// every warning the service emits is proven to satisfy the contract clients
+// consume — without pulling in a JSON-schema runtime dependency.
+const WARNING_SCHEMA = MCP_TOOLS.resume_project.output.properties.warnings.items;
+
+function assertValidWarning(warning) {
+  const { required, properties } = WARNING_SCHEMA;
+  assert.deepEqual(Object.keys(warning).sort(), [...required].sort(), 'warning keys must match schema');
+  assert.equal(warning.schema_version, properties.schema_version.const);
+  assert.ok(properties.code.enum.includes(warning.code), `code ${warning.code} in enum`);
+  assert.equal(typeof warning.message, 'string');
+  assert.ok(warning.message.length >= 1 && warning.message.length <= properties.message.maxLength);
+}
 
 const ownerA = 'issuer:https://id.example|subject:user-a';
 const checkpointTimestamp = '2026-07-19T12:00:00.000Z';
@@ -71,7 +86,7 @@ describe('resumeProject consistent freshness', () => {
     const resumed = await service.resumeProject({ ownerScope: ownerA, input: { project_id: project.id } });
     assert.equal(resumed.freshness, 'stale');
     assert.deepEqual(resumed.warnings.map(({ code }) => code), ['checkpoint-predates-session']);
-    assert.equal(resumed.warnings[0].schema_version, PROJECT_MEMORY_SCHEMA_VERSION);
+    resumed.warnings.forEach(assertValidWarning);
   });
 
   it('returns incomplete with no durable checkpoint when none is committed', async () => {
@@ -82,6 +97,7 @@ describe('resumeProject consistent freshness', () => {
     assert.equal(resumed.latest_checkpoint, null);
     assert.equal(resumed.freshness, 'incomplete');
     assert.deepEqual(resumed.warnings.map(({ code }) => code), ['no-durable-checkpoint']);
+    resumed.warnings.forEach(assertValidWarning);
   });
 
   it('returns incomplete when the head session is interrupted', async () => {
@@ -92,6 +108,7 @@ describe('resumeProject consistent freshness', () => {
     const resumed = await service.resumeProject({ ownerScope: ownerA, input: { project_id: project.id } });
     assert.equal(resumed.freshness, 'incomplete');
     assert.ok(resumed.warnings.some(({ code }) => code === 'interrupted-session'));
+    resumed.warnings.forEach(assertValidWarning);
   });
 
   it('rejects an unknown project with not-found', async () => {
@@ -104,7 +121,11 @@ describe('resumeProject consistent freshness', () => {
 });
 
 describe('resumeProject rejects inconsistent durable state as untrusted', () => {
-  const genericWarning = { code: 'repository-state-inconsistent', message: 'The durable project state is incomplete and cannot be safely resumed.' };
+  const genericWarning = {
+    schema_version: PROJECT_MEMORY_SCHEMA_VERSION,
+    code: 'repository-state-inconsistent',
+    message: 'The durable project state is incomplete and cannot be safely resumed.',
+  };
 
   it('returns a generic incomplete resume for a mismatched committed head', async () => {
     const project = validProject({ latest_checkpoint_id: 'chk_missing' });
@@ -114,6 +135,7 @@ describe('resumeProject rejects inconsistent durable state as untrusted', () => 
     assert.equal(result.latest_checkpoint, null);
     assert.equal(result.freshness, 'incomplete');
     assert.deepEqual(result.warnings, [genericWarning]);
+    assertValidWarning(result.warnings[0]);
     assert.equal(result.content_trust, 'untrusted-persisted-data');
   });
 
@@ -123,6 +145,7 @@ describe('resumeProject rejects inconsistent durable state as untrusted', () => 
     const service = new ProjectMemoryService({ repository: stubRepository({ project, sessions: [session], checkpoints: [] }) });
     const result = await service.resumeProject({ ownerScope: ownerA, input: { project_id: project.id } });
     assert.deepEqual(result.warnings, [genericWarning]);
+    result.warnings.forEach(assertValidWarning);
     assert.equal(result.freshness, 'incomplete');
   });
 
@@ -133,5 +156,6 @@ describe('resumeProject rejects inconsistent durable state as untrusted', () => 
     const service = new ProjectMemoryService({ repository: stubRepository({ project, sessions: [], checkpoints: [checkpointOne, checkpointTwo] }) });
     const result = await service.resumeProject({ ownerScope: ownerA, input: { project_id: project.id } });
     assert.deepEqual(result.warnings, [genericWarning]);
+    result.warnings.forEach(assertValidWarning);
   });
 });

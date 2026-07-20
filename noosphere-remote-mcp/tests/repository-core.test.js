@@ -31,10 +31,28 @@ function projectedSession(session, checkpoint, timestamp = later) {
 }
 
 describe('Project Memory repository port', () => {
-  it('declares every persistence operation required by the core', () => {
-    const repository = new ProjectMemoryRepository();
+  it('implements every required persistence operation on the concrete repository', () => {
+    const repository = new InMemoryProjectMemoryRepository();
     for (const method of POSTGRESQL_REPOSITORY_CONTRACT.requiredMethods) {
       assert.equal(typeof repository[method], 'function', method);
+      // Guard against false confidence: the method must be concretely
+      // overridden, not the abstract not-implemented stub.
+      assert.notEqual(
+        InMemoryProjectMemoryRepository.prototype[method],
+        ProjectMemoryRepository.prototype[method],
+        `${method} must be implemented by InMemoryProjectMemoryRepository`,
+      );
+    }
+  });
+
+  it('declares no abstract port method the concrete repository leaves unimplemented', () => {
+    for (const method of Object.getOwnPropertyNames(ProjectMemoryRepository.prototype)) {
+      if (method === 'constructor') continue;
+      assert.notEqual(
+        InMemoryProjectMemoryRepository.prototype[method],
+        ProjectMemoryRepository.prototype[method],
+        `abstract port declares ${method} but the concrete repository does not implement it`,
+      );
     }
   });
 });

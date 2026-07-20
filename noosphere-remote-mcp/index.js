@@ -4,5 +4,5 @@ export { validateCheckpoint, validateProject, validateSaveCheckpointInput, valid
 export { MCP_ERROR_CODES, createMcpError } from './contracts/errors.js';
 export { assessResumeFreshness, createFreshnessWarning } from './contracts/freshness.js';
 export { MCP_TOOLS } from './contracts/mcp-tools.js';
-export { InMemoryProjectMemoryRepository, POSTGRESQL_REPOSITORY_CONTRACT, ProjectMemoryRepository, RepositoryConflictError } from './contracts/repository.js';
+export { InMemoryProjectMemoryRepository, POSTGRESQL_REPOSITORY_CONTRACT, ProjectMemoryRepository, RepositoryConflictError, RepositoryNotFoundError } from './contracts/repository.js';
 export { ProjectMemoryService } from './core/project-memory-service.js';

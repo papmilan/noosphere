@@ -18,19 +18,24 @@ const INTERNAL_ERROR = Object.freeze({
 
 export function toPublicError(error) {
   try {
-    if (
-      error &&
-      typeof error === 'object' &&
-      error.isError === true &&
-      error.error &&
-      typeof error.error === 'object' &&
-      Object.keys(error).length === 2 &&
-      Object.keys(error.error).length === 2 &&
-      typeof error.error.code === 'string' &&
-      typeof error.error.retryable === 'boolean' &&
-      PUBLIC_ERROR_CODES.has(error.error.code)
-    ) {
-      return { isError: true, error: { code: error.error.code, retryable: error.error.retryable } };
+    if (error && typeof error === 'object' && error.isError === true) {
+      // Snapshot each hostile-controlled field exactly once. A malicious getter
+      // that returns different values on successive reads cannot pass validation
+      // with one value and leak another into the returned object.
+      const inner = error.error;
+      if (inner && typeof inner === 'object') {
+        const code = inner.code;
+        const retryable = inner.retryable;
+        if (
+          Object.keys(error).length === 2 &&
+          Object.keys(inner).length === 2 &&
+          typeof code === 'string' &&
+          typeof retryable === 'boolean' &&
+          PUBLIC_ERROR_CODES.has(code)
+        ) {
+          return { isError: true, error: { code, retryable } };
+        }
+      }
     }
   } catch {
     // Fall through to the generic public error when structural inspection fails.
