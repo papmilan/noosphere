@@ -44,6 +44,8 @@ jobs:
   project-memory-postgres:
     name: noosphere-remote-mcp-postgres
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     services:
       postgres:
         image: postgres:16-alpine
@@ -63,6 +65,8 @@ jobs:
         working-directory: noosphere-remote-mcp-postgres
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:

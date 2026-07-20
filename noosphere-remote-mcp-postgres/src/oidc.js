@@ -1,5 +1,15 @@
 import { jwtVerify } from 'jose';
 
+// Accepted signature algorithms: asymmetric JWKS families only. This excludes
+// `none` and every symmetric (HS*) algorithm, so a shared secret can never be
+// used to forge a token and an attacker cannot downgrade to alg=none.
+export const ACCEPTED_ALGORITHMS = Object.freeze([
+  'RS256', 'RS384', 'RS512',
+  'PS256', 'PS384', 'PS512',
+  'ES256', 'ES384', 'ES512',
+  'EdDSA',
+]);
+
 // Provider-neutral OIDC verifier (ADR 0005). The remote MCP service is an
 // OAuth 2.1 protected resource: this validates issuer, audience, signature,
 // expiry, and required scopes, then derives an owner scope from the verified
@@ -66,6 +76,7 @@ export class OidcVerifier {
       ({ payload: claims } = await jwtVerify(token, keyResolver, {
         issuer: unverifiedIssuer,
         audience: this.#audience,
+        algorithms: ACCEPTED_ALGORITHMS,
       }));
     } catch {
       // Never disclose why (project names / ownership stay hidden).

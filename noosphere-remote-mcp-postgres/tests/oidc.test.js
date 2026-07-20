@@ -75,4 +75,36 @@ describe('OIDC verifier', () => {
     const dev = verifier({ allowTestIdentities: true });
     assert.equal(dev.testIdentity('dev').ownerScope, 'issuer:urn:noosphere:test|subject:dev');
   });
+
+  it('rejects a token signed with a symmetric algorithm as unauthenticated', async () => {
+    const secret = new TextEncoder().encode('shared-secret-shared-secret-01234567');
+    const hsToken = await new SignJWT({ scope: 'project.read' })
+      .setProtectedHeader({ alg: 'HS256' }).setIssuer(ISS).setAudience(AUD).setSubject('mallory').setIssuedAt().setExpirationTime('2h').sign(secret);
+    await assert.rejects(verifier().verify(hsToken), (e) => e.code === 'unauthenticated');
+  });
+
+  it('derives distinct owner scopes for the same subject under different issuers', async () => {
+    const v = new OidcVerifier({ issuers: { [ISS]: pub, [OTHER_ISS]: pub }, audience: AUD, requiredScopes: ['project.read'] });
+    const one = await v.verify(await sign(priv, { iss: ISS, sub: 'same' }));
+    const two = await v.verify(await sign(priv, { iss: OTHER_ISS, sub: 'same' }));
+    assert.notEqual(one.ownerScope, two.ownerScope);
+  });
+
+  describe('scp array scope claim', () => {
+    const scpToken = (scp) => new SignJWT({ scp }).setProtectedHeader({ alg: 'RS256' }).setIssuer(ISS).setAudience(AUD).setSubject('u').setIssuedAt().setExpirationTime('2h').sign(priv);
+
+    it('accepts an scp array containing the required scopes', async () => {
+      const result = await verifier({ requiredScopes: ['project.write'] }).verify(await scpToken(['project.read', 'project.write']));
+      assert.deepEqual(result.scopes, ['project.read', 'project.write']);
+    });
+
+    it('rejects an scp array missing a required scope as forbidden', async () => {
+      await assert.rejects(verifier({ requiredScopes: ['project.admin'] }).verify(await scpToken(['project.read'])), (e) => e.code === 'forbidden');
+    });
+
+    it('ignores non-string scp members while honouring valid ones', async () => {
+      const result = await verifier({ requiredScopes: ['project.read'] }).verify(await scpToken(['project.read', 123, null]));
+      assert.deepEqual(result.scopes, ['project.read']);
+    });
+  });
 });
