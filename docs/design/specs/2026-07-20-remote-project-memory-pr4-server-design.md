@@ -64,12 +64,12 @@ transport boundary, without touching core).
 
 ## 4. Decision forks — need approval before implementation
 
-| # | Fork | Proposed default | Rationale |
-|---|------|------------------|-----------|
-| F1 | **MCP transport** | Official `@modelcontextprotocol/sdk` Streamable HTTP server transport | Canonical, provider-neutral, correct initialize/session/SSE semantics; avoids hand-rolling a spec-sensitive protocol. Trade-off: a real dependency in a minimal-dep repo. |
-| F2 | **HTTP layer** | `node:http` (no Express) | The SDK transport mounts on a plain Node handler; keeps deps minimal. |
-| F3 | **Package layout** | New `noosphere-remote-mcp-server` depending on the core + postgres packages | Consistent with the PR1–PR3 package boundaries. |
-| F4 | **Test strategy** | MCP-layer tests against the **in-memory** repository (fast, no DB) + OIDC verifier with local keys; a thin optional Postgres-backed smoke path reusing PR3's service container | initialize/list/call/errors/retry-safety and auth/origin/metadata are storage-agnostic; the DB path is already proven in PR3. |
+| # | Fork | Decision | Rationale |
+|---|------|----------|-----------|
+| F1 | **MCP transport** | **APPROVED:** official `@modelcontextprotocol/sdk` Streamable HTTP server transport | Canonical, provider-neutral, correct initialize/session/SSE semantics; avoids hand-rolling a spec-sensitive protocol. |
+| F2 | **HTTP layer** | **APPROVED (default):** `node:http` (no Express) | The SDK transport mounts on a plain Node handler; keeps deps minimal. |
+| F3 | **Package layout** | **APPROVED (default):** new `noosphere-remote-mcp-server` depending on the core + postgres packages | Consistent with the PR1–PR3 package boundaries. |
+| F4 | **Test strategy** | **APPROVED:** MCP-layer tests against the **in-memory** repository (fast, no DB) + OIDC verifier with local keys; optional Postgres smoke path | initialize/list/call/errors/retry-safety and auth/origin/metadata are storage-agnostic; the DB path is already proven in PR3. |
 
 If F1 is declined, the fallback is a hand-rolled JSON-RPC-over-HTTP + SSE
 transport on `node:http` — more code, more spec risk, zero new dependency.
