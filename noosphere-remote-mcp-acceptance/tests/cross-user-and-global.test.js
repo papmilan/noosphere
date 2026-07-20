@@ -58,10 +58,15 @@ describe('Global verification guarantees', () => {
 
   it('marks recalled checkpoint content as untrusted persisted data', async () => {
     const c = await h.connect(owner, 'chatgpt');
-    const found = structured(await c.call('find_projects', { query: 'Bicycle Repair' }));
-    const got = structured(await c.call('get_checkpoint', { project_id: found.project.id, checkpoint_id: 'chk_root' }));
+    // Seed our own project/checkpoint so this test runs in isolation and does
+    // not depend on state left behind by a sibling `it()` in this block.
+    const project = structured(await c.call('create_project', { name: 'Recalled Trust Labeling' })).project;
+    const session = structured(await c.call('create_session', { project_id: project.id, source_client: 'chatgpt' })).session;
+    const checkpoint = validCheckpoint({ id: 'chk_recall', project_id: project.id, session_id: session.id, created_at: AT });
+    await c.call('save_checkpoint', { project_id: project.id, session_id: session.id, checkpoint, idempotency_key: 'recall-1' });
+    const got = structured(await c.call('get_checkpoint', { project_id: project.id, checkpoint_id: 'chk_recall' }));
     assert.equal(got.content_trust, 'untrusted-persisted-data');
-    const latest = structured(await c.call('get_latest_checkpoint', { project_id: found.project.id }));
+    const latest = structured(await c.call('get_latest_checkpoint', { project_id: project.id }));
     assert.equal(latest.content_trust, 'untrusted-persisted-data');
     await c.close();
   });

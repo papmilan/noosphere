@@ -27,7 +27,7 @@ export function clock(startIso = '2026-07-20T10:00:00.000Z') {
 // and a verifier backed by locally generated keys. No Git repo, no local
 // folder, no CLI, and no user-run MCP process are involved — the only client is
 // a network MCP client.
-export async function startAcceptance({ now } = {}) {
+export async function startAcceptance({ now, repository } = {}) {
   const { privateKey, publicKey } = await generateKeyPair('RS256');
   const verifier = new OidcVerifier({ issuers: { [ISS]: publicKey }, audience: AUD, requiredScopes: [] });
   const config = loadConfig({
@@ -37,18 +37,25 @@ export async function startAcceptance({ now } = {}) {
     allowedOrigins: ['https://app.example'],
     resourceMetadataUrl: 'https://noosphere.example/.well-known/oauth-protected-resource',
   });
-  const repository = new InMemoryProjectMemoryRepository();
-  const server = createMcpServer({ config, verifier, repository, now });
+  const repo = repository ?? new InMemoryProjectMemoryRepository();
+  const server = createMcpServer({ config, verifier, repository: repo, now });
   const address = await server.listen(0);
   const mcpUrl = `http://127.0.0.1:${address.port}/mcp`;
 
-  async function token({ sub = 'alice', iss = ISS, aud = AUD, exp = '2h' } = {}) {
-    return new SignJWT({ scope: 'project.read project.write' })
-      .setProtectedHeader({ alg: 'RS256' }).setIssuer(iss).setAudience(aud).setSubject(sub).setIssuedAt().setExpirationTime(exp).sign(privateKey);
+  // Mint a signed token. `exp`/`nbf` accept a jose duration string ('2h') or an
+  // absolute epoch-seconds number, so negative-auth tests can produce expired
+  // and not-yet-valid tokens against the real verifier.
+  async function token({ sub = 'alice', iss = ISS, aud = AUD, exp = '2h', nbf } = {}) {
+    const jwt = new SignJWT({ scope: 'project.read project.write' })
+      .setProtectedHeader({ alg: 'RS256' }).setIssuer(iss).setAudience(aud).setSubject(sub).setIssuedAt().setExpirationTime(exp);
+    if (nbf !== undefined) jwt.setNotBefore(nbf);
+    return jwt.sign(privateKey);
   }
 
-  // Connect a fresh MCP protocol client bound to one bearer identity, standing
-  // in for a real client app (ChatGPT / Claude) at the protocol level.
+  // Connect a fresh MCP SDK protocol client bound to one bearer identity. The
+  // `clientName` is an arbitrary application-level label; it is NOT evidence
+  // that any real client app was executed. Cross-client parity is proven by the
+  // two independent adapters (SDK vs raw JSON-RPC), not by this label.
   async function connect(tok, clientName = 'acceptance-client') {
     const transport = new StreamableHTTPClientTransport(new URL(mcpUrl), { requestInit: { headers: { Authorization: `Bearer ${tok}` } } });
     const client = new Client({ name: clientName, version: '0.0.0' }, { capabilities: {} });
@@ -63,5 +70,5 @@ export async function startAcceptance({ now } = {}) {
     return (await verifier.verify(await token({ sub }))).ownerScope;
   }
 
-  return { server, mcpUrl, repository, token, connect, ownerScopeFor, async close() { await server.shutdown(); } };
+  return { server, mcpUrl, repository: repo, token, connect, ownerScopeFor, async close() { await server.shutdown(); } };
 }
