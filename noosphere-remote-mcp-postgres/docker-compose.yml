@@ -1,0 +1,18 @@
+# Development/CI Postgres for the Remote Project Memory control plane (ADR 0004).
+# Port 5433 avoids clashing with a default local Postgres on 5432.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: noosphere
+      POSTGRES_PASSWORD: noosphere
+      POSTGRES_DB: noosphere_project_memory
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U noosphere -d noosphere_project_memory"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
