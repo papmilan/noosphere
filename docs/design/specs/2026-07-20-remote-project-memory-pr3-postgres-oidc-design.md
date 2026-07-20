@@ -77,18 +77,15 @@ the PostgreSQL adapter, so the two implementations are observably identical.
   available only when an explicit development-only flag is set; loading it under
   a production configuration is a hard startup error.
 
-## 5. Decision forks — need approval before implementation
+## 5. Decision forks — APPROVED 2026-07-20
 
-These commit dependencies/infrastructure and change what gets built. Proposed
-lazy-correct defaults, each overridable:
-
-| # | Fork | Proposed default | Rationale |
-|---|------|------------------|-----------|
-| F1 | **Package layout** | New package `noosphere-remote-mcp-postgres` importing the core port; core stays zero-dep | Keeps the merged pure-core package dependency-free and independently testable |
-| F2 | **Test-DB strategy** | Real PostgreSQL via Docker Compose locally + a Postgres service container in CI; no in-memory SQL emulation | A transactional adapter (advisory locks, `unique` races, `SERIALIZABLE`/CAS) cannot be faithfully tested against `pg-mem`; ADR 0004 already mandates Docker Compose PG |
-| F3 | **PG driver** | `pg` (node-postgres) | De-facto standard, parameterized queries, pooling |
-| F4 | **OIDC/JWT lib** | `jose` | Provider-neutral, JWKS + full claim verification, no vendor lock-in |
-| F5 | **Migrations** | Plain SQL files + a minimal forward-only runner | Fewest dependencies; no migration framework needed for v1 |
+| # | Fork | Decision | Rationale |
+|---|------|----------|-----------|
+| F1 | **Package layout** | **APPROVED:** new package `noosphere-remote-mcp-postgres` importing the core port; core stays zero-dep | Keeps the merged pure-core package dependency-free and independently testable |
+| F2 | **Test-DB strategy** | **APPROVED:** real PostgreSQL via Docker Compose locally + a Postgres service container in CI; no in-memory SQL emulation | A transactional adapter (advisory locks, `unique` races, CAS) cannot be faithfully tested against `pg-mem`; ADR 0004 already mandates Docker Compose PG |
+| F3 | **PG driver** | **APPROVED (default):** `pg` (node-postgres) | De-facto standard, parameterized queries, pooling |
+| F4 | **OIDC/JWT lib** | **APPROVED (default):** `jose` | Provider-neutral, JWKS + full claim verification, no vendor lock-in |
+| F5 | **Migrations** | **APPROVED (default):** plain SQL files + a minimal forward-only runner | Fewest dependencies; no migration framework needed for v1 |
 
 ## 6. Proposed slice plan (TDD, one reviewable slice per commit)
 
