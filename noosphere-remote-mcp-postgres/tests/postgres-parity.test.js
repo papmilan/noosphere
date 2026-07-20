@@ -16,7 +16,7 @@ defineParitySuite({
   label: 'postgres adapter',
   createRepository: async () => {
     if (!migrated) { await applyMigrations(pool); migrated = true; }
-    await pool.query('truncate projects, sessions, checkpoints, idempotency_receipts');
+    await pool.query('truncate projects, sessions, checkpoints, idempotency_receipts, retention_markers');
     return { repository: new PostgresProjectMemoryRepository({ pool }) };
   },
 });

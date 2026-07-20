@@ -35,27 +35,35 @@ const SCHEMA_MIGRATIONS = `
     applied_at timestamptz not null default now()
   )`;
 
+// Advisory-lock key so concurrent migrators (e.g. parallel test processes)
+// serialize instead of racing on the shared catalog.
+const MIGRATION_LOCK = 776_9_0331;
+
 // Apply every not-yet-applied migration in order, each in its own transaction.
 export async function applyMigrations(pool, migrations = readMigrations()) {
-  await pool.query(SCHEMA_MIGRATIONS);
-  const { rows } = await pool.query('select version from schema_migrations');
-  const applied = new Set(rows.map((row) => row.version));
-  for (const migration of migrations) {
-    if (applied.has(migration.version)) continue;
-    const client = await pool.connect();
-    try {
-      await client.query('begin');
-      await client.query(migration.sql);
-      await client.query('insert into schema_migrations (version, name) values ($1, $2)', [migration.version, migration.name]);
-      await client.query('commit');
-    } catch (error) {
-      await client.query('rollback');
-      throw new Error(`migration-failed:${migration.name}:${error.message}`);
-    } finally {
-      client.release();
+  const lock = await pool.connect();
+  try {
+    await lock.query('select pg_advisory_lock($1)', [MIGRATION_LOCK]);
+    await lock.query(SCHEMA_MIGRATIONS);
+    const { rows } = await lock.query('select version from schema_migrations');
+    const applied = new Set(rows.map((row) => row.version));
+    for (const migration of migrations) {
+      if (applied.has(migration.version)) continue;
+      try {
+        await lock.query('begin');
+        await lock.query(migration.sql);
+        await lock.query('insert into schema_migrations (version, name) values ($1, $2)', [migration.version, migration.name]);
+        await lock.query('commit');
+      } catch (error) {
+        await lock.query('rollback');
+        throw new Error(`migration-failed:${migration.name}:${error.message}`);
+      }
     }
+    return migrations.map((migration) => migration.version);
+  } finally {
+    await lock.query('select pg_advisory_unlock($1)', [MIGRATION_LOCK]).catch(() => {});
+    lock.release();
   }
-  return migrations.map((migration) => migration.version);
 }
 
 // CLI entry: `node migrate.js` applies migrations to DATABASE_URL.

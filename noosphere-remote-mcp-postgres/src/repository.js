@@ -36,17 +36,36 @@ async function selectOne(runner, text, values) {
 
 export class PostgresProjectMemoryRepository extends ProjectMemoryRepository {
   #pool;
+  #projectsPerOwner;
 
-  constructor({ pool } = {}) {
+  // quota.projectsPerOwner is optional; unset means no limit and keeps behaviour
+  // identical to the in-memory reference (so the shared parity suite is unaffected).
+  constructor({ pool, quota } = {}) {
     super();
     if (!pool) throw new Error('postgres-repository-requires-pool');
     this.#pool = pool;
+    this.#projectsPerOwner = Number.isInteger(quota?.projectsPerOwner) ? quota.projectsPerOwner : null;
   }
 
   async createProject({ ownerScope, project } = {}) {
     assertOwnerScope(ownerScope);
     const value = validateProject(project);
     if (value.latest_checkpoint_id !== null) throw new Error('project-checkpoint-head-mismatch');
+    if (this.#projectsPerOwner !== null) {
+      return withTransaction(this.#pool, async (client) => {
+        // Serialize owner writes so the count/insert quota check has no race.
+        await client.query('select pg_advisory_xact_lock(hashtext($1))', [`project-quota:${ownerScope}`]);
+        const { rows } = await client.query('select count(*)::int as n from projects where owner_scope = $1', [ownerScope]);
+        if (rows[0].n >= this.#projectsPerOwner) throw new RepositoryConflictError('project-quota-exceeded');
+        try {
+          await client.query('insert into projects (owner_scope, document) values ($1, $2)', [ownerScope, value]);
+        } catch (error) {
+          if (error.code === '23505') throw new RepositoryConflictError('project-conflict');
+          throw error;
+        }
+        return value;
+      });
+    }
     try {
       await this.#pool.query('insert into projects (owner_scope, document) values ($1, $2)', [ownerScope, value]);
     } catch (error) {
@@ -90,6 +109,7 @@ export class PostgresProjectMemoryRepository extends ProjectMemoryRepository {
       await client.query('delete from checkpoints where owner_scope = $1 and project_id = $2', [ownerScope, projectId]);
       await client.query('delete from sessions where owner_scope = $1 and project_id = $2', [ownerScope, projectId]);
       await client.query('delete from idempotency_receipts where owner_scope = $1 and project_id = $2', [ownerScope, projectId]);
+      await client.query('delete from retention_markers where owner_scope = $1 and project_id = $2', [ownerScope, projectId]);
       await client.query('delete from projects where owner_scope = $1 and id = $2', [ownerScope, projectId]);
     });
   }
@@ -238,5 +258,41 @@ export class PostgresProjectMemoryRepository extends ProjectMemoryRepository {
       );
       return { checkpoint: value, deduplicated: false };
     });
+  }
+
+  // ---- Retention / export / delete jobs (owner-scoped, not part of the port) ----
+
+  // Owner-scoped point-in-time snapshot for a data-export request.
+  async exportProject({ ownerScope, projectId } = {}) {
+    return this.inspectProjectState({ ownerScope, projectId });
+  }
+
+  async setRetentionMarker({ ownerScope, projectId, retainUntil, reason = null } = {}) {
+    assertOwnerScope(ownerScope);
+    if (typeof retainUntil !== 'string' || retainUntil.length === 0) throw new Error('invalid-retain-until');
+    if (!(await this.getProject({ ownerScope, projectId }))) throw new RepositoryNotFoundError('project-not-found');
+    await this.#pool.query(
+      `insert into retention_markers (owner_scope, project_id, retain_until, reason) values ($1, $2, $3, $4)
+       on conflict (owner_scope, project_id) do update set retain_until = excluded.retain_until, reason = excluded.reason`,
+      [ownerScope, projectId, retainUntil, reason],
+    );
+    return { ownerScope, projectId, retainUntil, reason };
+  }
+
+  async listExpiredProjects({ ownerScope, now } = {}) {
+    assertOwnerScope(ownerScope);
+    if (typeof now !== 'string' || now.length === 0) throw new Error('invalid-now');
+    const { rows } = await this.#pool.query('select project_id from retention_markers where owner_scope = $1 and retain_until <= $2 order by retain_until asc', [ownerScope, now]);
+    return rows.map((row) => row.project_id);
+  }
+
+  // Delete job: hard-delete every project whose retention window has elapsed.
+  async purgeExpiredProjects({ ownerScope, now } = {}) {
+    const expired = await this.listExpiredProjects({ ownerScope, now });
+    for (const projectId of expired) {
+      await this.deleteProject({ ownerScope, projectId });
+      await this.#pool.query('delete from retention_markers where owner_scope = $1 and project_id = $2', [ownerScope, projectId]);
+    }
+    return expired;
   }
 }
