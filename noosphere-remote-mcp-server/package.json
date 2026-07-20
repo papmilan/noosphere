@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Streamable HTTP MCP resource server for Noosphere Remote Project Memory (PR4).",
   "scripts": {
-    "check": "node --check src/server.js && node --check src/config.js && node --check src/logging.js",
+    "check": "node --check src/server.js && node --check src/mcp-core.js && node --check src/config.js && node --check src/logging.js",
     "test": "npm run check && node --test tests/*.test.js"
   },
   "dependencies": {
