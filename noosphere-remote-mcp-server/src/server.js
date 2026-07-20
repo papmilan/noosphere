@@ -1,25 +1,15 @@
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
-import { MCP_TOOLS, ProjectMemoryService } from '@noosphere/remote-mcp-contracts/index.js';
+import { ProjectMemoryService } from '@noosphere/remote-mcp-contracts/index.js';
+import { buildProjectMemoryMcpServer } from './mcp-core.js';
 import { protectedResourceMetadata } from './config.js';
 import { correlationId, requestLog } from './logging.js';
 
-// MCP tool name -> ProjectMemoryService method. Only the 15 published tools.
-const TOOL_METHOD = Object.freeze({
-  create_project: 'createProject', get_project: 'getProject', list_projects: 'listProjects',
-  find_projects: 'findProjects', update_project: 'updateProject', archive_project: 'archiveProject',
-  create_session: 'createSession', get_session: 'getSession', list_project_sessions: 'listProjectSessions',
-  save_checkpoint: 'saveCheckpoint', get_latest_checkpoint: 'getLatestCheckpoint', get_checkpoint: 'getCheckpoint',
-  list_checkpoints: 'listCheckpoints', resume_project: 'resumeProject', get_project_summary: 'getProjectSummary',
-});
-// Bare single-entity returns are wrapped into the published MCP output envelope
-// here at the transport boundary (discharges the PR2 wrapping follow-up).
-const WRAP_KEY = Object.freeze({ create_project: 'project', get_project: 'project', update_project: 'project', archive_project: 'project', create_session: 'session', get_session: 'session' });
+// Server identity advertised to clients over the Streamable HTTP transport.
+const REMOTE_SERVER_INFO = Object.freeze({ name: 'noosphere-remote-project-memory', version: '0.0.0' });
 
 function sendJson(res, status, body, headers = {}) {
   const payload = JSON.stringify(body);
@@ -77,26 +67,6 @@ export function createMcpServer({ config, verifier, repository, now, readinessCh
   const service = new ProjectMemoryService({ repository, now });
   const sessions = new Map(); // sessionId -> { transport, ownerScope }
 
-  function buildMcpServer(ownerScope) {
-    const server = new Server({ name: 'noosphere-remote-project-memory', version: '0.0.0' }, { capabilities: { tools: {} } });
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: Object.entries(MCP_TOOLS).map(([name, def]) => ({ name, description: `Project Memory ${name}`, inputSchema: def.input })),
-    }));
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const name = request.params.name;
-      const method = TOOL_METHOD[name];
-      if (!method) return toolError({ isError: true, error: { code: 'invalid-argument', retryable: false } });
-      try {
-        const result = await service[method]({ ownerScope, input: request.params.arguments ?? {} });
-        const structured = WRAP_KEY[name] ? { [WRAP_KEY[name]]: result } : result;
-        return { content: [{ type: 'text', text: JSON.stringify(structured) }], structuredContent: structured };
-      } catch (error) {
-        return toolError(error && error.isError && error.error ? error : { isError: true, error: { code: 'internal', retryable: false } });
-      }
-    });
-    return server;
-  }
-
   async function authenticate(req) {
     const header = req.headers['authorization'] || '';
     const match = /^Bearer (.+)$/i.exec(header);
@@ -139,7 +109,7 @@ export function createMcpServer({ config, verifier, repository, now, readinessCh
       onsessioninitialized: (id) => { sessions.set(id, { transport, ownerScope: identity.ownerScope }); },
     });
     transport.onclose = () => { if (transport.sessionId) sessions.delete(transport.sessionId); };
-    const mcp = buildMcpServer(identity.ownerScope);
+    const mcp = buildProjectMemoryMcpServer({ service, ownerScope: identity.ownerScope, serverInfo: REMOTE_SERVER_INFO });
     await mcp.connect(transport);
     return transport.handleRequest(req, res, body);
   }
@@ -185,8 +155,4 @@ export function createMcpServer({ config, verifier, repository, now, readinessCh
     },
     shutdown,
   };
-}
-
-function toolError(publicError) {
-  return { isError: true, content: [{ type: 'text', text: publicError.error.code }], structuredContent: publicError };
 }

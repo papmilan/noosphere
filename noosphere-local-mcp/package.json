@@ -1,0 +1,22 @@
+{
+  "name": "@noosphere/local-mcp",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local STDIO MCP transport for Noosphere Project Memory (PR7). Single-user, no HTTP, no OIDC; shares the exact Remote MCP tool surface and core.",
+  "bin": {
+    "noosphere-local-mcp": "bin/noosphere-local-mcp.js"
+  },
+  "scripts": {
+    "check": "node --check bin/noosphere-local-mcp.js && node --check src/stdio-server.js && node --check src/local-identity.js",
+    "test": "npm run check && node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@noosphere/remote-mcp-contracts": "file:../noosphere-remote-mcp",
+    "@noosphere/remote-mcp-server": "file:../noosphere-remote-mcp-server"
+  },
+  "devDependencies": {
+    "jose": "^6.0.0"
+  }
+}
