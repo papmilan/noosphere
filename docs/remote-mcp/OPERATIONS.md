@@ -48,6 +48,7 @@ container almost always means a config error — read the first log line.
 | --- | --- | --- |
 | Container exits immediately, `config-*` in logs | Missing/invalid env | Fix the named variable; see CONFIGURATION. |
 | `/readyz` returns 503 | Database unreachable | Check `DATABASE_URL`, network to PostgreSQL, DB health. `/healthz` staying 200 confirms the process is fine. |
+| A `pool-error` log line appears | An idle pooled database connection failed (DB restart/failover/network drop) | Informational: the server logs it and keeps running — it does **not** crash. `/readyz` reports 503 until the database answers again, then returns to 200 with no restart. |
 | All `/mcp` requests 401 | Token invalid/expired, wrong issuer or audience, or `jwks_uri` unreachable | Verify `NOOSPHERE_AUDIENCE`/`NOOSPHERE_OIDC_ISSUERS` match the IdP; confirm the server can reach each `jwks_uri`. Errors are deliberately opaque (no detail leaked to clients). |
 | `/mcp` returns 403 `forbidden-origin` | Browser `Origin` not in `NOOSPHERE_ALLOWED_ORIGINS` | Add the origin. |
 | `/mcp` returns 403 `session-owner-mismatch` | A token for a different owner reused an existing `Mcp-Session-Id` | Client bug; sessions are owner-bound. |

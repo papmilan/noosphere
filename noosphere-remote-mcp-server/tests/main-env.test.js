@@ -18,14 +18,28 @@ test('parses a minimal valid non-production (memory) environment', () => {
   assert.deepEqual(options.issuers, [{ iss: 'https://issuer.example/', jwksUri: 'https://issuer.example/jwks' }]);
 });
 
+const PROD = Object.freeze({
+  ...BASE,
+  NOOSPHERE_PRODUCTION: 'true',
+  NOOSPHERE_AUTHORIZATION_SERVERS: 'https://issuer.example/',
+});
+
 test('production defaults to the postgres repository and requires DATABASE_URL', () => {
   assert.throws(
-    () => parseServerEnv({ ...BASE, NOOSPHERE_PRODUCTION: 'true' }),
+    () => parseServerEnv({ ...PROD }),
     /config-requires:DATABASE_URL/,
   );
-  const options = parseServerEnv({ ...BASE, NOOSPHERE_PRODUCTION: 'true', DATABASE_URL: 'postgres://u:p@db:5432/n' });
+  const options = parseServerEnv({ ...PROD, DATABASE_URL: 'postgres://u:p@db:5432/n' });
   assert.equal(options.repository, 'postgres');
   assert.equal(options.production, true);
+});
+
+test('production requires at least one authorization server (RFC 9728 metadata)', () => {
+  const env = { ...PROD, DATABASE_URL: 'postgres://u:p@db:5432/n' };
+  delete env.NOOSPHERE_AUTHORIZATION_SERVERS;
+  assert.throws(() => parseServerEnv(env), /config-requires:NOOSPHERE_AUTHORIZATION_SERVERS/);
+  // Non-production may still omit it.
+  assert.doesNotThrow(() => parseServerEnv({ ...BASE }));
 });
 
 test('production must not run the ephemeral in-memory repository', () => {

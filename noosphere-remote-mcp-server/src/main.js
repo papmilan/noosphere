@@ -107,6 +107,11 @@ export function parseServerEnv(env = process.env) {
   // a production deployment, only local smoke/health checks.
   if (production && repository === 'memory') throw new Error('production-requires-postgres-repository');
 
+  // In production the RFC 9728 protected-resource metadata must advertise at
+  // least one authorization server, or OAuth discovery is silently incomplete.
+  const authorizationServers = splitList(env.NOOSPHERE_AUTHORIZATION_SERVERS);
+  if (production && authorizationServers.length === 0) throw new Error('config-requires:NOOSPHERE_AUTHORIZATION_SERVERS');
+
   const port = env.NOOSPHERE_PORT === undefined ? 8080 : Number(env.NOOSPHERE_PORT);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('config-invalid-port');
 
@@ -129,7 +134,7 @@ export function parseServerEnv(env = process.env) {
     port,
     audience: requireValue(env, 'NOOSPHERE_AUDIENCE'),
     resourceMetadataUrl: requireValue(env, 'NOOSPHERE_RESOURCE_METADATA_URL'),
-    authorizationServers: splitList(env.NOOSPHERE_AUTHORIZATION_SERVERS),
+    authorizationServers,
     allowedOrigins: splitList(env.NOOSPHERE_ALLOWED_ORIGINS),
     requiredScopes: splitList(env.NOOSPHERE_REQUIRED_SCOPES),
     production,
@@ -147,7 +152,7 @@ export function parseServerEnv(env = process.env) {
 // Builds lazy JWKS resolvers (no network yet), the OIDC verifier, the config,
 // and either the PostgreSQL or in-memory repository plus a matching readiness
 // probe and shutdown hook.
-export function buildServerOptions(options) {
+export function buildServerOptions(options, { logger = () => {}, createPool: makePool = createPool } = {}) {
   const verifierIssuers = {};
   const configIssuers = {};
   for (const { iss, jwksUri } of options.issuers) {
@@ -178,7 +183,15 @@ export function buildServerOptions(options) {
     return { config, verifier, repository: new InMemoryProjectMemoryRepository(), readinessCheck: async () => true, onShutdown: async () => {} };
   }
 
-  const pool = createPool(options.databaseUrl);
+  const pool = makePool(options.databaseUrl);
+  // A pg Pool emits 'error' when an *idle* pooled client fails (database
+  // restart/failover, network drop). With no listener Node raises an uncaught
+  // exception and the process crashes; that would defeat graceful degradation.
+  // Log it and let readinessCheck report the degraded state — no retry, no
+  // recovery, and never a silent swallow.
+  pool.on('error', (error) => {
+    logger({ event: 'pool-error', message: error && error.message ? error.message : String(error) });
+  });
   const repository = new PostgresProjectMemoryRepository({
     pool,
     quota: options.projectsPerOwner !== null ? { projectsPerOwner: options.projectsPerOwner } : undefined,
@@ -198,7 +211,7 @@ export function buildServerOptions(options) {
 export async function main({ env = process.env, log = console.log, errorLog = console.error } = {}) {
   const options = parseServerEnv(env);
   const logger = options.logMode === 'silent' ? () => {} : (line) => log(JSON.stringify(line));
-  const server = createMcpServer({ ...buildServerOptions(options), logger });
+  const server = createMcpServer({ ...buildServerOptions(options, { logger }), logger });
 
   const address = await server.listen(options.port);
   logger({ event: 'listening', port: address.port, repository: options.repository, production: options.production });

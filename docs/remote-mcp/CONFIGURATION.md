@@ -15,7 +15,7 @@ change the environment and restart.
 | `NOOSPHERE_AUDIENCE` | Yes | — | `https://mcp.example/project-memory` | OAuth 2.1 resource identifier. Tokens whose `aud` does not match are rejected. |
 | `NOOSPHERE_RESOURCE_METADATA_URL` | Yes | — | `https://mcp.example/.well-known/oauth-protected-resource` | Absolute URL of the RFC 9728 metadata document; also returned in `WWW-Authenticate` on 401. |
 | `NOOSPHERE_OIDC_ISSUERS` | Yes | — | `[{"iss":"https://idp.example/","jwks_uri":"https://idp.example/jwks"}]` | JSON array of trusted issuers. `jwks_uri` **must be https**. Keys are fetched lazily from these JWKS endpoints. |
-| `NOOSPHERE_AUTHORIZATION_SERVERS` | No | empty | `https://idp.example/` | Space/comma list advertised in protected-resource metadata. |
+| `NOOSPHERE_AUTHORIZATION_SERVERS` | **Yes when production**, else No | empty | `https://idp.example/` | Space/comma list advertised in protected-resource metadata. Required under `NOOSPHERE_PRODUCTION=true` — otherwise RFC 9728 OAuth discovery would be silently incomplete. |
 | `NOOSPHERE_REQUIRED_SCOPES` | No | empty | `project.read project.write` | Space/comma list every token must carry; missing scopes → 403. |
 | `NOOSPHERE_ALLOWED_ORIGINS` | No | empty | `https://app.example` | Space/comma list of browser `Origin`s allowed on `/mcp`. Non-browser clients send no `Origin` and are unaffected. An unlisted origin → 403. |
 | `NOOSPHERE_PRODUCTION` | No | `false` | `true` | Set **`true`** in production. Enables strict mode and forbids the in-memory repository and any test identities. |
@@ -55,7 +55,7 @@ The process exits non-zero with one of these before listening:
 | Message | Meaning |
 | --- | --- |
 | `config-unknown-env:<KEY>` | An undocumented `NOOSPHERE_*` variable is set. |
-| `config-requires:<KEY>` | A required variable is missing/empty. |
+| `config-requires:<KEY>` | A required variable is missing/empty (includes `NOOSPHERE_AUTHORIZATION_SERVERS` and `DATABASE_URL` under production). |
 | `config-requires-oidc-issuers` / `config-invalid-oidc-issuers-json` | `NOOSPHERE_OIDC_ISSUERS` is empty or not valid JSON. |
 | `config-jwks-uri-requires-https` | A `jwks_uri` is not https. |
 | `production-requires-postgres-repository` | `NOOSPHERE_PRODUCTION=true` with `NOOSPHERE_REPOSITORY=memory`. |
