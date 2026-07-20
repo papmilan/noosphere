@@ -1,0 +1,20 @@
+{
+  "name": "@noosphere/remote-mcp-postgres",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "PostgreSQL control-plane repository and provider-neutral OIDC verifier for Noosphere Remote Project Memory (PR3).",
+  "scripts": {
+    "check": "node --check migrate.js && node --check src/pool.js && node --check src/repository.js && node --check src/oidc.js",
+    "test:nodb": "npm run check && node --test tests/migrate-runner.test.js tests/oidc.test.js tests/inmemory-parity.test.js",
+    "test:db": "node --test --test-concurrency=1 tests/postgres-parity.test.js tests/jobs.test.js tests/resilience.test.js",
+    "test": "npm run test:nodb && npm run test:db",
+    "db:up": "docker compose up -d --wait",
+    "db:down": "docker compose down -v",
+    "migrate": "node migrate.js"
+  },
+  "dependencies": {
+    "jose": "^6.0.0",
+    "pg": "^8.13.0"
+  }
+}
