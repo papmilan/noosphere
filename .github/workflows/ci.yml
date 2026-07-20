@@ -41,6 +41,42 @@ jobs:
       - run: npm run check
       - run: npm audit --audit-level=high
 
+  project-memory-postgres:
+    name: noosphere-remote-mcp-postgres
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: noosphere
+          POSTGRES_PASSWORD: noosphere
+          POSTGRES_DB: noosphere_project_memory
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U noosphere -d noosphere_project_memory"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    defaults:
+      run:
+        working-directory: noosphere-remote-mcp-postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: noosphere-remote-mcp-postgres/package-lock.json
+
+      - run: npm ci
+      - run: npm run test:nodb
+      - run: npm run test:db
+        env:
+          DATABASE_URL: postgres://noosphere:noosphere@127.0.0.1:5433/noosphere_project_memory
+      - run: npm audit --audit-level=high
+
   security:
     name: Secret and container scan
     runs-on: ubuntu-latest
