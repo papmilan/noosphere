@@ -81,6 +81,38 @@ jobs:
           DATABASE_URL: postgres://noosphere:noosphere@127.0.0.1:5433/noosphere_project_memory
       - run: npm audit --audit-level=high
 
+  project-memory-server:
+    name: noosphere-remote-mcp-server
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: noosphere-remote-mcp-server
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: noosphere-remote-mcp-server/package-lock.json
+
+      - run: npm ci
+
+      # The server test harness reuses the PR3 OIDC verifier via a monorepo
+      # sibling-source import, so that package's own dependencies (jose) must be
+      # installed too — the same pattern noosphere-mcp uses to boot relayer
+      # source above. The server suite itself runs against the in-memory
+      # repository, so no PostgreSQL service is needed here.
+      - working-directory: noosphere-remote-mcp-postgres
+        run: npm ci
+
+      - run: npm test
+      - run: npm audit --audit-level=high
+
   security:
     name: Secret and container scan
     runs-on: ubuntu-latest

@@ -5,7 +5,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
-import { MCP_TOOLS, ProjectMemoryService } from '../../noosphere-remote-mcp/index.js';
+import { MCP_TOOLS, ProjectMemoryService } from '@noosphere/remote-mcp-contracts/index.js';
 import { protectedResourceMetadata } from './config.js';
 import { correlationId, requestLog } from './logging.js';
 
@@ -33,16 +33,40 @@ function unauthorized(res, config) {
   });
 }
 
-function readBody(req) {
+// Distinct control paths: a payload over the limit is not the same failure as
+// malformed JSON, so callers can answer 413 vs 400 deterministically.
+class PayloadTooLargeError extends Error { constructor() { super('payload-too-large'); this.name = 'PayloadTooLargeError'; } }
+class InvalidJsonError extends Error { constructor() { super('invalid-json'); this.name = 'InvalidJsonError'; } }
+
+// Enforce the body limit while streaming, before the full body is buffered. The
+// first chunk that crosses maxBytes destroys the request and rejects; no further
+// data is buffered, no JSON is parsed, and the caller never dispatches a tool.
+// The limit is inclusive: a body of exactly maxBytes is accepted.
+function readBody(req, maxBytes) {
   return new Promise((resolve, reject) => {
+    let length = 0;
+    let done = false;
     const chunks = [];
-    req.on('data', (c) => chunks.push(c));
-    req.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf8');
-      if (raw.length === 0) return resolve(undefined);
-      try { resolve(JSON.parse(raw)); } catch { reject(new Error('invalid-json')); }
+    const finish = (fn, value) => { if (done) return; done = true; fn(value); };
+    req.on('data', (c) => {
+      if (done) return;
+      length += c.length;
+      if (length > maxBytes) {
+        // Stop buffering immediately (memory is now bounded) and pause the
+        // stream; the handler sends 413 and destroys the socket only after the
+        // response has flushed, so the client reliably receives the status.
+        req.pause();
+        return finish(reject, new PayloadTooLargeError());
+      }
+      chunks.push(c);
     });
-    req.on('error', reject);
+    req.on('end', () => {
+      if (done) return;
+      const raw = Buffer.concat(chunks).toString('utf8');
+      if (raw.length === 0) return finish(resolve, undefined);
+      try { finish(resolve, JSON.parse(raw)); } catch { finish(reject, new InvalidJsonError()); }
+    });
+    req.on('error', (err) => finish(reject, err));
   });
 }
 
@@ -87,7 +111,17 @@ export function createMcpServer({ config, verifier, repository, now, readinessCh
     if (!identity) return unauthorized(res, config);
 
     let body;
-    try { body = await readBody(req); } catch { return sendJson(res, 400, { error: 'invalid-json' }); }
+    try {
+      body = await readBody(req, config.maxBodyBytes);
+    } catch (error) {
+      if (error instanceof PayloadTooLargeError) {
+        // Destroy the request only after the 413 has flushed, so an oversized
+        // upload is aborted without racing the response off the socket.
+        res.on('finish', () => req.destroy());
+        return sendJson(res, 413, { error: 'payload-too-large' });
+      }
+      return sendJson(res, 400, { error: 'invalid-json' });
+    }
 
     const sessionId = req.headers['mcp-session-id'];
     if (sessionId) {

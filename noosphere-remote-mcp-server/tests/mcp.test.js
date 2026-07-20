@@ -4,7 +4,7 @@ import { after, before, describe, it } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
-import { validCheckpoint } from '../../noosphere-remote-mcp/tests/fixtures.js';
+import { validCheckpoint } from '@noosphere/remote-mcp-contracts/tests/fixtures.js';
 import { startServer } from './harness.js';
 
 async function connect(h, tok) {

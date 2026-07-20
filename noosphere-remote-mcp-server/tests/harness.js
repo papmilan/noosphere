@@ -1,6 +1,9 @@
 import { SignJWT, generateKeyPair } from 'jose';
 
-import { InMemoryProjectMemoryRepository } from '../../noosphere-remote-mcp/index.js';
+import { InMemoryProjectMemoryRepository } from '@noosphere/remote-mcp-contracts/index.js';
+// Test-only: the OIDC verifier is reused from the PR3 sibling package via a
+// monorepo source import (same convention as noosphere-mcp booting relayer
+// source); the server CI job installs that sibling's deps.
 import { OidcVerifier } from '../../noosphere-remote-mcp-postgres/src/oidc.js';
 import { loadConfig } from '../src/config.js';
 import { createMcpServer } from '../src/server.js';
