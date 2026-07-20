@@ -80,6 +80,9 @@ export class RawJsonRpcClient {
 
   async listTools() {
     const r = await this.send('tools/list', {});
+    // Mirror the SDK: a JSON-RPC protocol error throws rather than silently
+    // returning undefined.
+    if (r.error) throw Object.assign(new Error(typeof r.error.message === 'string' ? r.error.message : 'jsonrpc-error'), { code: r.error.code, data: r.error.data });
     return r.result ? r.result.tools : undefined;
   }
 
