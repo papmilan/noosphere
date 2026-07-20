@@ -87,13 +87,25 @@ export class RawJsonRpcClient {
   // is shape-compatible with the SDK client's callTool result.
   async callTool(name, args = {}) {
     const r = await this.send('tools/call', { name, arguments: args });
+    // A JSON-RPC protocol error (bad params, unknown method) leaves `result`
+    // undefined; throw so this mirrors the SDK client, which raises McpError.
+    // Tool-level failures (`isError: true`) travel inside `result` and are
+    // returned as-is, exactly like the SDK.
+    if (r.error) {
+      const err = new Error(typeof r.error.message === 'string' ? r.error.message : 'jsonrpc-error');
+      err.code = r.error.code;
+      err.data = r.error.data;
+      throw err;
+    }
     return r.result;
   }
 
   async close() {
     if (!this.#sessionId) return;
+    const headers = { authorization: `Bearer ${this.#token}`, accept: ACCEPT, 'mcp-session-id': this.#sessionId };
+    if (this.#origin !== null) headers.origin = this.#origin;
     try {
-      await fetch(this.#url, { method: 'DELETE', headers: { authorization: `Bearer ${this.#token}`, accept: ACCEPT, origin: this.#origin, 'mcp-session-id': this.#sessionId } });
+      await fetch(this.#url, { method: 'DELETE', headers });
     } catch { /* best effort */ }
     this.#sessionId = undefined;
   }

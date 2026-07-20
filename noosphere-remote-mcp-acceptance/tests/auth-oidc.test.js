@@ -5,7 +5,12 @@ import { clock, startAcceptance } from './harness.js';
 import { RawJsonRpcClient } from './raw-client.js';
 
 const AT = '2026-07-20T10:00:00.000Z';
-const nowSec = () => Math.floor(Date.parse(AT) / 1000);
+// The OIDC verifier validates exp/nbf against the real system clock — jose's
+// jwtVerify takes no injected `now`, and the harness clock only drives the
+// service's record timestamps, not token validity. So expired / not-yet-valid
+// tokens must be built relative to real time, or the nbf case would pass only
+// because the token also happens to be expired at wall-clock run time.
+const nowSec = () => Math.floor(Date.now() / 1000);
 
 // Exact HTTP status matters here, so every case goes through the raw client and
 // inspects the transport response directly. Each attempt is a fresh initialize

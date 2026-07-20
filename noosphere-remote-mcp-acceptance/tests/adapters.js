@@ -16,7 +16,11 @@ export function sdkAdapter({ mcpUrl, token, origin = 'https://app.example' }) {
   return {
     kind: 'sdk-client',
     async connect() {
-      transport = new StreamableHTTPClientTransport(new URL(mcpUrl), { requestInit: { headers: { Authorization: `Bearer ${token}`, Origin: origin } } });
+      // Omit Origin entirely when null (parity with rawAdapter), so a null
+      // origin is never serialized as the literal string "null".
+      const headers = { Authorization: `Bearer ${token}` };
+      if (origin !== null) headers.Origin = origin;
+      transport = new StreamableHTTPClientTransport(new URL(mcpUrl), { requestInit: { headers } });
       client = new Client({ name: 'sdk-client', version: '0.0.0' }, { capabilities: {} });
       await client.connect(transport);
       return { serverInfo: client.getServerVersion() ?? null, capabilities: client.getServerCapabilities() ?? null };

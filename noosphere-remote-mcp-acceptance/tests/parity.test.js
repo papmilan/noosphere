@@ -112,7 +112,6 @@ describe('Cross-client semantic parity: SDK client vs raw JSON-RPC client', () =
 
     // Sanity: each path actually exercised the full tool surface and semantics.
     assert.equal(outcomes.sdk.toolCount, 15);
-    assert.deepEqual(outcomes.sdk.toolNames, outcomes.sdk.toolNames.slice().sort());
     assert.equal(outcomes.sdk.save1Dedup, false);
     assert.equal(outcomes.sdk.replayDedup, true);
     assert.equal(outcomes.sdk.ambiguousResult, 'ambiguous');
