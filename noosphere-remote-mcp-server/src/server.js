@@ -1,0 +1,158 @@
+import http from 'node:http';
+import { randomUUID } from 'node:crypto';
+
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+
+import { MCP_TOOLS, ProjectMemoryService } from '../../noosphere-remote-mcp/index.js';
+import { protectedResourceMetadata } from './config.js';
+import { correlationId, requestLog } from './logging.js';
+
+// MCP tool name -> ProjectMemoryService method. Only the 15 published tools.
+const TOOL_METHOD = Object.freeze({
+  create_project: 'createProject', get_project: 'getProject', list_projects: 'listProjects',
+  find_projects: 'findProjects', update_project: 'updateProject', archive_project: 'archiveProject',
+  create_session: 'createSession', get_session: 'getSession', list_project_sessions: 'listProjectSessions',
+  save_checkpoint: 'saveCheckpoint', get_latest_checkpoint: 'getLatestCheckpoint', get_checkpoint: 'getCheckpoint',
+  list_checkpoints: 'listCheckpoints', resume_project: 'resumeProject', get_project_summary: 'getProjectSummary',
+});
+// Bare single-entity returns are wrapped into the published MCP output envelope
+// here at the transport boundary (discharges the PR2 wrapping follow-up).
+const WRAP_KEY = Object.freeze({ create_project: 'project', get_project: 'project', update_project: 'project', archive_project: 'project', create_session: 'session', get_session: 'session' });
+
+function sendJson(res, status, body, headers = {}) {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, { 'content-type': 'application/json', ...headers });
+  res.end(payload);
+}
+
+function unauthorized(res, config) {
+  sendJson(res, 401, { error: 'unauthenticated' }, {
+    'www-authenticate': `Bearer resource_metadata="${config.resourceMetadataUrl}"`,
+  });
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      if (raw.length === 0) return resolve(undefined);
+      try { resolve(JSON.parse(raw)); } catch { reject(new Error('invalid-json')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+export function createMcpServer({ config, verifier, repository, now, readinessCheck, onShutdown, logger = () => {} } = {}) {
+  if (!config) throw new Error('server-requires-config');
+  if (!verifier) throw new Error('server-requires-verifier');
+  if (!repository) throw new Error('server-requires-repository');
+  const service = new ProjectMemoryService({ repository, now });
+  const sessions = new Map(); // sessionId -> { transport, ownerScope }
+
+  function buildMcpServer(ownerScope) {
+    const server = new Server({ name: 'noosphere-remote-project-memory', version: '0.0.0' }, { capabilities: { tools: {} } });
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: Object.entries(MCP_TOOLS).map(([name, def]) => ({ name, description: `Project Memory ${name}`, inputSchema: def.input })),
+    }));
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const name = request.params.name;
+      const method = TOOL_METHOD[name];
+      if (!method) return toolError({ isError: true, error: { code: 'invalid-argument', retryable: false } });
+      try {
+        const result = await service[method]({ ownerScope, input: request.params.arguments ?? {} });
+        const structured = WRAP_KEY[name] ? { [WRAP_KEY[name]]: result } : result;
+        return { content: [{ type: 'text', text: JSON.stringify(structured) }], structuredContent: structured };
+      } catch (error) {
+        return toolError(error && error.isError && error.error ? error : { isError: true, error: { code: 'internal', retryable: false } });
+      }
+    });
+    return server;
+  }
+
+  async function authenticate(req) {
+    const header = req.headers['authorization'] || '';
+    const match = /^Bearer (.+)$/i.exec(header);
+    if (!match) return null;
+    try { return await verifier.verify(match[1]); } catch { return null; }
+  }
+
+  async function handleMcp(req, res) {
+    const origin = req.headers['origin'];
+    if (origin && !config.allowedOrigins.has(origin)) return sendJson(res, 403, { error: 'forbidden-origin' });
+    const identity = await authenticate(req);
+    if (!identity) return unauthorized(res, config);
+
+    let body;
+    try { body = await readBody(req); } catch { return sendJson(res, 400, { error: 'invalid-json' }); }
+
+    const sessionId = req.headers['mcp-session-id'];
+    if (sessionId) {
+      const session = sessions.get(sessionId);
+      if (!session) return sendJson(res, 404, { error: 'unknown-session' });
+      // Bind the session to its owner: a token for a different owner cannot
+      // drive an established session.
+      if (session.ownerScope !== identity.ownerScope) return sendJson(res, 403, { error: 'session-owner-mismatch' });
+      return session.transport.handleRequest(req, res, body);
+    }
+
+    // New session: the owner scope is fixed at initialize.
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (id) => { sessions.set(id, { transport, ownerScope: identity.ownerScope }); },
+    });
+    transport.onclose = () => { if (transport.sessionId) sessions.delete(transport.sessionId); };
+    const mcp = buildMcpServer(identity.ownerScope);
+    await mcp.connect(transport);
+    return transport.handleRequest(req, res, body);
+  }
+
+  const httpServer = http.createServer(async (req, res) => {
+    const id = correlationId();
+    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    try {
+      if (req.method === 'GET' && url.pathname === '/healthz') return sendJson(res, 200, { status: 'ok' });
+      if (req.method === 'GET' && url.pathname === '/readyz') {
+        const ok = readinessCheck ? await readinessCheck() : true;
+        return sendJson(res, ok ? 200 : 503, { status: ok ? 'ready' : 'unavailable' });
+      }
+      if (req.method === 'GET' && url.pathname === '/.well-known/oauth-protected-resource') {
+        return sendJson(res, 200, protectedResourceMetadata(config));
+      }
+      if (url.pathname === '/mcp') return await handleMcp(req, res);
+      return sendJson(res, 404, { error: 'not-found' });
+    } catch (error) {
+      if (!res.headersSent) sendJson(res, 500, { error: 'internal' });
+    } finally {
+      logger(requestLog({ correlationId: id, method: req.method, path: url.pathname, status: res.statusCode, headers: req.headers }));
+    }
+  });
+
+  let closing = false;
+  async function shutdown() {
+    if (closing) return;
+    closing = true;
+    for (const { transport } of sessions.values()) {
+      try { await transport.close(); } catch { /* best effort */ }
+    }
+    sessions.clear();
+    await new Promise((resolve) => httpServer.close(() => resolve()));
+    if (onShutdown) await onShutdown();
+  }
+
+  return {
+    httpServer,
+    sessions,
+    listen(port = config.port) {
+      return new Promise((resolve) => httpServer.listen(port, () => resolve(httpServer.address())));
+    },
+    shutdown,
+  };
+}
+
+function toolError(publicError) {
+  return { isError: true, content: [{ type: 'text', text: publicError.error.code }], structuredContent: publicError };
+}
