@@ -1,0 +1,89 @@
+name: Deploy verification
+
+# Operational (PR6) verification only: it builds the production image, proves the
+# container boots and serves health/readiness, and validates packaging. It does
+# not change or re-run the behavioral suites in ci.yml.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  remote-mcp-image:
+    name: Remote MCP image build + startup
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build production image
+        run: docker build -f noosphere-remote-mcp-server/Dockerfile -t noosphere-remote-mcp-server:ci .
+
+      - name: Confirm the image runs unprivileged
+        run: docker run --rm --entrypoint id noosphere-remote-mcp-server:ci | grep -q 'uid=1000(node)'
+
+      - name: Start container (in-memory smoke)
+        run: |
+          docker run -d --name noos-ci -p 8080:8080 \
+            -e NOOSPHERE_AUDIENCE=https://ci.example/project-memory \
+            -e NOOSPHERE_RESOURCE_METADATA_URL=https://ci.example/.well-known/oauth-protected-resource \
+            -e 'NOOSPHERE_OIDC_ISSUERS=[{"iss":"https://ci.example/","jwks_uri":"https://ci.example/jwks"}]' \
+            noosphere-remote-mcp-server:ci
+
+      - name: Wait for /healthz
+        run: |
+          for i in $(seq 1 30); do
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200" ]; then
+              echo "healthy after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "server never became healthy"; docker logs noos-ci; exit 1
+
+      - name: Verify readiness and the auth gate
+        run: |
+          set -e
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/readyz)" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8080/mcp)" = "401"
+
+      - name: Verify graceful shutdown (SIGTERM, no SIGKILL wait)
+        run: |
+          start=$(date +%s)
+          docker stop -t 15 noos-ci
+          took=$(( $(date +%s) - start ))
+          echo "stopped in ${took}s"
+          test "$took" -lt 10
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f noos-ci || true
+
+  packaging:
+    name: Remote MCP packaging validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: noosphere-remote-mcp-server
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: noosphere-remote-mcp-server/package-lock.json
+
+      - run: npm ci
+
+      # package.json and package-lock.json must be in sync (npm ci already fails
+      # otherwise) and the entrypoint must parse.
+      - run: node --check src/main.js
+
+      - run: npm audit --audit-level=high

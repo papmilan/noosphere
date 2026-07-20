@@ -4,15 +4,17 @@
   "private": true,
   "type": "module",
   "description": "Streamable HTTP MCP resource server for Noosphere Remote Project Memory (PR4).",
+  "bin": {
+    "noosphere-remote-mcp-server": "src/main.js"
+  },
   "scripts": {
-    "check": "node --check src/server.js && node --check src/mcp-core.js && node --check src/config.js && node --check src/logging.js",
+    "check": "node --check src/server.js && node --check src/mcp-core.js && node --check src/config.js && node --check src/logging.js && node --check src/main.js",
+    "start": "node src/main.js",
     "test": "npm run check && node --test tests/*.test.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@noosphere/remote-mcp-contracts": "file:../noosphere-remote-mcp"
-  },
-  "devDependencies": {
+    "@noosphere/remote-mcp-contracts": "file:../noosphere-remote-mcp",
     "jose": "^6.0.0"
   }
 }

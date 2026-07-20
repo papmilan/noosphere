@@ -1,0 +1,60 @@
+# systemd unit for the Noosphere Remote Project Memory HTTP server (standalone,
+# no container). Install to /etc/systemd/system/noosphere-remote-mcp.service.
+#
+# Assumes the three packages are deployed under /opt/noosphere (contracts,
+# postgres control plane, server) with production dependencies installed, and a
+# dedicated unprivileged `noosphere` user. See docs/remote-mcp/DEPLOYMENT.md.
+[Unit]
+Description=Noosphere Remote Project Memory MCP server
+Documentation=https://github.com/papmilan/noosphere
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=noosphere
+Group=noosphere
+WorkingDirectory=/opt/noosphere/noosphere-remote-mcp-server
+
+# Secrets and configuration live here (chmod 600, owned by the noosphere user).
+# Never place secrets in this unit file — it is world-readable.
+EnvironmentFile=/etc/noosphere/remote-mcp.env
+
+ExecStart=/usr/bin/node src/main.js
+
+# Graceful shutdown: main.js traps SIGTERM, drains sessions, closes the pg pool,
+# and exits 0. Give it room before systemd escalates to SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Restart on failure with backoff so a crash loop cannot hammer the database.
+Restart=on-failure
+RestartSec=5s
+
+# Logs go to the journal as structured JSON lines (NOOSPHERE_LOG=json).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=noosphere-remote-mcp
+
+# ---- Hardening (least privilege) ----
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+# The server writes nothing to disk; keep the whole filesystem read-only to it.
+ReadOnlyPaths=/opt/noosphere
+
+# ---- Resource limits ----
+LimitNOFILE=65536
+MemoryMax=512M
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target
