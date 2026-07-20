@@ -36,10 +36,19 @@ function idempotency(key, requestHash) {
 function revisionTwo(overrides = {}) {
   return validCheckpoint({
     id: 'chk_01j3bicycle_r2',
+    session_id: null,
     revision: 2,
     previous_checkpoint_id: 'chk_01j3bicycle',
     ...overrides,
   });
+}
+
+function checkpointWithoutSession(overrides = {}) {
+  return validCheckpoint({ session_id: null, ...overrides });
+}
+
+function projectedProject(project, checkpoint) {
+  return { ...project, latest_checkpoint_id: checkpoint.id };
 }
 
 function schemaAccepts(schema, value, root = schema) {
@@ -181,42 +190,49 @@ describe('public MCP schema hardening', () => {
 describe('in-memory repository hardening', () => {
   it('fails closed with a structured conflict when a checkpoint ID already exists', async () => {
     const repository = new InMemoryProjectMemoryRepository();
-    await repository.createProject({ ownerScope: ownerA, project: validProject() });
-    await repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: validCheckpoint(), idempotency: idempotency('one', 'hash-one') });
+    const project = validProject();
+    const checkpoint = checkpointWithoutSession();
+    await repository.createProject({ ownerScope: ownerA, project });
+    await repository.saveCheckpoint({ ownerScope: ownerA, checkpoint, project: projectedProject(project, checkpoint), idempotency: idempotency('one', 'hash-one') });
     await assert.rejects(
-      repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: validCheckpoint({ goal: 'Changed.' }), idempotency: idempotency('two', 'hash-two') }),
+      repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: { ...checkpoint, goal: 'Changed.' }, project: projectedProject(project, checkpoint), idempotency: idempotency('two', 'hash-two') }),
       (error) => error.code === 'checkpoint-conflict' && error.status === 409,
     );
   });
 
   it('requires a strictly linear, same-owner, same-project checkpoint predecessor', async () => {
     const repository = new InMemoryProjectMemoryRepository();
-    await repository.createProject({ ownerScope: ownerA, project: validProject() });
-    await repository.createProject({ ownerScope: ownerA, project: validProject({ id: 'prj_other', name: 'Other Project', normalized_name: 'other project' }) });
-    await repository.createProject({ ownerScope: ownerB, project: validProject() });
-    await repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: validCheckpoint(), idempotency: idempotency('one', 'hash-one') });
-    await repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: validCheckpoint({ id: 'chk_other', project_id: 'prj_other' }), idempotency: idempotency('other', 'hash-other') });
-    await repository.saveCheckpoint({ ownerScope: ownerB, checkpoint: validCheckpoint({ id: 'chk_owner_b' }), idempotency: idempotency('owner-b', 'hash-owner-b') });
+    const project = validProject();
+    const otherProject = validProject({ id: 'prj_other', name: 'Other Project', normalized_name: 'other project' });
+    const checkpoint = checkpointWithoutSession();
+    const otherCheckpoint = checkpointWithoutSession({ id: 'chk_other', project_id: 'prj_other' });
+    const ownerBCheckpoint = checkpointWithoutSession({ id: 'chk_owner_b' });
+    await repository.createProject({ ownerScope: ownerA, project });
+    await repository.createProject({ ownerScope: ownerA, project: otherProject });
+    await repository.createProject({ ownerScope: ownerB, project });
+    await repository.saveCheckpoint({ ownerScope: ownerA, checkpoint, project: projectedProject(project, checkpoint), idempotency: idempotency('one', 'hash-one') });
+    await repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: otherCheckpoint, project: projectedProject(otherProject, otherCheckpoint), idempotency: idempotency('other', 'hash-other') });
+    await repository.saveCheckpoint({ ownerScope: ownerB, checkpoint: ownerBCheckpoint, project: projectedProject(project, ownerBCheckpoint), idempotency: idempotency('owner-b', 'hash-owner-b') });
 
     await assert.rejects(
-      repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: revisionTwo({ previous_checkpoint_id: 'chk_missing' }), idempotency: idempotency('missing', 'hash-missing') }),
+      repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: revisionTwo({ previous_checkpoint_id: 'chk_missing' }), project: projectedProject(project, revisionTwo({ previous_checkpoint_id: 'chk_missing' })), idempotency: idempotency('missing', 'hash-missing') }),
       (error) => error.code === 'checkpoint-predecessor-not-found',
     );
     await assert.rejects(
-      repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: revisionTwo({ previous_checkpoint_id: 'chk_owner_b' }), idempotency: idempotency('cross-owner', 'hash-cross-owner') }),
+      repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: revisionTwo({ previous_checkpoint_id: 'chk_owner_b' }), project: projectedProject(project, revisionTwo({ previous_checkpoint_id: 'chk_owner_b' })), idempotency: idempotency('cross-owner', 'hash-cross-owner') }),
       (error) => error.code === 'checkpoint-predecessor-not-found',
     );
     await assert.rejects(
-      repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: revisionTwo({ previous_checkpoint_id: 'chk_other' }), idempotency: idempotency('cross-project', 'hash-cross-project') }),
-      (error) => error.code === 'checkpoint-predecessor-conflict',
+      repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: revisionTwo({ previous_checkpoint_id: 'chk_other' }), project: projectedProject(project, revisionTwo({ previous_checkpoint_id: 'chk_other' })), idempotency: idempotency('cross-project', 'hash-cross-project') }),
+      (error) => error.code === 'checkpoint-predecessor-not-found',
     );
     await assert.rejects(
-      repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: revisionTwo({ previous_checkpoint_id: 'chk_01j3bicycle', revision: 3 }), idempotency: idempotency('skipped', 'hash-skipped') }),
+      repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: revisionTwo({ previous_checkpoint_id: 'chk_01j3bicycle', revision: 3 }), project: projectedProject(project, revisionTwo({ previous_checkpoint_id: 'chk_01j3bicycle', revision: 3 })), idempotency: idempotency('skipped', 'hash-skipped') }),
       (error) => error.code === 'checkpoint-revision-conflict',
     );
-    await repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: revisionTwo(), idempotency: idempotency('two', 'hash-two') });
+    await repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: revisionTwo(), project: projectedProject(project, revisionTwo()), idempotency: idempotency('two', 'hash-two') });
     await assert.rejects(
-      repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: validCheckpoint({ id: 'chk_branch', revision: 2, previous_checkpoint_id: 'chk_01j3bicycle' }), idempotency: idempotency('branch', 'hash-branch') }),
+      repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: checkpointWithoutSession({ id: 'chk_branch', revision: 2, previous_checkpoint_id: 'chk_01j3bicycle' }), project: projectedProject(project, checkpointWithoutSession({ id: 'chk_branch', revision: 2, previous_checkpoint_id: 'chk_01j3bicycle' })), idempotency: idempotency('branch', 'hash-branch') }),
       (error) => error.code === 'checkpoint-predecessor-conflict',
     );
   });
@@ -248,13 +264,15 @@ describe('in-memory repository hardening', () => {
 
   it('updates the public project checkpoint head after every committed revision', async () => {
     const repository = new InMemoryProjectMemoryRepository();
-    await repository.createProject({ ownerScope: ownerA, project: validProject() });
-    await repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: validCheckpoint(), idempotency: idempotency('one', 'hash-one') });
+    const project = validProject();
+    const checkpoint = checkpointWithoutSession();
+    await repository.createProject({ ownerScope: ownerA, project });
+    await repository.saveCheckpoint({ ownerScope: ownerA, checkpoint, project: projectedProject(project, checkpoint), idempotency: idempotency('one', 'hash-one') });
     assert.equal((await repository.getProject({ ownerScope: ownerA, projectId: 'prj_01j3bicycle' })).latest_checkpoint_id, 'chk_01j3bicycle');
-    await repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: revisionTwo(), idempotency: idempotency('two', 'hash-two') });
-    const project = await repository.getProject({ ownerScope: ownerA, projectId: 'prj_01j3bicycle' });
-    assert.equal(project.latest_checkpoint_id, 'chk_01j3bicycle_r2');
-    assert.equal(project.updated_at, '2026-07-19T12:00:00.000Z');
-    assert.equal(project.last_activity_at, '2026-07-19T12:00:00.000Z');
+    await repository.saveCheckpoint({ ownerScope: ownerA, checkpoint: revisionTwo(), project: projectedProject(project, revisionTwo()), idempotency: idempotency('two', 'hash-two') });
+    const storedProject = await repository.getProject({ ownerScope: ownerA, projectId: 'prj_01j3bicycle' });
+    assert.equal(storedProject.latest_checkpoint_id, 'chk_01j3bicycle_r2');
+    assert.equal(storedProject.updated_at, '2026-07-19T12:00:00.000Z');
+    assert.equal(storedProject.last_activity_at, '2026-07-19T12:00:00.000Z');
   });
 });
