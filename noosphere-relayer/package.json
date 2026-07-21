@@ -10,7 +10,7 @@
     "dev": "node --watch index.js",
     "test": "node --experimental-vm-modules --test tests/*.test.js",
     "test:live": "node scripts/live-walrus-smoke.js",
-    "check": "node --check index.js && node --check memory.js && node --check local-memory.js && node --check walrus-memory.js && node --check durable-store.js && node --check durability.js && node --check security.js && node --check credentials.js && node --check local-projects.js && node --check acp-protocol.js && node --check snapshot-backend.js && node --check walrus-snapshot-backend.js && node --check exact-state.js && node --check exact-routes.js"
+    "check": "node --check index.js && node --check memory.js && node --check local-memory.js && node --check walrus-memory.js && node --check relayer-origins.js && node --check durable-store.js && node --check durability.js && node --check security.js && node --check credentials.js && node --check local-projects.js && node --check acp-protocol.js && node --check snapshot-backend.js && node --check walrus-snapshot-backend.js && node --check exact-state.js && node --check exact-routes.js"
   },
   "files": [
     "acp-protocol.js",
