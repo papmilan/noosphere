@@ -1,12 +1,15 @@
 # Remote Project Memory — Architecture overview
 
 An operator-facing map of the Remote MCP deployment: the packages, the request
-path, the trust boundaries, and where state lives. It describes the system as
-built (PR1–PR5/PR7); this PR added no components and changed no behavior.
+path, the trust boundaries, and where state lives. The service core, tool
+schemas, and MCP request/response behavior are unchanged from PR1–PR5/PR7; this
+PR (PR6) adds the production entrypoint (`src/main.js`), readiness/shutdown
+wiring, and deployment/packaging assets — production composition, not new
+protocol or business logic.
 
 ## Package layout
 
-```
+```text
 noosphere-remote-mcp            Contracts + Project Memory service core
   contracts/ core/ schemas/     Versioned tool schemas, validation, service
 noosphere-remote-mcp-postgres   Control-plane adapter
@@ -27,7 +30,7 @@ transport and identity model differ (see [`TRANSPORTS.md`](TRANSPORTS.md)).
 
 ## Request path (Remote HTTP)
 
-```
+```text
 Client ──HTTPS──> Reverse proxy ──HTTP──> Server (/mcp)
                                             │
                     1. Origin allowlist check (403 forbidden-origin)
@@ -60,8 +63,11 @@ before the auth gate and never touch tool logic.
 
 ## State & durability
 
-- **Server:** stateless. Open MCP sessions are in-memory only and are drained on
-  shutdown; losing them costs a reconnect, not data.
+- **Server:** durable data is entirely in PostgreSQL, but open MCP sessions are
+  **process-local, in-memory** state (no shared session store). They are drained
+  on shutdown; losing them costs a reconnect, not data. Because sessions are
+  process-local, multi-replica deployments need `Mcp-Session-Id` affinity — see
+  the multi-replica note in [`DEPLOYMENT.md`](DEPLOYMENT.md#1-docker-compose-recommended-reference).
 - **PostgreSQL:** the single durable store. Schema is versioned through the
   `schema_migrations` table and forward-only migrations.
 - **Local STDIO:** in-memory, ephemeral, single-user (PR7).
@@ -69,7 +75,10 @@ before the auth gate and never touch tool logic.
 ## Failure & recovery posture
 
 - A down database fails `/readyz` (503) while `/healthz` stays 200, so the load
-  balancer removes the instance without the supervisor killing it.
+  balancer removes the instance without the supervisor killing it. The readiness
+  query is bounded by a 3s timeout, so a hung (not merely refused) database
+  connection also degrades to 503 instead of hanging the probe; it recovers to
+  200 on the next successful check.
 - Startup misconfiguration fails fast with a specific code before the port binds.
 - Recovery is `pg_dump`/`pg_restore` of the control plane plus redeploying a
   matching server version — see [`OPERATIONS.md`](OPERATIONS.md).

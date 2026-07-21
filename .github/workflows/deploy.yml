@@ -19,6 +19,16 @@ jobs:
         with:
           persist-credentials: false
 
+      # Prove the documented Compose command parses end-to-end: the reference
+      # stack must be bootable straight from the example env via the exact
+      # `--env-file` invocation the docs give (interpolation guards resolve,
+      # server env_file exists). Uses placeholders only — no real credentials.
+      - name: Validate Compose config (documented env-file flow)
+        run: |
+          cp deploy/noosphere.env.example deploy/noosphere.env
+          docker compose --env-file deploy/noosphere.env -f deploy/docker-compose.yml config -q
+          rm -f deploy/noosphere.env
+
       - name: Build production image
         run: docker build -f noosphere-remote-mcp-server/Dockerfile -t noosphere-remote-mcp-server:ci .
 

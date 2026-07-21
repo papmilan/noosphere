@@ -5,8 +5,10 @@ OIDC-authenticated MCP server backed by PostgreSQL. It is a different subsystem
 from the single-user local relayer described in [`docs/DEPLOYMENT.md`](../DEPLOYMENT.md).
 
 > This is an **operational** guide. It changes no protocol, tool schema, or
-> business logic — it only describes how to run the software that PR1–PR5/PR7
-> already implemented. For the STDIO desktop transport see
+> business logic. PR6 adds the production entrypoint, readiness/shutdown wiring,
+> and the deployment/packaging assets described here (production composition);
+> the service core it runs was implemented in PR1–PR5/PR7. For the STDIO desktop
+> transport see
 > [`TRANSPORTS.md`](TRANSPORTS.md); for every environment variable see
 > [`CONFIGURATION.md`](CONFIGURATION.md).
 
@@ -18,9 +20,20 @@ from the single-user local relayer described in [`docs/DEPLOYMENT.md`](../DEPLOY
 | `noosphere-remote-mcp-postgres` | PostgreSQL control-plane repository, OIDC verifier, SQL migrations. |
 | `noosphere-remote-mcp-server` | Streamable HTTP MCP server + production entrypoint (`src/main.js`). |
 
-The server process is **stateless**: all durable state lives in PostgreSQL, so
-it is safe to restart or roll and (subject to a shared database) run more than
-one replica behind a load balancer.
+All **durable** state lives in PostgreSQL, so restarting or rolling a single
+server loses no data. **MCP session state, however, is process-local** — open
+sessions are held in the server's memory, not in a shared store (none is
+implemented). This has two consequences:
+
+- **Rolling restarts invalidate active sessions.** Clients reconnect; no data is
+  lost, but in-flight sessions end.
+- **Multiple replicas require session affinity.** Every request carrying a given
+  `Mcp-Session-Id` must be routed to the same instance (sticky sessions /
+  consistent hashing on that header). Load balancing without affinity will route
+  a follow-up request to a replica that has never seen the session and fail it.
+
+Run a single instance unless your load balancer enforces `Mcp-Session-Id`
+affinity. Transparent horizontal scaling is **not** currently supported.
 
 ## Supported deployment models
 
@@ -43,8 +56,18 @@ one replica behind a load balancer.
 ```sh
 cp deploy/noosphere.env.example deploy/noosphere.env
 # edit deploy/noosphere.env: audience, issuers, DATABASE_URL, POSTGRES_* ...
-docker compose -f deploy/docker-compose.yml up -d
+docker compose --env-file deploy/noosphere.env -f deploy/docker-compose.yml up -d
 ```
+
+> `--env-file deploy/noosphere.env` is required on **every** Compose command for
+> this stack. Compose evaluates the `${VAR:?}` guards during interpolation, which
+> reads only the `--env-file` (or project-directory `.env`) — not a service's
+> `env_file:`. Without it, `db`/`migrate` fail to start with `set … in
+> deploy/noosphere.env`. Validate first with:
+>
+> ```sh
+> docker compose --env-file deploy/noosphere.env -f deploy/docker-compose.yml config -q
+> ```
 
 The stack:
 

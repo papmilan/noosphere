@@ -5,7 +5,14 @@
 # This file commits NO secrets. Copy deploy/noosphere.env.example to
 # deploy/noosphere.env (git-ignored), fill in real values, then:
 #
-#   docker compose -f deploy/docker-compose.yml up -d
+#   docker compose --env-file deploy/noosphere.env -f deploy/docker-compose.yml up -d
+#
+# The `--env-file` flag is REQUIRED: Compose resolves the `${VAR:?}` guards below
+# during interpolation (before any service starts), and it only reads the file
+# named by `--env-file` (or the project-directory `.env`) for that — never a
+# service's `env_file:`. Omit it and `db`/`migrate` interpolation fails with the
+# "set … in deploy/noosphere.env" messages. The `server` service additionally
+# loads the same file via `env_file:` to inject NOOSPHERE_* into its container.
 #
 # TLS is terminated by a reverse proxy in front of this stack (see
 # docs/remote-mcp/DEPLOYMENT.md); the server itself speaks plain HTTP on the

@@ -61,15 +61,50 @@ container almost always means a config error — read the first log line.
 All durable state is in the control-plane database. Back it up with standard
 PostgreSQL tooling.
 
-**Backup:**
+Do **not** pass a credential-bearing `DATABASE_URL` (or `--dbname` with an
+embedded password) as a command-line argument — connection strings on the
+command line are visible to any local user through `ps`/process listings, which
+contradicts the handling required in [`CONFIGURATION.md`](CONFIGURATION.md).
+Supply the password out of band via a `.pgpass` file or the `PGPASSWORD`
+environment variable, and pass only non-secret connection parameters.
+
+**On a host with a `.pgpass` file** (one `hostname:port:database:username:password`
+line, mode **0600** — libpq refuses looser permissions):
+
 ```sh
-pg_dump --format=custom --no-owner "$DATABASE_URL" > noosphere-$(date +%F).dump
+# One-time setup, kept out of shell history:
+install -m 600 /dev/null ~/.pgpass
+printf 'db:5432:noosphere_project_memory:noosphere:REPLACE_ME_PASSWORD\n' >> ~/.pgpass
 ```
 
-**Restore** (into an empty database):
 ```sh
-pg_restore --clean --if-exists --no-owner --dbname "$DATABASE_URL" noosphere-YYYY-MM-DD.dump
+# Backup — password comes from ~/.pgpass, never the command line:
+pg_dump --format=custom --no-owner \
+  -h db -p 5432 -U noosphere -d noosphere_project_memory \
+  > "noosphere-$(date +%F).dump"
 ```
+
+```sh
+# Restore into an empty database (same ~/.pgpass):
+pg_restore --clean --if-exists --no-owner \
+  -h db -p 5432 -U noosphere -d noosphere_project_memory \
+  "noosphere-YYYY-MM-DD.dump"
+```
+
+**Inside the compose stack**, run from a one-off container so the secret stays in
+the container environment (`$POSTGRES_PASSWORD`, already loaded from the env
+file) and is never typed or placed in host argv:
+
+```sh
+docker compose --env-file deploy/noosphere.env -f deploy/docker-compose.yml \
+  run --rm --no-deps -T db \
+  sh -lc 'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump --format=custom --no-owner \
+    -h db -U "$POSTGRES_USER" -d "$POSTGRES_DB"' > "noosphere-$(date +%F).dump"
+```
+
+`PGPASSWORD` is an environment variable inside the container, not a command
+argument, so it does not appear in host process listings. **A dump contains all
+project data — store dumps encrypted and access-controlled.**
 
 Take backups on a schedule and before every upgrade. Owner-scoped export/delete
 jobs also exist in the repository layer for per-owner data-subject requests
@@ -97,8 +132,10 @@ by `node migrate.js`:
    DATABASE_URL=... node noosphere-remote-mcp-postgres/migrate.js
    ```
    (The compose stack's `migrate` one-shot does this automatically on `up`.)
-4. Roll the server (`docker compose up -d` / `systemctl restart`). The server is
-   stateless, so a restart loses no data.
+4. Roll the server (`docker compose --env-file deploy/noosphere.env -f deploy/docker-compose.yml up -d`
+   / `systemctl restart`). Durable data survives a restart; in-flight MCP sessions
+   do not (they are process-local — see the multi-replica note in
+   [`DEPLOYMENT.md`](DEPLOYMENT.md#1-docker-compose-recommended-reference)).
 5. Confirm `/readyz` is 200 and watch logs for the `listening` line.
 
 ## Rollback guidance

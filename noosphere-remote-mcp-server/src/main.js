@@ -148,11 +148,20 @@ export function parseServerEnv(env = process.env) {
   return options;
 }
 
+// Default upper bound on a single /readyz database probe. Conservative for a
+// local, in-cluster health check: long enough to ride out a brief hiccup, short
+// enough that a hung connection degrades to 503 well inside a typical 10s
+// health-check timeout. Overridable only as a test seam, not user config.
+export const READINESS_TIMEOUT_MS = 3000;
+
 // Turn parsed options into the concrete collaborators createMcpServer needs.
 // Builds lazy JWKS resolvers (no network yet), the OIDC verifier, the config,
 // and either the PostgreSQL or in-memory repository plus a matching readiness
 // probe and shutdown hook.
-export function buildServerOptions(options, { logger = () => {}, createPool: makePool = createPool } = {}) {
+export function buildServerOptions(
+  options,
+  { logger = () => {}, createPool: makePool = createPool, readinessTimeoutMs = READINESS_TIMEOUT_MS } = {},
+) {
   const verifierIssuers = {};
   const configIssuers = {};
   for (const { iss, jwksUri } of options.issuers) {
@@ -196,14 +205,38 @@ export function buildServerOptions(options, { logger = () => {}, createPool: mak
     pool,
     quota: options.projectsPerOwner !== null ? { projectsPerOwner: options.projectsPerOwner } : undefined,
   });
-  // Readiness is true only when the control-plane database answers a trivial query.
-  const readinessCheck = async () => {
+  // Readiness is true only when the control-plane database answers a trivial
+  // query within readinessTimeoutMs. A hung connection (DB reachable at the TCP
+  // level but not answering) must degrade to 503 rather than block /readyz
+  // forever, so the query races a timer. The query promise is normalized with
+  // .then(ok, err) so a late settlement after the timeout can never surface as
+  // an unhandled rejection, and the timer is always cleared. A single-flight
+  // guard collapses concurrent probes onto one in-flight check so a stalled DB
+  // cannot pile up overlapping queries.
+  // ponytail: pg has no mid-flight cancel here, so a probe that times out leaves
+  // its one query pending until the pool client settles; with serial ~30s probes
+  // and single-flight that is at most one dangling query per interval. Add a
+  // pool-level statement_timeout only if that ever proves to matter.
+  let readinessInFlight = null;
+  const runReadinessProbe = async () => {
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), readinessTimeoutMs);
+    });
+    const query = pool.query('select 1').then(() => 'ok', () => 'error');
     try {
-      await pool.query('select 1');
-      return true;
-    } catch {
-      return false;
+      const outcome = await Promise.race([query, timeout]);
+      if (outcome === 'timeout') logger({ event: 'readiness-timeout', timeoutMs: readinessTimeoutMs });
+      return outcome === 'ok';
+    } finally {
+      clearTimeout(timer);
     }
+  };
+  const readinessCheck = () => {
+    if (!readinessInFlight) {
+      readinessInFlight = runReadinessProbe().finally(() => { readinessInFlight = null; });
+    }
+    return readinessInFlight;
   };
   return { config, verifier, repository, readinessCheck, onShutdown: async () => { await pool.end(); } };
 }
