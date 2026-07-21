@@ -62,10 +62,12 @@ export function isLoopbackOrigin(input) {
   }
   // WHATWG URL keeps IPv6 brackets in .hostname (e.g. "[::1]"); strip them.
   hostname = hostname.replace(/^\[/, '').replace(/\]$/, '');
-  // Match localhost, the 127.0.0.0/8 block, and ::1.
+  // Match localhost, the 127.0.0.0/8 block, and ::1. Deliberately NOT 0.0.0.0:
+  // that is the unspecified address (RFC 1122), not loopback, and is not a
+  // legitimate relayer target — dev uses 127.0.0.1/localhost. Excluding it keeps
+  // the HTTP-without-approval grant to true loopback only.
   if (hostname === 'localhost' || hostname === '::1') return true;
   if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
-  if (hostname === '0.0.0.0') return true;
   return false;
 }
 

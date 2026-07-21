@@ -168,3 +168,78 @@ test('MIGRATION: existing configs on the shipped default relayer keep working', 
   assert.doesNotThrow(() => adapter.getClient());
   assert.equal(created, true);
 });
+
+// ---- F3: adversarial normalization regressions ---------------------------
+// Each asserts the authorization outcome (allow vs which deny code), not just
+// the normalized string, so a normalization regression that changed trust is
+// caught.
+
+const BUILTIN = 'https://relayer.memory.walrus.xyz';
+
+test('adversarial: an explicit default :443 on a built-in still matches (same origin)', () => {
+  const home = tempHome();
+  assert.equal(
+    assertApprovedRelayerOrigin(`${BUILTIN}:443`, { builtinOrigins: BUILTINS, home }),
+    BUILTIN,
+  );
+});
+
+test('adversarial: a trailing-dot FQDN is a DIFFERENT origin and is not approved', () => {
+  const home = tempHome();
+  assert.equal(normalizeOrigin(`${BUILTIN}.`), `${BUILTIN}.`);
+  assert.throws(
+    () => assertApprovedRelayerOrigin(`${BUILTIN}.`, { builtinOrigins: BUILTINS, home }),
+    hasCode('relayer-origin-not-approved'),
+  );
+});
+
+test('adversarial: a path/traversal on a built-in does not change the approved origin', () => {
+  const home = tempHome();
+  assert.equal(normalizeOrigin(`${BUILTIN}/../../evil?x=1#f`), BUILTIN);
+  assert.equal(assertApprovedRelayerOrigin(`${BUILTIN}/../../evil`, { builtinOrigins: BUILTINS, home }), BUILTIN);
+});
+
+test('adversarial: decimal and hex IPv4 that canonicalize to 127.0.0.1 are loopback', () => {
+  const home = tempHome();
+  assert.equal(isLoopbackOrigin('http://2130706433'), true); // decimal 127.0.0.1
+  assert.equal(isLoopbackOrigin('http://0x7f000001'), true); // hex 127.0.0.1
+  assert.equal(assertApprovedRelayerOrigin('http://2130706433', { builtinOrigins: BUILTINS, home }), 'http://127.0.0.1');
+  assert.equal(assertApprovedRelayerOrigin('http://0x7f000001', { builtinOrigins: BUILTINS, home }), 'http://127.0.0.1');
+});
+
+test('adversarial: IPv4-mapped IPv6 loopback is NOT auto-trusted (requires https+approval)', () => {
+  const home = tempHome();
+  assert.equal(isLoopbackOrigin('http://[::ffff:127.0.0.1]'), false);
+  assert.throws(
+    () => assertApprovedRelayerOrigin('http://[::ffff:127.0.0.1]', { builtinOrigins: BUILTINS, home }),
+    hasCode('relayer-origin-insecure'),
+  );
+});
+
+test('adversarial: punycode and a Unicode-confusable host resolve to distinct, unapproved origins', () => {
+  const home = tempHome();
+  // Cyrillic "а" (U+0430) IDNA-maps to the same punycode as the explicit xn-- form,
+  // and neither equals the latin builtin — so a homograph cannot borrow trust.
+  assert.equal(normalizeOrigin('https://аpple.com'), 'https://xn--pple-43d.com');
+  assert.equal(normalizeOrigin('https://xn--pple-43d.com'), 'https://xn--pple-43d.com');
+  assert.throws(
+    () => assertApprovedRelayerOrigin('https://аpple.com', { builtinOrigins: BUILTINS, home }),
+    hasCode('relayer-origin-not-approved'),
+  );
+});
+
+test('adversarial: normalization is idempotent (stable under repeated application)', () => {
+  for (const u of [`${BUILTIN}:443/x?q#f`, 'http://2130706433', 'https://аpple.com', 'http://[::1]:80']) {
+    const once = normalizeOrigin(u);
+    assert.equal(normalizeOrigin(once), once, `normalize not stable for ${u}`);
+  }
+});
+
+test('F2 regression: 0.0.0.0 (unspecified, not loopback) is not auto-trusted over HTTP', () => {
+  const home = tempHome();
+  assert.equal(isLoopbackOrigin('http://0.0.0.0'), false);
+  assert.throws(
+    () => assertApprovedRelayerOrigin('http://0.0.0.0', { builtinOrigins: BUILTINS, home }),
+    hasCode('relayer-origin-insecure'),
+  );
+});
