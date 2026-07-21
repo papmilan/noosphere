@@ -13,6 +13,10 @@ tests/.tmp-*
 .env
 .env.local
 .env.*.local
+# Deployment secrets (only the *.example templates are tracked)
+deploy/noosphere.env
+deploy/**/*.env
+!deploy/**/*.env.example
 
 # macOS
 .DS_Store

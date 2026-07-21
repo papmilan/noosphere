@@ -1,0 +1,99 @@
+# Reference production deployment for Noosphere Remote Project Memory.
+#
+#   Remote MCP HTTP server + PostgreSQL control plane + one-shot migration.
+#
+# This file commits NO secrets. Copy deploy/noosphere.env.example to
+# deploy/noosphere.env (git-ignored), fill in real values, then:
+#
+#   docker compose --env-file deploy/noosphere.env -f deploy/docker-compose.yml up -d
+#
+# The `--env-file` flag is REQUIRED: Compose resolves the `${VAR:?}` guards below
+# during interpolation (before any service starts), and it only reads the file
+# named by `--env-file` (or the project-directory `.env`) for that — never a
+# service's `env_file:`. Omit it and `db`/`migrate` interpolation fails with the
+# "set … in deploy/noosphere.env" messages. The `server` service additionally
+# loads the same file via `env_file:` to inject NOOSPHERE_* into its container.
+#
+# TLS is terminated by a reverse proxy in front of this stack (see
+# docs/remote-mcp/DEPLOYMENT.md); the server itself speaks plain HTTP on the
+# internal edge network only.
+name: noosphere-remote-mcp
+
+networks:
+  # Public-facing path (attach your reverse proxy here). The database is NOT on
+  # this network, so it is unreachable from the edge.
+  edge:
+  # Server <-> database only. `internal: true` gives it no route to the host or
+  # the internet.
+  backplane:
+    internal: true
+
+volumes:
+  pgdata:
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in deploy/noosphere.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/noosphere.env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in deploy/noosphere.env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - backplane
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One-shot: applies pending SQL migrations, then exits. `up` waits for it to
+  # complete before starting the server. Safe to re-run (idempotent, advisory-locked).
+  migrate:
+    build:
+      context: ..
+      dockerfile: noosphere-remote-mcp-server/Dockerfile
+    image: noosphere-remote-mcp-server:latest
+    restart: "no"
+    command: ["node", "../noosphere-remote-mcp-postgres/migrate.js"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in deploy/noosphere.env}
+    networks:
+      - backplane
+    depends_on:
+      db:
+        condition: service_healthy
+
+  server:
+    build:
+      context: ..
+      dockerfile: noosphere-remote-mcp-server/Dockerfile
+    image: noosphere-remote-mcp-server:latest
+    restart: unless-stopped
+    env_file:
+      - ./noosphere.env
+    ports:
+      # Bind to loopback; the reverse proxy (TLS) forwards to it. Do not publish
+      # 0.0.0.0 unless the proxy runs on another host on the edge network.
+      - "127.0.0.1:8080:8080"
+    networks:
+      - edge
+      - backplane
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Readiness-gated: the compose health status tracks /readyz (database
+    # reachable), matching the readiness guidance in the ops docs. The image's
+    # own Dockerfile HEALTHCHECK uses /healthz (process liveness) — the two are a
+    # deliberate split: liveness for "is the process up", readiness for "should it
+    # take traffic".
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3

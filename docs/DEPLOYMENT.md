@@ -1,5 +1,10 @@
 # Noosphere deployment
 
+> **Scope:** this document covers the single-user **local relayer / companion**
+> service (local files or Walrus Memory). For the multi-user, OIDC-authenticated
+> **Remote Project Memory MCP server** (PostgreSQL-backed) and its Docker /
+> compose / systemd assets, see [`docs/remote-mcp/`](remote-mcp/README.md).
+
 Noosphere is designed primarily as a single-user local companion service. The
 default listener is `127.0.0.1:3001`, and local project-management endpoints
 are unavailable to non-loopback clients.

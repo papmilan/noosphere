@@ -1,0 +1,26 @@
+# Root build context is used by noosphere-remote-mcp-server/Dockerfile, which
+# needs the three Remote Project Memory packages (contracts, postgres control
+# plane, HTTP server) but nothing else in the monorepo.
+**/._*
+._*
+**/.DS_Store
+.DS_Store
+**/node_modules
+**/tests
+.git
+.github
+.noosphere
+.claude
+.claude-flow
+.cursor
+.serena
+docs
+scripts
+unused
+*.png
+*.md
+noosphere-acp-protocol
+noosphere-mcp
+noosphere-local-mcp
+noosphere-relayer
+noosphere-remote-mcp-acceptance
