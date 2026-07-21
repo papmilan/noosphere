@@ -140,7 +140,8 @@ test('bounded concurrency: a sustained hang uses exactly ONE underlying query un
       for (let i = 0; i < 8; i += 1) {
         assert.equal((await status(baseUrl, '/readyz')).status, 503);
       }
-      await Promise.all(Array.from({ length: 6 }, () => status(baseUrl, '/readyz')));
+      const concurrentResults = await Promise.all(Array.from({ length: 6 }, () => status(baseUrl, '/readyz')));
+      assert.ok(concurrentResults.every((r) => r.status === 503), 'concurrent probes during a hang must all be 503');
       assert.equal(calls, 1, `exactly one underlying query during the hang, saw ${calls}`);
       assert.equal((await status(baseUrl, '/healthz')).status, 200);
 

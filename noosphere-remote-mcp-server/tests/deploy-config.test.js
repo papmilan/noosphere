@@ -22,17 +22,22 @@ const DOCS = [
 const COMPOSE_CMD = /docker compose\b[^\n]*-f deploy\/docker-compose\.yml[^\n]*/g;
 
 test('every documented deploy-stack compose command uses --env-file deploy/noosphere.env', () => {
-  let checked = 0;
+  const checkedByDoc = new Map();
   for (const rel of DOCS) {
     const text = readFileSync(join(repoRoot, rel), 'utf8');
-    for (const match of text.matchAll(COMPOSE_CMD)) {
-      checked += 1;
+    // Join shell line-continuations so a command split across lines is scanned whole.
+    const normalized = text.replace(/\\\r?\n[ \t]*/g, ' ');
+    for (const match of normalized.matchAll(COMPOSE_CMD)) {
+      checkedByDoc.set(rel, (checkedByDoc.get(rel) ?? 0) + 1);
       assert.ok(
         match[0].includes('--env-file deploy/noosphere.env'),
         `${rel}: compose command missing "--env-file deploy/noosphere.env":\n  ${match[0]}`,
       );
     }
   }
-  // Guard against the regex silently matching nothing (e.g. a path rename).
-  assert.ok(checked >= 2, `expected to find documented compose commands, found ${checked}`);
+  // Every listed source must contribute at least one match, so a path rename or
+  // silent regex miss in any single file fails the guard (not masked by others).
+  for (const rel of DOCS) {
+    assert.ok(checkedByDoc.has(rel), `${rel}: expected at least one documented compose command`);
+  }
 });
