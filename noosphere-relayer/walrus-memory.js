@@ -1,9 +1,11 @@
+import os from 'node:os';
 import { delegateKeyToPublicKey, MemWal } from '@mysten-incubation/memwal';
 import {
   getJsonRpcFullnodeUrl,
   SuiJsonRpcClient,
 } from '@mysten/sui/jsonRpc';
 import { loadCredentialsIntoEnv } from './credentials.js';
+import { assertApprovedRelayerOrigin } from './relayer-origins.js';
 
 loadCredentialsIntoEnv();
 
@@ -25,11 +27,14 @@ export const WALRUS_NETWORKS = {
 };
 
 export class WalrusMemoryAdapter {
-  constructor(env = process.env) {
+  constructor(env = process.env, { home = os.homedir(), createClient } = {}) {
     this.env = env;
     this.config = resolveWalrusConfig(env);
     this.client = null;
     this.accountValidation = null;
+    this.home = home;
+    // Seam so the origin gate can be exercised without the real SDK/network.
+    this.createClient = createClient ?? ((options) => MemWal.create(options));
   }
 
   async health() {
@@ -86,8 +91,15 @@ export class WalrusMemoryAdapter {
 
   getClient() {
     this.assertConfigured();
+    // SEC-01: the credential-bearing client may only be created for an approved
+    // origin. This throws BEFORE createClient, so the private key is never sent
+    // to an origin a tracked project config silently selected.
+    assertApprovedRelayerOrigin(this.config.relayerUrl, {
+      builtinOrigins: Object.values(WALRUS_NETWORKS).map((n) => n.relayerUrl),
+      home: this.home,
+    });
     if (!this.client) {
-      this.client = MemWal.create({
+      this.client = this.createClient({
         key: this.config.privateKey,
         accountId: this.config.accountId,
         serverUrl: this.config.relayerUrl,
