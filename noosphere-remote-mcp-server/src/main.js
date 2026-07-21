@@ -207,36 +207,39 @@ export function buildServerOptions(
   });
   // Readiness is true only when the control-plane database answers a trivial
   // query within readinessTimeoutMs. A hung connection (DB reachable at the TCP
-  // level but not answering) must degrade to 503 rather than block /readyz
-  // forever, so the query races a timer. The query promise is normalized with
-  // .then(ok, err) so a late settlement after the timeout can never surface as
-  // an unhandled rejection, and the timer is always cleared. A single-flight
-  // guard collapses concurrent probes onto one in-flight check so a stalled DB
-  // cannot pile up overlapping queries.
-  // ponytail: pg has no mid-flight cancel here, so a probe that times out leaves
-  // its one query pending until the pool client settles; with serial ~30s probes
-  // and single-flight that is at most one dangling query per interval. Add a
-  // pool-level statement_timeout only if that ever proves to matter.
-  let readinessInFlight = null;
-  const runReadinessProbe = async () => {
+  // level but not answering) must degrade /readyz to 503 without (a) blocking the
+  // probe forever or (b) piling up queries against a stalled pool.
+  //
+  // The guard is the *underlying query*, not the probe: `pendingQuery` holds the
+  // single in-flight `select 1` and is cleared only when that query itself
+  // settles. Each call races that one shared query against its own timer. A
+  // timed-out probe returns 503 but leaves the query in flight and starts NO new
+  // query, so at most one `select 1` is ever outstanding, no matter how many
+  // probes arrive during the hang (pg offers no mid-flight cancel, so bounding
+  // the *count* is the correct guarantee). When the query finally settles the
+  // guard clears and the next probe starts a fresh query, so readiness recovers.
+  // The query is normalized with .then(ok, err) so a late settlement after a
+  // timeout can never surface as an unhandled rejection, and every timer is
+  // cleared on its own path.
+  let pendingQuery = null;
+  const readinessCheck = async () => {
+    if (!pendingQuery) {
+      const query = pool.query('select 1').then(() => 'ok', () => 'error');
+      query.finally(() => { pendingQuery = null; });
+      pendingQuery = query;
+    }
+    const current = pendingQuery;
     let timer;
     const timeout = new Promise((resolve) => {
       timer = setTimeout(() => resolve('timeout'), readinessTimeoutMs);
     });
-    const query = pool.query('select 1').then(() => 'ok', () => 'error');
     try {
-      const outcome = await Promise.race([query, timeout]);
+      const outcome = await Promise.race([current, timeout]);
       if (outcome === 'timeout') logger({ event: 'readiness-timeout', timeoutMs: readinessTimeoutMs });
       return outcome === 'ok';
     } finally {
       clearTimeout(timer);
     }
-  };
-  const readinessCheck = () => {
-    if (!readinessInFlight) {
-      readinessInFlight = runReadinessProbe().finally(() => { readinessInFlight = null; });
-    }
-    return readinessInFlight;
   };
   return { config, verifier, repository, readinessCheck, onShutdown: async () => { await pool.end(); } };
 }
