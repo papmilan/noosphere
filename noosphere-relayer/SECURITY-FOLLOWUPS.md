@@ -63,9 +63,51 @@ not let tracked project config select a destination, which is the SEC-01 threat.
 hosts that resolve to private ranges — a networking-layer change orthogonal to the
 origin-approval boundary. Track alongside SEC-01b as public-release hardening.
 
+## SEC-03 — filesystem boundary coverage inventory
+
+All state stores route filesystem access through the single boundary in
+`secure-fs.js` (`ensureContainedDir` / `ensureRealDirectoryPath` for directories,
+`writeFileNoFollowSync` / `readFileNoFollowSync` / `readContainedStateFile` for
+files). Coverage after SEC-03 increment 2:
+
+| Store / path | Write path | Read path |
+| --- | --- | --- |
+| Snapshot backend (`snapshot-backend.js`, ACP Project + Execution **state bytes**) | `ensureContainedDirFor` + O_EXCL temp + non-following rename | `readSnapshotNoFollow` (O_NOFOLLOW) |
+| `DurableStore` (`durable-store.js`, ACP exact-state **index** / receipts / pending) | `ensureRealDirectoryPath` + non-following rename | `readContainedStateFile` (dir-validated + O_NOFOLLOW) — **secured in this increment** |
+| `LocalMemoryStore` (`local-memory.js`, local memory) | `ensureRealDirectoryPath` + non-following rename | `readContainedStateFile` — **secured in this increment** |
+| Fallback credentials (`credentials.js`) | `writeFileNoFollowSync` | `readFileNoFollowSync` |
+| Approved relayer origins (`relayer-origins.js`) | owner-managed | `readFileNoFollowSync` |
+
+**Correction to the increment-1 inventory.** Increment 1 stated the ACP
+project/execution state was contained once the snapshot backend was hardened.
+That was incomplete: the authoritative exact-state *index* persists via
+`DurableStore`, whose `load()` used a follow-prone read with no directory
+validation, so a pre-planted symlink at `NOOSPHERE_STATE_PATH` redirected the read
+to an outside file (reproduced — outside contents were ingested as state). The
+same defect existed in `LocalMemoryStore.load()`. Both read paths are closed in
+this increment and now match their already-hardened write paths.
+
+### Still open (SEC-03 remains open)
+
+- **Windows junctions / reparse points.** `O_NOFOLLOW` is a POSIX-only flag
+  (`fs.constants.O_NOFOLLOW` is `0` on Windows), and `lstat().isSymbolicLink()`
+  does not reliably classify directory junctions or reparse points. On Windows the
+  no-follow reads degrade to follow-prone and the directory-component check is
+  weaker. **This keeps SEC-03 open.** Not addressed in this increment.
+- **TOCTOU / no `openat`.** Directory containment is validated by path, then the
+  file is written by path; Node has no `openat`/dir-fd write, so a concurrent local
+  attacker who swaps a validated directory for a symlink between the check and the
+  write can still escape. Requires an active local race with write access to the
+  root's parent — not reachable by the static cloned-repo attacker. Removing the
+  redundant `mkdir` in `atomicOwnerOnlyWrite` narrows but does not close the window.
+- **Operator-controlled roots.** An operator who points `NOOSPHERE_STATE_PATH` /
+  `NOOSPHERE_SNAPSHOT_PATH` / `LOCAL_MEMORY_PATH` through a tree they themselves
+  made a symlink is trusting their own configuration; this is operator trust, not
+  the repository-controlled threat, and is out of SEC-03 scope.
+
 ## Scope note
 
-SEC-03 (filesystem symlink/path escape across the remaining state stores) and
-SEC-05 (semantic-memory prompt/control injection) remain **open** and are not
-addressed by the SEC-01 work. Per the security mandate, the repository is not
-public-ready while SEC-03 remains open.
+SEC-03 remains **open** until the Windows junction/reparse-point work is complete.
+SEC-05 (semantic-memory prompt/control injection) remains **open** and is not
+addressed here. Per the security mandate, the repository is not public-ready while
+SEC-03 remains open.
