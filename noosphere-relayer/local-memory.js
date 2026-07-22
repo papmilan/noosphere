@@ -1,11 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import {
-  readFile,
   rename,
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
-import { ensureRealDirectoryPath } from './secure-fs.js';
+import { PathBoundaryError, ensureRealDirectoryPath, readContainedStateFile } from './secure-fs.js';
 
 export class LocalMemoryStore {
   constructor(env, { defaultPath }) {
@@ -74,17 +73,26 @@ export class LocalMemoryStore {
     this.loaded = true;
     if (!this.persistent) return;
 
+    let raw;
     try {
-      const stored = JSON.parse(await readFile(this.filePath, 'utf8'));
+      // SEC-03: read through the same trust boundary writeToDisk() uses — reject a
+      // symlinked directory/file and never follow one outside the root.
+      raw = await readContainedStateFile(this.filePath);
+    } catch (error) {
+      if (error instanceof PathBoundaryError) throw error; // fail closed on symlink
+      console.warn(`[memory] Could not load local memory: ${error.message}`);
+      return;
+    }
+    if (raw === null) return;
+    try {
+      const stored = JSON.parse(raw);
       for (const [projectId, memories] of Object.entries(
         stored.projects || {},
       )) {
         this.memories.set(projectId, memories);
       }
     } catch (error) {
-      if (error.code !== 'ENOENT') {
-        console.warn(`[memory] Could not load local memory: ${error.message}`);
-      }
+      console.warn(`[memory] Could not load local memory: ${error.message}`);
     }
   }
 

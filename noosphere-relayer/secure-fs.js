@@ -174,3 +174,13 @@ export function readFileNoFollowSync(file) {
     fs.closeSync(fd);
   }
 }
+
+// SEC-03: read a state-store file through the same trust boundary its writer uses.
+// Rejects a symlinked containing directory (state-dir-symlink) and a symlinked
+// final file (state-file-symlink), then reads without following. Returns the file
+// contents (utf8) or null when the file/dir is absent, so a fresh store still
+// starts empty. Never creates directories — load is a read, not a write.
+export async function readContainedStateFile(file) {
+  await assertRealDirectory(path.dirname(file));
+  return readFileNoFollowSync(file);
+}
