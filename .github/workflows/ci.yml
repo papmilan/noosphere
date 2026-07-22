@@ -39,6 +39,18 @@ jobs:
         run: npm ci
 
       - run: npm run check
+
+      # SEC-03: the relayer security suite (symlink/junction/reparse containment)
+      # must actually execute on every OS — especially windows-latest, where the
+      # junction tests are the only evidence that reparse-point containment holds.
+      # A skipped or unrun security test is not evidence of closure. Scoped to the
+      # security suite: the full relayer suite has pre-existing, non-security Windows
+      # failures (POSIX 0o600 mode not enforceable on Windows; local-projects boots
+      # noosphere-mcp whose workspace deps this job does not install) that are out of
+      # SEC-03 scope and tracked separately.
+      - if: matrix.package == 'noosphere-relayer'
+        run: npm run test:security
+
       - run: npm audit --audit-level=high
 
   project-memory-postgres:

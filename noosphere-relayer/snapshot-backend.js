@@ -12,6 +12,19 @@ const NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
 // Buffer, null on ENOENT, or throws a fail-closed error if the path is a symlink
 // (an attacker-planted link must never redirect a read outside the root).
 function readSnapshotNoFollow(target) {
+  // SEC-03 (Windows): O_NOFOLLOW is a no-op when unavailable (NOFOLLOW === 0), so
+  // reject a reparse final component with an explicit lstat pre-check there. On
+  // POSIX the O_NOFOLLOW open is authoritative and this is skipped.
+  if (NOFOLLOW === 0) {
+    let info;
+    try {
+      info = fs.lstatSync(target);
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    }
+    if (info.isSymbolicLink()) throw exactError('snapshot-path-symlink', 409);
+  }
   let fd;
   try {
     fd = fs.openSync(target, fs.constants.O_RDONLY | NOFOLLOW);
