@@ -28,8 +28,6 @@ const protocolRoot = path.join(repositoryRoot, 'noosphere-acp-protocol');
 
 describe('published package distribution', () => {
   it('installs from packed artifacts without repository-only files', async () => {
-    if (process.platform === 'win32') return;
-
     const temporaryRoot = await mkdtemp(
       path.join(os.tmpdir(), 'noosphere-distribution-'),
     );
@@ -122,8 +120,10 @@ describe('published package distribution', () => {
             ...process.env,
             HOME: fakeHome,
             NOOSPHERE_HOME: noosphereHome,
-            NOOSPHERE_TEST_PLATFORM: 'linux',
+            NOOSPHERE_TEST_PLATFORM: process.platform,
             NOOSPHERE_SKIP_SYSTEMCTL: '1',
+            NOOSPHERE_SKIP_LAUNCHCTL: '1',
+            NOOSPHERE_SKIP_SCHTASKS: '1',
             NOOSPHERE_SKIP_CLAUDE_HOOK: '1',
             XDG_CONFIG_HOME: path.join(fakeHome, '.config'),
           },
@@ -165,6 +165,29 @@ describe('published package distribution', () => {
         '--input-type=module', '-e',
         "await import('./continuity/secure-fs.js'); await import('@noosphere/secure-fs');",
       ], { cwd: installedMcp, maxBuffer: 2_000_000 });
+      const helperResult = JSON.parse((await execFileAsync(process.execPath, [
+        '--input-type=module', '-e', installedHelperProbe(),
+      ], {
+        cwd: installedMcp,
+        env: {
+          ...process.env,
+          NOOSPHERE_HELPER_TEST_ROOT: path.join(fakeHome, 'installed-helper'),
+        },
+        maxBuffer: 2_000_000,
+      })).stdout);
+      assert.equal(helperResult.value, 'installed-runtime-secret');
+      assert.ok(helperResult.jsPath.startsWith(installedMcp));
+      assert.ok(helperResult.helperPath.startsWith(installedMcp));
+      assert.equal(helperResult.jsPath.includes(unavailableSource), false);
+      assert.equal(helperResult.helperPath.includes(unavailableSource), false);
+      if (process.platform === 'win32') {
+        assert.deepEqual(
+          helperResult.sids.sort(),
+          [helperResult.currentSid, 'S-1-5-18', 'S-1-5-32-544'].sort(),
+        );
+      } else {
+        assert.deepEqual(helperResult.sids, []);
+      }
       const { stdout: help } = await execFileAsync(
         process.execPath,
         [path.join(installedMcp, 'continuity', 'index.js'), 'help'],
@@ -177,6 +200,39 @@ describe('published package distribution', () => {
     }
   });
 });
+
+function installedHelperProbe() {
+  return `
+    import { fileURLToPath } from 'node:url';
+    import path from 'node:path';
+    import { mkdir, rm } from 'node:fs/promises';
+    import {
+      atomicOwnerOnlyWrite,
+      currentWindowsSid,
+      readOwnerOnlyFile,
+      verifyOwnerOnlyWindows,
+    } from '@noosphere/secure-fs';
+    const root = process.env.NOOSPHERE_HELPER_TEST_ROOT;
+    const file = path.join(root, 'sensitive.txt');
+    await rm(root, { recursive: true, force: true });
+    await mkdir(root, { recursive: true });
+    try {
+      await atomicOwnerOnlyWrite(file, 'installed-runtime-secret', { root });
+      const value = (await readOwnerOnlyFile(file, { root })).toString();
+      const jsPath = fileURLToPath(import.meta.resolve('@noosphere/secure-fs'));
+      const helperPath = path.join(path.dirname(jsPath), 'windows-owner-only.ps1');
+      console.log(JSON.stringify({
+        currentSid: currentWindowsSid(),
+        helperPath,
+        jsPath,
+        sids: verifyOwnerOnlyWindows(file),
+        value,
+      }));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  `;
+}
 
 async function startInstalledRelayer(installedRelayer, fakeHome) {
   const child = spawn(process.execPath, ['index.js'], {
