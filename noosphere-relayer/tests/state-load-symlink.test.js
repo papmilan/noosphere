@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import { DurableStore } from '../durable-store.js';
 import { LocalMemoryStore } from '../local-memory.js';
+import { CredentialStore } from '../credentials.js';
 import { ensureRealDirectoryPath, readContainedStateFile } from '../secure-fs.js';
 
 // SEC-03 increment 2: the state-index load reads (DurableStore.load,
@@ -165,4 +166,57 @@ test('SEC-03: legitimate NESTED real directories still load and round-trip', asy
   await seed.complete('job-nested', { ok: true });
   const reopened = new DurableStore({ filePath, persist: true });
   assert.deepEqual(await reopened.getReceipt('job-nested'), { ok: true });
+});
+
+// SEC-03 final cleanup — Minor 1: LocalMemory boundary rejection must stay sticky
+// (repeated calls keep failing closed until the hostile path is corrected), never
+// silently degrading to an empty store, and must never ingest outside memory.
+test('SEC-03: LocalMemory fails closed on EVERY call while an ancestor symlink stands, then recovers', async () => {
+  const { root, filePath } = plantAncestorSymlink('m.json', JSON.stringify({ projects: { p: [{ blob_id: 'x', text: 'OUTSIDE SECRET' }] } }));
+  const env = { NODE_ENV: 'production', LOCAL_MEMORY_PATH: filePath };
+  const store = new LocalMemoryStore(env, { defaultPath: filePath });
+
+  await assert.rejects(() => store.recall('p', 10), (e) => e.code === 'state-dir-symlink');
+  // Second call must ALSO reject (previously it silently returned empty results).
+  await assert.rejects(() => store.recall('p', 10), (e) => e.code === 'state-dir-symlink');
+  assert.equal(store.memories.size, 0, 'no outside memory may be ingested');
+
+  // Correct the path: replace the symlink with a real dir holding a legitimate file.
+  const mid = path.join(root, 'mid');
+  fs.unlinkSync(mid);
+  fs.mkdirSync(path.join(mid, 'inner'), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify({ projects: { p: [{ blob_id: 'ok', text: 'legit' }] } }));
+  const recalled = await store.recall('p', 10);
+  assert.equal(recalled.results.length, 1);
+  assert.equal(recalled.results[0].text, 'legit');
+});
+
+// SEC-03 final cleanup — Minor 2: credentials fallback READ must not disclose an
+// outside secret reached through a symlinked ancestor of the owner-home path.
+test('SEC-03: credentials fallback read fails closed on a symlinked ancestor (no secret disclosed)', async () => {
+  const home = tmp('cred-home-');
+  const outside = tmp('cred-out-');
+  fs.mkdirSync(path.join(outside, '.noosphere'), { recursive: true });
+  const outsideSecret = path.join(outside, '.noosphere', 'credentials-default.json');
+  fs.writeFileSync(outsideSecret, 'SECRET-OUTSIDE');
+  // Attacker points ~/.noosphere (the ancestor of the credential file) outside.
+  fs.symlinkSync(path.join(outside, '.noosphere'), path.join(home, '.noosphere'), 'dir');
+
+  const store = new CredentialStore('default', { platform: 'linux', home, run: () => ({ status: 1, stdout: '' }) });
+  const value = store.getPassword();
+  assert.notEqual(value, 'SECRET-OUTSIDE', 'outside credential must never be returned');
+  assert.equal(value, null, 'fallback read must fail closed to null');
+  assert.equal(fs.readFileSync(outsideSecret, 'utf8'), 'SECRET-OUTSIDE', 'outside credential file must be untouched');
+});
+
+// SEC-03 final cleanup — optional invariant: a missing nested read returns absent
+// (null) and creates nothing (guards the reader's create:false contract).
+test('SEC-03: reading a missing nested state path returns null and mutates nothing', async () => {
+  const root = tmp('nomut-');
+  const filePath = path.join(root, 'a', 'b', 'state.json'); // none of a/, a/b/, or the file exist
+  const before = fs.readdirSync(root);
+  const raw = await readContainedStateFile(filePath);
+  assert.equal(raw, null, 'absent chain reads as null');
+  assert.deepEqual(fs.readdirSync(root), before, 'reader must not create directories');
+  assert.equal(before.length, 0, 'root stays empty');
 });

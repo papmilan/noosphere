@@ -70,8 +70,10 @@ export class LocalMemoryStore {
 
   async load() {
     if (this.loaded) return;
-    this.loaded = true;
-    if (!this.persistent) return;
+    if (!this.persistent) {
+      this.loaded = true;
+      return;
+    }
 
     let raw;
     try {
@@ -79,21 +81,27 @@ export class LocalMemoryStore {
       // symlinked directory/file and never follow one outside the root.
       raw = await readContainedStateFile(this.filePath);
     } catch (error) {
-      if (error instanceof PathBoundaryError) throw error; // fail closed on symlink
+      // Boundary violation: fail closed AND stay retryable — do not mark loaded, so
+      // every subsequent call keeps rejecting until the hostile path is corrected
+      // (matches DurableStore's sticky fail-closed behavior).
+      if (error instanceof PathBoundaryError) throw error;
       console.warn(`[memory] Could not load local memory: ${error.message}`);
+      this.loaded = true;
       return;
     }
-    if (raw === null) return;
-    try {
-      const stored = JSON.parse(raw);
-      for (const [projectId, memories] of Object.entries(
-        stored.projects || {},
-      )) {
-        this.memories.set(projectId, memories);
+    if (raw !== null) {
+      try {
+        const stored = JSON.parse(raw);
+        for (const [projectId, memories] of Object.entries(
+          stored.projects || {},
+        )) {
+          this.memories.set(projectId, memories);
+        }
+      } catch (error) {
+        console.warn(`[memory] Could not load local memory: ${error.message}`);
       }
-    } catch (error) {
-      console.warn(`[memory] Could not load local memory: ${error.message}`);
     }
+    this.loaded = true;
   }
 
   async persist(writeToDisk = () => this.writeToDisk()) {
