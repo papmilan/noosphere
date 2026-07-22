@@ -33,6 +33,17 @@ const secureFsRuntimeEntries = [
   'index.js',
   'windows-owner-only.ps1',
 ];
+const acpProtocolRuntimeEntries = [
+  'package.json',
+  'constants.js',
+  'execution-schema.json',
+  'execution-state.js',
+  'head-set.js',
+  'index.js',
+  'project-state.js',
+  'schema.json',
+  'wire.js',
+];
 const action = process.argv[2] || 'install';
 const home = noosphereHome();
 const appRoot = path.join(home, 'app');
@@ -114,6 +125,7 @@ async function install() {
     'README.md',
   ]);
   const sourceSecureFs = await resolveSecureFsPath();
+  const sourceAcpProtocol = await resolveAcpProtocolPath();
   // The installed MCP runs after its source package may no longer exist, so
   // copy its bundled internal dependency explicitly instead of development
   // node_modules.  Keep the same canonical package beside the relayer too:
@@ -122,6 +134,11 @@ async function install() {
     sourceSecureFs,
     path.join(appRoot, 'noosphere-secure-fs'),
     secureFsRuntimeEntries,
+  );
+  await copyRuntime(
+    sourceAcpProtocol,
+    path.join(installedMcp, 'node_modules', '@noosphere', 'acp-protocol'),
+    acpProtocolRuntimeEntries,
   );
   await copyRuntime(
     sourceSecureFs,
@@ -297,6 +314,21 @@ async function resolveSecureFsPath() {
     ) return candidate;
   }
   throw new Error('Could not locate bundled @noosphere/secure-fs runtime package.');
+}
+
+async function resolveAcpProtocolPath() {
+  const candidates = [
+    path.join(sourceRoot, 'noosphere-acp-protocol'),
+    path.join(sourceMcp, 'node_modules', '@noosphere', 'acp-protocol'),
+  ];
+  for (const candidate of candidates) {
+    if (
+      await exists(path.join(candidate, 'package.json'))
+      && await exists(path.join(candidate, 'index.js'))
+      && await exists(path.join(candidate, 'schema.json'))
+    ) return candidate;
+  }
+  throw new Error('Could not locate bundled @noosphere/acp-protocol runtime package.');
 }
 
 // ---------------------------------------------------------------------------

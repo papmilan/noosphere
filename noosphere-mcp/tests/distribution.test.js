@@ -159,8 +159,15 @@ describe('published package distribution', () => {
         '@noosphere',
         'secure-fs',
       );
+      const acpProtocol = path.join(
+        installedMcp,
+        'node_modules',
+        '@noosphere',
+        'acp-protocol',
+      );
       await access(path.join(secureFs, 'index.js'));
       await access(path.join(secureFs, 'windows-owner-only.ps1'));
+      await access(path.join(acpProtocol, 'index.js'));
       await execFileAsync(process.execPath, [
         '--input-type=module', '-e',
         "await import('./continuity/secure-fs.js'); await import('@noosphere/secure-fs');",
