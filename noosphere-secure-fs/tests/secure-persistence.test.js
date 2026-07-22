@@ -121,7 +121,9 @@ describe('shared owner-only persistence boundary', () => {
     ]);
   });
 
-  test('POSIX writes remain exclusive, owner-only, atomic, and no-follow', async () => {
+  test('POSIX writes remain exclusive, owner-only, atomic, and no-follow', {
+    skip: process.platform === 'win32' ? 'POSIX mode and O_NOFOLLOW semantics' : false,
+  }, async () => {
     const dir = temporaryDirectory();
     const target = path.join(dir, 'state.json');
     await atomicOwnerOnlyWrite(target, 'value', { root: dir, platform: 'linux' });
