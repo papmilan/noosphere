@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ensureContainedDirSync, readFileNoFollowSync, writeFileNoFollowSync } from './secure-fs.js';
+import { assertContainedChainSync, ensureContainedDirSync, readFileNoFollowSync, writeFileNoFollowSync } from './secure-fs.js';
 
 const SERVICE_NAME = 'noosphere';
 const CREDENTIAL_KEYS = [
@@ -286,7 +286,10 @@ export class CredentialStore {
   }
 
   #fallbackGet() {
-    // No-follow read: refuse to read the secret through a pre-planted symlink.
+    // SEC-03: validate the full ancestor chain (no-create) exactly as #fallbackStore
+    // does on write, then no-follow read. Rejects a symlinked ancestor as well as a
+    // symlinked final file. Absent chain -> no secret.
+    if (assertContainedChainSync(this.home, path.dirname(this.fallbackPath)) === null) return null;
     return readFileNoFollowSync(this.fallbackPath);
   }
 
