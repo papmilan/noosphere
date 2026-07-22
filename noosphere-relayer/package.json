@@ -24,6 +24,7 @@
     "local-memory.js",
     "local-projects.js",
     "memory.js",
+    "relayer-origins.js",
     "secure-fs.js",
     "snapshot-backend.js",
     "security.js",

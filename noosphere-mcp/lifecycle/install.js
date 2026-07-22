@@ -134,16 +134,19 @@ async function install() {
     sourceSecureFs,
     path.join(appRoot, 'noosphere-secure-fs'),
     secureFsRuntimeEntries,
+    { dereference: true },
   );
   await copyRuntime(
     sourceAcpProtocol,
     path.join(installedMcp, 'node_modules', '@noosphere', 'acp-protocol'),
     acpProtocolRuntimeEntries,
+    { dereference: true },
   );
   await copyRuntime(
     sourceSecureFs,
     path.join(installedMcp, 'node_modules', '@noosphere', 'secure-fs'),
     secureFsRuntimeEntries,
+    { dereference: true },
   );
   // Ensure ide-bridge.js is always present in the installed lifecycle directory.
   // copyRuntime copies the entire 'lifecycle' folder above, so this is a
@@ -154,19 +157,7 @@ async function install() {
     path.join(installedMcp, 'lifecycle'),
     ['ide-bridge.js'],
   );
-  const relayerRuntimeEntries = [
-    'index.js',
-    'memory.js',
-    'walrus-memory.js',
-    'durable-store.js',
-    'security.js',
-    'local-projects.js',
-    'credentials.js',
-    'public',
-    'package.json',
-    'npm-shrinkwrap.json',
-    'env.example',
-  ];
+  const relayerRuntimeEntries = await manifestRuntimeEntries(sourceRelayer);
   await copyRuntime(
     sourceRelayer,
     installedRelayer,
@@ -183,6 +174,7 @@ async function install() {
     sourceSecureFs,
     path.join(installedRelayer, 'node_modules', '@noosphere', 'secure-fs'),
     secureFsRuntimeEntries,
+    { dereference: true },
   );
 
   const sourceEnv = path.join(sourceRelayer, '.env');
@@ -284,13 +276,19 @@ async function doctor() {
 // File copying
 // ---------------------------------------------------------------------------
 
-async function copyRuntime(source, destination, entries) {
+async function copyRuntime(
+  source,
+  destination,
+  entries,
+  { dereference = false } = {},
+) {
   if (path.resolve(source) === path.resolve(destination)) return;
   await mkdir(destination, { recursive: true, mode: 0o700 });
   for (const entry of entries) {
     const from = path.join(source, entry);
     if (await exists(from)) {
       await cp(from, path.join(destination, entry), {
+        dereference,
         recursive: true,
         force: true,
         filter: (file) =>
@@ -299,6 +297,21 @@ async function copyRuntime(source, destination, entries) {
       });
     }
   }
+}
+
+async function manifestRuntimeEntries(source) {
+  const manifest = JSON.parse(
+    await readFile(path.join(source, 'package.json'), 'utf8'),
+  );
+  if (!Array.isArray(manifest.files)) {
+    throw new Error(`Runtime package has no files manifest: ${source}`);
+  }
+  return [
+    ...new Set([
+      'package.json',
+      ...manifest.files.map((entry) => entry.replaceAll('\\', '/').split('/')[0]),
+    ]),
+  ];
 }
 
 async function resolveSecureFsPath() {

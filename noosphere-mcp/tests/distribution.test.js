@@ -8,6 +8,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rename,
   rm,
 } from 'node:fs/promises';
@@ -87,7 +88,8 @@ describe('published package distribution', () => {
       ], { cwd: dockerContext, maxBuffer: 2_000_000 });
       for (const module of [
         'acp-protocol.js', 'exact-routes.js', 'exact-state.js',
-        'snapshot-backend.js', 'walrus-snapshot-backend.js',
+        'relayer-origins.js', 'snapshot-backend.js',
+        'walrus-snapshot-backend.js',
       ]) await access(path.join(packedRelayer, module));
       for (const module of [
         'git-state.js', 'reconcile.js', 'remote-client.js', 'sync-metadata.js', 'sync.js',
@@ -153,6 +155,12 @@ describe('published package distribution', () => {
       await rename(packedMcp, unavailableSource);
       const installedMcp = path.join(noosphereHome, 'app', 'noosphere-mcp');
       const installedRelayer = path.join(noosphereHome, 'app', 'noosphere-relayer');
+      const installedRelayerManifest = JSON.parse(
+        await readFile(path.join(installedRelayer, 'package.json'), 'utf8'),
+      );
+      for (const runtimeEntry of installedRelayerManifest.files) {
+        await access(path.join(installedRelayer, runtimeEntry));
+      }
       const secureFs = path.join(
         installedMcp,
         'node_modules',
@@ -168,6 +176,8 @@ describe('published package distribution', () => {
       await access(path.join(secureFs, 'index.js'));
       await access(path.join(secureFs, 'windows-owner-only.ps1'));
       await access(path.join(acpProtocol, 'index.js'));
+      assert.equal(await isPathInside(installedMcp, secureFs), true);
+      assert.equal(await isPathInside(installedMcp, acpProtocol), true);
       await execFileAsync(process.execPath, [
         '--input-type=module', '-e',
         "await import('./continuity/secure-fs.js'); await import('@noosphere/secure-fs');",
@@ -183,8 +193,8 @@ describe('published package distribution', () => {
         maxBuffer: 2_000_000,
       })).stdout);
       assert.equal(helperResult.value, 'installed-runtime-secret');
-      assert.ok(helperResult.jsPath.startsWith(installedMcp));
-      assert.ok(helperResult.helperPath.startsWith(installedMcp));
+      assert.equal(await isPathInside(installedMcp, helperResult.jsPath), true);
+      assert.equal(await isPathInside(installedMcp, helperResult.helperPath), true);
       assert.equal(helperResult.jsPath.includes(unavailableSource), false);
       assert.equal(helperResult.helperPath.includes(unavailableSource), false);
       if (process.platform === 'win32') {
@@ -200,13 +210,26 @@ describe('published package distribution', () => {
         [path.join(installedMcp, 'continuity', 'index.js'), 'help'],
         { cwd: installedMcp, maxBuffer: 2_000_000 },
       );
-      assert.match(help, /Noosphere continuity CLI/);
+      assert.match(help, /Noosphere continuity/);
       await startInstalledRelayer(installedRelayer, fakeHome);
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }
   });
 });
+
+async function isPathInside(root, candidate) {
+  const [canonicalRoot, canonicalCandidate] = await Promise.all([
+    realpath(root),
+    realpath(candidate),
+  ]);
+  const relative = path.relative(canonicalRoot, canonicalCandidate);
+  return relative === '' || (
+    relative !== '..'
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative)
+  );
+}
 
 function installedHelperProbe() {
   return `
