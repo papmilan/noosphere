@@ -77,7 +77,7 @@ describe('published package distribution', () => {
         copyFile(path.join(relayerRoot, 'npm-shrinkwrap.json'), path.join(dockerContext, 'npm-shrinkwrap.json')),
         cp(path.join(relayerRoot, 'vendor'), path.join(dockerContext, 'vendor'), { recursive: true }),
       ]);
-      await execFileAsync('npm', ['ci', '--omit=dev', '--ignore-scripts'], {
+      await runNpm(['ci', '--omit=dev', '--ignore-scripts'], {
         cwd: dockerContext,
         env: { ...process.env, npm_config_cache: cache },
         maxBuffer: 2_000_000,
@@ -131,7 +131,7 @@ describe('published package distribution', () => {
         },
       );
 
-      assert.match(stdout, /Noosphere installed for this Linux user/);
+      assert.match(stdout, new RegExp(`Noosphere installed for this ${platformName()} user`));
       assert.doesNotMatch(stderr, /ENOENT/);
       await access(
         path.join(
@@ -269,8 +269,7 @@ async function startInstalledRelayer(installedRelayer, fakeHome) {
 }
 
 async function pack(root, destination, cache) {
-  const { stdout } = await execFileAsync(
-    'npm',
+  const { stdout } = await runNpm(
     ['pack', '--pack-destination', destination, '--json'],
     {
       cwd: root,
@@ -280,6 +279,20 @@ async function pack(root, destination, cache) {
   );
   const result = JSON.parse(stdout);
   return path.join(destination, result[0].filename);
+}
+
+function runNpm(args, options) {
+  return execFileAsync(
+    process.platform === 'win32' ? 'npm.cmd' : 'npm',
+    args,
+    { ...options, shell: process.platform === 'win32' },
+  );
+}
+
+function platformName() {
+  if (process.platform === 'darwin') return 'macOS';
+  if (process.platform === 'win32') return 'Windows';
+  return 'Linux';
 }
 
 async function extract(tarball, destination) {
