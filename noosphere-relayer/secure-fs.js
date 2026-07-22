@@ -169,9 +169,32 @@ export function assertContainedChainSync(root, dir) {
   return walkContainedSync(root, dir, { create: false });
 }
 
+// SEC-03 (Windows): O_NOFOLLOW is unavailable on Windows (NOFOLLOW === 0), so the
+// no-follow open below is a no-op there and a final-component symlink or junction
+// would be followed. When the flag is absent, reject a reparse final component with
+// an explicit lstat pre-check instead. On POSIX the O_NOFOLLOW open is authoritative
+// and this extra syscall is skipped, so POSIX behavior is unchanged.
+// Residual (Windows only): a lstat->open TOCTOU window, the same class as the POSIX
+// openat/TOCTOU residual; a file cannot be a junction/mount reparse point (only a
+// dir can), and directory reparse points are already rejected by the ancestor walk.
+function assertFinalNotReparse(file) {
+  if (NOFOLLOW !== 0) return;
+  let info;
+  try {
+    info = fs.lstatSync(file);
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  if (info.isSymbolicLink()) {
+    throw new PathBoundaryError('state-file-symlink', `refusing symlinked file: ${file}`);
+  }
+}
+
 // Writes a file, refusing to follow a final symlink. Truncates an existing regular
 // file (state stores overwrite their own files), but ELOOP if the path is a symlink.
 export function writeFileNoFollowSync(file, data, mode = 0o600) {
+  assertFinalNotReparse(file);
   let fd;
   try {
     fd = fs.openSync(file, fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_WRONLY | NOFOLLOW, mode);
@@ -188,6 +211,7 @@ export function writeFileNoFollowSync(file, data, mode = 0o600) {
 }
 
 export function readFileNoFollowSync(file) {
+  assertFinalNotReparse(file);
   let fd;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW);
