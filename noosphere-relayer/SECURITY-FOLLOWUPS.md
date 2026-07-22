@@ -73,19 +73,31 @@ files). Coverage after SEC-03 increment 2:
 | Store / path | Write path | Read path |
 | --- | --- | --- |
 | Snapshot backend (`snapshot-backend.js`, ACP Project + Execution **state bytes**) | `ensureContainedDirFor` + O_EXCL temp + non-following rename | `readSnapshotNoFollow` (O_NOFOLLOW) |
-| `DurableStore` (`durable-store.js`, ACP exact-state **index** / receipts / pending) | `ensureRealDirectoryPath` + non-following rename | `readContainedStateFile` (dir-validated + O_NOFOLLOW) — **secured in this increment** |
-| `LocalMemoryStore` (`local-memory.js`, local memory) | `ensureRealDirectoryPath` + non-following rename | `readContainedStateFile` — **secured in this increment** |
-| Fallback credentials (`credentials.js`) | `writeFileNoFollowSync` | `readFileNoFollowSync` |
+| `DurableStore` (`durable-store.js`, ACP exact-state **index** / receipts / pending) | `ensureRealDirectoryPath` (full chain) + non-following rename | `readContainedStateFile` (full chain + O_NOFOLLOW) |
+| `LocalMemoryStore` (`local-memory.js`, local memory) | `ensureRealDirectoryPath` (full chain) + non-following rename | `readContainedStateFile` (full chain + O_NOFOLLOW) |
+| Fallback credentials (`credentials.js`) | `ensureContainedDirSync` (full chain) + `writeFileNoFollowSync` | `assertContainedChainSync` (full chain) + `readFileNoFollowSync` |
 | Approved relayer origins (`relayer-origins.js`) | owner-managed | `readFileNoFollowSync` |
 
-**Correction to the increment-1 inventory.** Increment 1 stated the ACP
-project/execution state was contained once the snapshot backend was hardened.
-That was incomplete: the authoritative exact-state *index* persists via
-`DurableStore`, whose `load()` used a follow-prone read with no directory
-validation, so a pre-planted symlink at `NOOSPHERE_STATE_PATH` redirected the read
-to an outside file (reproduced — outside contents were ingested as state). The
-same defect existed in `LocalMemoryStore.load()`. Both read paths are closed in
-this increment and now match their already-hardened write paths.
+**Reader/writer symmetry (increment 3).** Reads and writes now enforce the
+**identical** containment policy through one traversal (`walkContained` /
+`walkContainedSync` in `secure-fs.js`): the writer calls it with `create:true`
+(`ensureContainedDir` / `ensureContainedDirSync`), the reader with `create:false`
+(`assertContainedChain` / `assertContainedChainSync`). Both walk **every** segment
+from the trusted root to the parent directory, reject any symlinked or
+non-directory component (`state-dir-symlink` / `state-dir-not-directory`), and
+`realpath`-verify containment at each level; the reader additionally opens the
+final component `O_NOFOLLOW`. There is no longer a stronger writer or a weaker
+reader.
+
+**History.** Increment 1 stated the ACP project/execution state was contained once
+the snapshot backend was hardened; that was incomplete — the exact-state *index*
+persists via `DurableStore`, whose `load()` followed symlinks. Increment 2 routed
+the loads through a no-follow read, but validated only the **immediate** parent, so
+a symlinked **ancestor** still redirected reads outside the root (reproduced:
+outside contents ingested as state). Increment 3 replaces the immediate-parent
+check with the full-chain `assertContainedChain`, closing the ancestor gap and
+making the reader identical to the writer, and applies the same to the credential
+fallback read.
 
 ### Still open (SEC-03 remains open)
 
