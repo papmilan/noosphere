@@ -1,11 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import {
-  readFile,
   rename,
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
-import { ensureRealDirectoryPath } from './secure-fs.js';
+import { PathBoundaryError, ensureRealDirectoryPath, readContainedStateFile } from './secure-fs.js';
 
 export class LocalMemoryStore {
   constructor(env, { defaultPath }) {
@@ -71,21 +70,38 @@ export class LocalMemoryStore {
 
   async load() {
     if (this.loaded) return;
-    this.loaded = true;
-    if (!this.persistent) return;
+    if (!this.persistent) {
+      this.loaded = true;
+      return;
+    }
 
+    let raw;
     try {
-      const stored = JSON.parse(await readFile(this.filePath, 'utf8'));
-      for (const [projectId, memories] of Object.entries(
-        stored.projects || {},
-      )) {
-        this.memories.set(projectId, memories);
-      }
+      // SEC-03: read through the same trust boundary writeToDisk() uses — reject a
+      // symlinked directory/file and never follow one outside the root.
+      raw = await readContainedStateFile(this.filePath);
     } catch (error) {
-      if (error.code !== 'ENOENT') {
+      // Boundary violation: fail closed AND stay retryable — do not mark loaded, so
+      // every subsequent call keeps rejecting until the hostile path is corrected
+      // (matches DurableStore's sticky fail-closed behavior).
+      if (error instanceof PathBoundaryError) throw error;
+      console.warn(`[memory] Could not load local memory: ${error.message}`);
+      this.loaded = true;
+      return;
+    }
+    if (raw !== null) {
+      try {
+        const stored = JSON.parse(raw);
+        for (const [projectId, memories] of Object.entries(
+          stored.projects || {},
+        )) {
+          this.memories.set(projectId, memories);
+        }
+      } catch (error) {
         console.warn(`[memory] Could not load local memory: ${error.message}`);
       }
     }
+    this.loaded = true;
   }
 
   async persist(writeToDisk = () => this.writeToDisk()) {

@@ -63,9 +63,63 @@ not let tracked project config select a destination, which is the SEC-01 threat.
 hosts that resolve to private ranges — a networking-layer change orthogonal to the
 origin-approval boundary. Track alongside SEC-01b as public-release hardening.
 
+## SEC-03 — filesystem boundary coverage inventory
+
+All state stores route filesystem access through the single boundary in
+`secure-fs.js` (`ensureContainedDir` / `ensureRealDirectoryPath` for directories,
+`writeFileNoFollowSync` / `readFileNoFollowSync` / `readContainedStateFile` for
+files). Coverage after SEC-03 increment 2:
+
+| Store / path | Write path | Read path |
+| --- | --- | --- |
+| Snapshot backend (`snapshot-backend.js`, ACP Project + Execution **state bytes**) | `ensureContainedDirFor` + O_EXCL temp + non-following rename | `readSnapshotNoFollow` (O_NOFOLLOW) |
+| `DurableStore` (`durable-store.js`, ACP exact-state **index** / receipts / pending) | `ensureRealDirectoryPath` (full chain) + non-following rename | `readContainedStateFile` (full chain + O_NOFOLLOW) |
+| `LocalMemoryStore` (`local-memory.js`, local memory) | `ensureRealDirectoryPath` (full chain) + non-following rename | `readContainedStateFile` (full chain + O_NOFOLLOW) |
+| Fallback credentials (`credentials.js`) | `ensureContainedDirSync` (full chain) + `writeFileNoFollowSync` | `assertContainedChainSync` (full chain) + `readFileNoFollowSync` |
+| Approved relayer origins (`relayer-origins.js`) | owner-managed | `readFileNoFollowSync` |
+
+**Reader/writer symmetry (increment 3).** Reads and writes now enforce the
+**identical** containment policy through one traversal (`walkContained` /
+`walkContainedSync` in `secure-fs.js`): the writer calls it with `create:true`
+(`ensureContainedDir` / `ensureContainedDirSync`), the reader with `create:false`
+(`assertContainedChain` / `assertContainedChainSync`). Both walk **every** segment
+from the trusted root to the parent directory, reject any symlinked or
+non-directory component (`state-dir-symlink` / `state-dir-not-directory`), and
+`realpath`-verify containment at each level; the reader additionally opens the
+final component `O_NOFOLLOW`. There is no longer a stronger writer or a weaker
+reader.
+
+**History.** Increment 1 stated the ACP project/execution state was contained once
+the snapshot backend was hardened; that was incomplete — the exact-state *index*
+persists via `DurableStore`, whose `load()` followed symlinks. Increment 2 routed
+the loads through a no-follow read, but validated only the **immediate** parent, so
+a symlinked **ancestor** still redirected reads outside the root (reproduced:
+outside contents ingested as state). Increment 3 replaces the immediate-parent
+check with the full-chain `assertContainedChain`, closing the ancestor gap and
+making the reader identical to the writer, and applies the same to the credential
+fallback read.
+
+### Still open (SEC-03 remains open)
+
+- **Windows junctions / reparse points.** `O_NOFOLLOW` is a POSIX-only flag
+  (`fs.constants.O_NOFOLLOW` is `0` on Windows), and `lstat().isSymbolicLink()`
+  does not reliably classify directory junctions or reparse points. On Windows the
+  no-follow reads degrade to follow-prone and the directory-component check is
+  weaker. **This keeps SEC-03 open.** Not addressed in this increment.
+- **TOCTOU / no `openat`.** Directory containment is validated by path, then the
+  file is written by path; Node has no `openat`/dir-fd write, so a concurrent local
+  attacker who swaps a validated directory for a symlink between the check and the
+  write can still escape. Requires an active local race with write access to the
+  root's parent — not reachable by the static cloned-repo attacker. Removing the
+  redundant `mkdir` in `atomicOwnerOnlyWrite` narrows but does not close the window.
+- **Operator-controlled roots.** An operator who points `NOOSPHERE_STATE_PATH` /
+  `NOOSPHERE_SNAPSHOT_PATH` / `LOCAL_MEMORY_PATH` through a tree they themselves
+  made a symlink is trusting their own configuration; this is operator trust, not
+  the repository-controlled threat, and is out of SEC-03 scope.
+
 ## Scope note
 
-SEC-03 (filesystem symlink/path escape across the remaining state stores) and
-SEC-05 (semantic-memory prompt/control injection) remain **open** and are not
-addressed by the SEC-01 work. Per the security mandate, the repository is not
-public-ready while SEC-03 remains open.
+SEC-03 remains **open** until the Windows junction/reparse-point work is complete.
+SEC-05 (semantic-memory prompt/control injection) remains **open** and is not
+addressed here. Per the security mandate, the repository is not public-ready while
+SEC-03 remains open.

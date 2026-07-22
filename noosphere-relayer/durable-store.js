@@ -2,14 +2,13 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import {
   access,
   constants,
-  readFile,
   rename,
   unlink,
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
 import { syncDirectoryPath, syncFilePath } from './durability.js';
-import { ensureRealDirectoryPath } from './secure-fs.js';
+import { PathBoundaryError, ensureRealDirectoryPath, readContainedStateFile } from './secure-fs.js';
 
 const DEFAULT_RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -42,8 +41,18 @@ export class DurableStore {
   async load() {
     if (!this.persist) return;
 
+    let raw;
     try {
-      const stored = JSON.parse(await readFile(this.filePath, 'utf8'));
+      // SEC-03: read through the same trust boundary writeState() uses — reject a
+      // symlinked directory/file and never follow one outside the root.
+      raw = await readContainedStateFile(this.filePath);
+    } catch (error) {
+      if (error instanceof PathBoundaryError) throw error; // fail closed on symlink
+      throw new Error(`Could not load runtime state: ${error.message}`);
+    }
+    if (raw === null) return;
+    try {
+      const stored = JSON.parse(raw);
       if (stored?.version === 1) {
         this.state = {
           version: 1,
@@ -53,9 +62,7 @@ export class DurableStore {
         };
       }
     } catch (error) {
-      if (error.code !== 'ENOENT') {
-        throw new Error(`Could not load runtime state: ${error.message}`);
-      }
+      throw new Error(`Could not load runtime state: ${error.message}`);
     }
     await this.prune();
     this.loaded = true;

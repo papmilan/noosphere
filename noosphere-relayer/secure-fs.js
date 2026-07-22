@@ -67,7 +67,12 @@ function trustedRootFor(dir) {
   };
 }
 
-export async function ensureContainedDir(root, dir, { mode = 0o700 } = {}) {
+// Single containment traversal, shared by readers and writers. Walks every segment
+// from `root` down to `dir`, rejecting any symlinked or non-directory component and
+// verifying realpath containment at each level. With `create`, missing components
+// are made as real directories (write path); without it, a missing component means
+// the subtree does not exist and null is returned (read path) — reads never mutate.
+async function walkContained(root, dir, { create, mode = 0o700 }) {
   const rootReal = await realpath(root);
   let current = root;
   for (const segment of relativeSegments(root, dir)) {
@@ -77,6 +82,7 @@ export async function ensureContainedDir(root, dir, { mode = 0o700 } = {}) {
       throw error;
     });
     if (info === null) {
+      if (!create) return null;
       // Tolerate a concurrent creator: EEXIST just means we re-inspect below.
       await mkdir(current, { mode }).catch((error) => {
         if (error.code !== 'EEXIST') throw error;
@@ -92,6 +98,18 @@ export async function ensureContainedDir(root, dir, { mode = 0o700 } = {}) {
     assertContained(rootReal, await realpath(current));
   }
   return current;
+}
+
+export async function ensureContainedDir(root, dir, { mode = 0o700 } = {}) {
+  return walkContained(root, dir, { create: true, mode });
+}
+
+// Non-creating twin of ensureContainedDir: validates the FULL chain from root to
+// dir without creating anything. Returns the validated dir, or null if the chain
+// does not fully exist (so a reader treats the target as absent). This is what makes
+// the read boundary semantically identical to the write boundary.
+export async function assertContainedChain(root, dir) {
+  return walkContained(root, dir, { create: false });
 }
 
 export async function ensureRealDirectoryPath(dir, options = {}) {
@@ -112,7 +130,8 @@ export async function assertRealDirectory(dir) {
   return info;
 }
 
-export function ensureContainedDirSync(root, dir, { mode = 0o700 } = {}) {
+function walkContainedSync(root, dir, { create, mode = 0o700 }) {
+  const rootReal = fs.realpathSync(root);
   let current = root;
   for (const segment of relativeSegments(root, dir)) {
     current = path.join(current, segment);
@@ -123,6 +142,7 @@ export function ensureContainedDirSync(root, dir, { mode = 0o700 } = {}) {
       if (error.code !== 'ENOENT') throw error;
     }
     if (info === null) {
+      if (!create) return null;
       try {
         fs.mkdirSync(current, { mode });
       } catch (error) {
@@ -136,9 +156,17 @@ export function ensureContainedDirSync(root, dir, { mode = 0o700 } = {}) {
     if (!info.isDirectory()) {
       throw new PathBoundaryError('state-dir-not-directory', `not a directory: ${current}`);
     }
+    assertContained(rootReal, fs.realpathSync(current));
   }
-  assertContained(fs.realpathSync(root), fs.realpathSync(current));
   return current;
+}
+
+export function ensureContainedDirSync(root, dir, { mode = 0o700 } = {}) {
+  return walkContainedSync(root, dir, { create: true, mode });
+}
+
+export function assertContainedChainSync(root, dir) {
+  return walkContainedSync(root, dir, { create: false });
 }
 
 // Writes a file, refusing to follow a final symlink. Truncates an existing regular
@@ -173,4 +201,18 @@ export function readFileNoFollowSync(file) {
   } finally {
     fs.closeSync(fd);
   }
+}
+
+// SEC-03: read a state-store file through the SAME trust boundary its writer uses.
+// The writer (ensureRealDirectoryPath -> ensureContainedDir) validates the whole
+// ancestor chain from the trusted root; this reader mirrors it exactly via
+// assertContainedChain (non-creating), so a symlinked ANY-level ancestor is rejected
+// (state-dir-symlink), not just the immediate parent. The final component is then
+// opened with O_NOFOLLOW (state-file-symlink). Returns the file contents (utf8) or
+// null when the directory chain or file is absent, so a fresh store starts empty.
+// Never creates directories — load is a read, not a write.
+export async function readContainedStateFile(file) {
+  const { root, dir } = trustedRootFor(path.dirname(file));
+  if (await assertContainedChain(root, dir) === null) return null;
+  return readFileNoFollowSync(file);
 }
