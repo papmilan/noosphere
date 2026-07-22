@@ -51,12 +51,13 @@ test('WINDOWS ACL: secureOwnerOnlyWindows strips a broad ACE and verifies owner-
 
 test('WINDOWS ACL: credentials fallback write produces an owner-only file', { skip }, () => {
   const home = tmp('acl-cred-');
-  const store = new CredentialStore('default', { platform: 'win32', home, run: () => ({ status: 1, stdout: '' }) });
-  // Force the owner-only fallback path (not DPAPI) by exercising the fallback store.
-  store.setPassword?.('super-secret');
+  // platform:'linux' selects the owner-only-file backend so setPassword writes the
+  // fallback file; secureOwnerOnlyWindows still fires (it keys off the real host OS).
+  const store = new CredentialStore('default', { platform: 'linux', home, run: () => ({ status: 1, stdout: '' }) });
+  store.setPassword('super-secret');
   const fallback = path.join(home, '.noosphere', 'credentials-default.json');
-  if (fs.existsSync(fallback)) assertOwnerOnly(fallback, 'credentials fallback');
-  else console.log('[SEC-03 WINDOWS ACL] credentials fallback not written on this platform config; setPassword used DPAPI');
+  assert.equal(fs.existsSync(fallback), true, 'fallback secret file must be written');
+  assertOwnerOnly(fallback, 'credentials fallback');
 });
 
 test('WINDOWS ACL: credentials read repairs a legacy broad ACL', { skip }, () => {

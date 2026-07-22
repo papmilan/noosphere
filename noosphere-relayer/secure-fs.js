@@ -246,7 +246,13 @@ export function secureOwnerOnlyWindows(file) {
   try {
     execFileSync('icacls', [
       file,
+      // Strip INHERITED ACEs, then explicitly REMOVE any broad principal's own ACE
+      // (/inheritance:r alone does not remove an explicit Everyone/Users grant), then
+      // grant Full only to the owner, SYSTEM, and Administrators.
       '/inheritance:r',
+      '/remove:g', 'Everyone',
+      '/remove:g', 'BUILTIN\\Users',
+      '/remove:g', 'Authenticated Users',
       '/grant:r', `${user}:(F)`,
       '/grant:r', 'SYSTEM:(F)',
       '/grant:r', 'BUILTIN\\Administrators:(F)',
