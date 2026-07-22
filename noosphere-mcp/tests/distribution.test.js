@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import {
   access,
   cp,
@@ -7,6 +8,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
 } from 'node:fs/promises';
 import os from 'node:os';
@@ -123,7 +125,6 @@ describe('published package distribution', () => {
             NOOSPHERE_TEST_PLATFORM: 'linux',
             NOOSPHERE_SKIP_SYSTEMCTL: '1',
             NOOSPHERE_SKIP_CLAUDE_HOOK: '1',
-            NOOSPHERE_SKIP_NPM: '1',
             XDG_CONFIG_HOME: path.join(fakeHome, '.config'),
           },
           maxBuffer: 2_000_000,
@@ -145,11 +146,71 @@ describe('published package distribution', () => {
         'utf8',
       );
       assert.match(installedEnv, /MEMWAL_ACCOUNT_ID=/);
+
+      // The lifecycle runtime must be self-contained: it cannot fall back to
+      // the packed source tree that install:user was invoked from.
+      const unavailableSource = path.join(temporaryRoot, 'packed-source-gone');
+      await rename(packedMcp, unavailableSource);
+      const installedMcp = path.join(noosphereHome, 'app', 'noosphere-mcp');
+      const installedRelayer = path.join(noosphereHome, 'app', 'noosphere-relayer');
+      const secureFs = path.join(
+        installedMcp,
+        'node_modules',
+        '@noosphere',
+        'secure-fs',
+      );
+      await access(path.join(secureFs, 'index.js'));
+      await access(path.join(secureFs, 'windows-owner-only.ps1'));
+      await execFileAsync(process.execPath, [
+        '--input-type=module', '-e',
+        "await import('./continuity/secure-fs.js'); await import('@noosphere/secure-fs');",
+      ], { cwd: installedMcp, maxBuffer: 2_000_000 });
+      const { stdout: help } = await execFileAsync(
+        process.execPath,
+        [path.join(installedMcp, 'continuity', 'index.js'), 'help'],
+        { cwd: installedMcp, maxBuffer: 2_000_000 },
+      );
+      assert.match(help, /Noosphere continuity CLI/);
+      await startInstalledRelayer(installedRelayer, fakeHome);
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }
   });
 });
+
+async function startInstalledRelayer(installedRelayer, fakeHome) {
+  const child = spawn(process.execPath, ['index.js'], {
+    cwd: installedRelayer,
+    env: {
+      ...process.env,
+      HOME: fakeHome,
+      NOOSPHERE_MEMORY_BACKEND: 'local-file',
+      NOOSPHERE_STATE_PATH: path.join(fakeHome, 'relayer-state.json'),
+      NOOSPHERE_SNAPSHOT_PATH: path.join(fakeHome, 'relayer-snapshots'),
+      PORT: '39181',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const stdout = [];
+  const stderr = [];
+  child.stdout.on('data', (chunk) => stdout.push(chunk));
+  child.stderr.on('data', (chunk) => stderr.push(chunk));
+  const closed = once(child, 'close');
+  const started = Promise.race([
+    once(child.stdout, 'data').then(() => undefined),
+    closed.then(([code]) => {
+      throw new Error(`installed relayer exited ${code}: ${Buffer.concat(stderr)}`);
+    }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('installed relayer did not start')), 15_000)),
+  ]);
+  try {
+    await started;
+    assert.match(Buffer.concat(stdout).toString(), /Noosphere is live/);
+  } finally {
+    child.kill('SIGTERM');
+    await closed;
+  }
+}
 
 async function pack(root, destination, cache) {
   const { stdout } = await execFileAsync(

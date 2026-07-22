@@ -28,6 +28,11 @@ const directory = path.dirname(fileURLToPath(import.meta.url));
 const sourceMcp = path.resolve(directory, '..');
 const sourceRoot = path.resolve(sourceMcp, '..');
 const sourceRelayer = resolveRelayerPath();
+const secureFsRuntimeEntries = [
+  'package.json',
+  'index.js',
+  'windows-owner-only.ps1',
+];
 const action = process.argv[2] || 'install';
 const home = noosphereHome();
 const appRoot = path.join(home, 'app');
@@ -108,6 +113,21 @@ async function install() {
     'package.json',
     'README.md',
   ]);
+  const sourceSecureFs = await resolveSecureFsPath();
+  // The installed MCP runs after its source package may no longer exist, so
+  // copy its bundled internal dependency explicitly instead of development
+  // node_modules.  Keep the same canonical package beside the relayer too:
+  // its file: dependency resolves it during production npm ci.
+  await copyRuntime(
+    sourceSecureFs,
+    path.join(appRoot, 'noosphere-secure-fs'),
+    secureFsRuntimeEntries,
+  );
+  await copyRuntime(
+    sourceSecureFs,
+    path.join(installedMcp, 'node_modules', '@noosphere', 'secure-fs'),
+    secureFsRuntimeEntries,
+  );
   // Ensure ide-bridge.js is always present in the installed lifecycle directory.
   // copyRuntime copies the entire 'lifecycle' folder above, so this is a
   // belt-and-suspenders guard that survives partial copies or future
@@ -142,6 +162,11 @@ async function install() {
     '.noosphere-runtime',
     'node_modules',
   ]);
+  await copyRuntime(
+    sourceSecureFs,
+    path.join(installedRelayer, 'node_modules', '@noosphere', 'secure-fs'),
+    secureFsRuntimeEntries,
+  );
 
   const sourceEnv = path.join(sourceRelayer, '.env');
   const targetEnv = path.join(installedRelayer, '.env');
@@ -257,6 +282,21 @@ async function copyRuntime(source, destination, entries) {
       });
     }
   }
+}
+
+async function resolveSecureFsPath() {
+  const candidates = [
+    path.join(sourceRoot, 'noosphere-secure-fs'),
+    path.join(sourceMcp, 'node_modules', '@noosphere', 'secure-fs'),
+  ];
+  for (const candidate of candidates) {
+    if (
+      await exists(path.join(candidate, 'package.json'))
+      && await exists(path.join(candidate, 'index.js'))
+      && await exists(path.join(candidate, 'windows-owner-only.ps1'))
+    ) return candidate;
+  }
+  throw new Error('Could not locate bundled @noosphere/secure-fs runtime package.');
 }
 
 // ---------------------------------------------------------------------------

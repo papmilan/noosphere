@@ -67,3 +67,16 @@ The default Windows adapter maps missing PowerShell or unclassified helper
 failures to `state-acl-failed`. The security suite forces SID, tool/mutation,
 read-back, extra-ACE, write/incomplete, repair, and rename failures and verifies
 that no staged file or newly disclosed secret remains.
+
+## Lifecycle distribution coverage
+
+The lifecycle-installed MCP runtime copies the canonical
+`@noosphere/secure-fs` package into its own `node_modules/@noosphere/secure-fs`
+directory, including `windows-owner-only.ps1`. A sibling package copy is also
+kept under the installation app root so the relayer's locked `file:` dependency
+resolves during its production `npm ci`; the installed relayer then resolves its
+own package copy. The distribution regression installs packed artifacts, makes
+the packed MCP source unavailable, imports the installed secure-fs boundary,
+starts the installed MCP CLI and relayer, and verifies that the PowerShell helper
+is resolved inside the installed tree. POSIX imports bundle but do not execute
+the PowerShell helper.
