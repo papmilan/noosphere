@@ -67,7 +67,10 @@ test('WINDOWS ACL: credentials read repairs a legacy broad ACL', { skip }, () =>
   fs.writeFileSync(fallback, JSON.stringify({ MEMWAL_SECRET: 's' }));
   grantBroad(fallback);
   assert.equal(BROAD.test(acl(fallback)), true, 'precondition: legacy file is world-readable');
-  const store = new CredentialStore('default', { platform: 'win32', home, run: () => ({ status: 1, stdout: '' }) });
+  // platform:'linux' routes getPassword through the owner-only-file backend (the one
+  // that reads the fallback file), so #fallbackGet runs the repair. secureOwnerOnlyWindows
+  // still keys off the real host OS (win32 on CI).
+  const store = new CredentialStore('default', { platform: 'linux', home, run: () => ({ status: 1, stdout: '' }) });
   store.getPassword();
   assertOwnerOnly(fallback, 'credentials read-repair');
 });
