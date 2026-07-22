@@ -101,7 +101,11 @@ export function exactError(code, status = 409, details) {
 }
 
 async function atomicOwnerOnlyWrite(target, bytes) {
-  await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+  // SEC-03: the per-project directory was already created and symlink-validated by
+  // ensureContainedDirFor() in the only caller (put), so a second recursive mkdir
+  // here is dead — and a follow-prone one that only widens the TOCTOU window. The
+  // O_EXCL ('wx') temp create plus a rename that replaces (never follows) the final
+  // link keep the write contained.
   const temporary = `${target}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, bytes, { mode: 0o600, flag: 'wx' });
