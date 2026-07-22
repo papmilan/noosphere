@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assertContainedChainSync, ensureContainedDirSync, readFileNoFollowSync, secureOwnerOnlyWindows, writeFileNoFollowSync } from './secure-fs.js';
+import { assertContainedChainSync, ensureContainedDirSync, readFileNoFollowSync, writeFileNoFollowSync } from './secure-fs.js';
 
 const SERVICE_NAME = 'noosphere';
 const CREDENTIAL_KEYS = [
@@ -18,12 +18,14 @@ export class CredentialStore {
       platform = process.platform,
       home = os.homedir(),
       run = spawnSync,
+      secureFileOptions = {},
     } = {},
   ) {
     this.account = account;
     this.platform = platform;
     this.run = run;
     this.home = home;
+    this.secureFileOptions = secureFileOptions;
     this.fallbackPath = path.join(
       home,
       '.noosphere',
@@ -282,7 +284,10 @@ export class CredentialStore {
   #fallbackStore(secret) {
     this.#ensureDirectory();
     // No-follow write: refuse to write the secret through a pre-planted symlink.
-    writeFileNoFollowSync(this.fallbackPath, secret, 0o600);
+    writeFileNoFollowSync(this.fallbackPath, secret, 0o600, {
+      ...this.secureFileOptions,
+      root: this.home,
+    });
   }
 
   #fallbackGet() {
@@ -290,11 +295,12 @@ export class CredentialStore {
     // does on write, then no-follow read. Rejects a symlinked ancestor as well as a
     // symlinked final file. Absent chain -> no secret.
     if (assertContainedChainSync(this.home, path.dirname(this.fallbackPath)) === null) return null;
-    const secret = readFileNoFollowSync(this.fallbackPath);
-    // SEC-03 (Windows): repair a legacy credential file written before owner-only
-    // ACLs were applied, so another local user cannot read it going forward.
-    if (secret !== null) secureOwnerOnlyWindows(this.fallbackPath);
-    return secret;
+    // The shared reader repairs and verifies the Windows DACL before it returns a
+    // single credential byte. POSIX keeps the retained-fd O_NOFOLLOW read.
+    return readFileNoFollowSync(this.fallbackPath, {
+      ...this.secureFileOptions,
+      root: this.home,
+    });
   }
 
   #ensureDirectory() {

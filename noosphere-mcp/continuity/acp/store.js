@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, open, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { createProjectState } from './project-state.js';
 import { decodeEnvelope, encodeEnvelope } from './wire.js';
@@ -7,7 +7,12 @@ import { classifyCompatibility, observeRepository } from './git-state.js';
 import { renderKernel } from './render.js';
 import { projectAdvancedTrust } from './trust-projection.js';
 import { syncDirectoryPath, syncFilePath } from './durability.js';
-import { ensureContainedDir } from '../secure-fs.js';
+import {
+  atomicOwnerOnlyWrite,
+  ensureContainedDir,
+  readOwnerOnlyFile,
+  writeOwnerOnlyFileExclusive,
+} from '../secure-fs.js';
 
 const JSON_FILE = 'continuity.json';
 const MD_FILE = 'continuity.md';
@@ -21,19 +26,25 @@ export function statePaths(root) {
 // the decode result ({ ok, state | errors }) otherwise.
 export async function readState(root, options = {}) {
   return withStateLock(root, async () => {
-    await recoverStateTransaction(root);
+    await recoverStateTransaction(root, options);
     return readStateUnlocked(root, options);
-  });
+  }, options);
 }
 
 async function readStateUnlocked(root, options = {}) {
   const { json } = statePaths(root);
-  let raw;
+  let rawBytes;
   try {
-    raw = await readFile(json, 'utf8');
-  } catch {
-    return null;
+    rawBytes = await readOwnerOnlyFile(json, secureOptions(root, options));
+  } catch (error) {
+    // A directory at the final state filename contains no readable state bytes.
+    // Treat it like the historical readFile(EISDIR) path (absent); the writer still
+    // rejects it before replacement, preserving the two-phase reservation behavior.
+    if (error.code === 'state-file-not-regular') return null;
+    throw error;
   }
+  if (rawBytes === null) return null;
+  const raw = rawBytes.toString('utf8');
   return decodeEnvelope(raw, { clock: options.clock ?? nowIso(), policy: options.policy });
 }
 
@@ -51,9 +62,9 @@ export async function buildInitialState(root, options = {}) {
 // failure before the renames, the existing files are left untouched.
 export async function writeState(root, state, options = {}) {
   return withStateLock(root, async () => {
-    await recoverStateTransaction(root);
+    await recoverStateTransaction(root, options);
     return writeStateUnlocked(root, state, options);
-  });
+  }, options);
 }
 
 async function writeStateUnlocked(root, state, options = {}) {
@@ -67,8 +78,8 @@ async function writeStateUnlocked(root, state, options = {}) {
   const jsonTmp = `${json}.${process.pid}.tmp`;
   const mdTmp = `${markdown}.${process.pid}.tmp`;
   try {
-    await writeFile(jsonTmp, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600 });
-    await writeFile(mdTmp, `${kernel}\n`, { mode: 0o600 });
+    await writeOwnerOnlyFileExclusive(jsonTmp, `${JSON.stringify(envelope, null, 2)}\n`, secureOptions(root, options));
+    await writeOwnerOnlyFileExclusive(mdTmp, `${kernel}\n`, secureOptions(root, options));
     await rename(jsonTmp, json);
     await rename(mdTmp, markdown);
   } finally {
@@ -80,9 +91,9 @@ async function writeStateUnlocked(root, state, options = {}) {
 
 export async function writeStateIfCurrent(root, state, expectedSnapshotId, options = {}) {
   return withStateLock(root, async () => {
-    await recoverStateTransaction(root);
+    await recoverStateTransaction(root, options);
     return writeStateIfCurrentLocked(root, state, expectedSnapshotId, options);
-  });
+  }, options);
 }
 
 async function writeStateIfCurrentLocked(root, state, expectedSnapshotId, options = {}) {
@@ -105,8 +116,8 @@ async function writeStateIfCurrentLocked(root, state, expectedSnapshotId, option
   };
   const jsonTmp = path.join(dir, names.newJson);
   const mdTmp = path.join(dir, names.newMarkdown);
-  const previousJson = await readOptional(json);
-  const previousMarkdown = await readOptional(markdown);
+  const previousJson = await readOptional(json, root, options);
+  const previousMarkdown = await readOptional(markdown, root, options);
   const renameForCommit = options.rename ?? rename;
   const journal = {
     version: 1, token, phase: 'prepared', ...names,
@@ -114,30 +125,34 @@ async function writeStateIfCurrentLocked(root, state, expectedSnapshotId, option
     hadMarkdown: previousMarkdown !== null,
   };
   try {
-    await writeFile(jsonTmp, `${JSON.stringify(envelope, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
-    await writeFile(mdTmp, `${kernel}\n`, { mode: 0o600, flag: 'wx' });
-    if (previousJson !== null) await writeFile(path.join(dir, names.backupJson), previousJson, { mode: 0o600, flag: 'wx' });
-    if (previousMarkdown !== null) await writeFile(path.join(dir, names.backupMarkdown), previousMarkdown, { mode: 0o600, flag: 'wx' });
+    await writeOwnerOnlyFileExclusive(jsonTmp, `${JSON.stringify(envelope, null, 2)}\n`, secureOptions(root, options));
+    await writeOwnerOnlyFileExclusive(mdTmp, `${kernel}\n`, secureOptions(root, options));
+    if (previousJson !== null) {
+      await writeOwnerOnlyFileExclusive(path.join(dir, names.backupJson), previousJson, secureOptions(root, options));
+    }
+    if (previousMarkdown !== null) {
+      await writeOwnerOnlyFileExclusive(path.join(dir, names.backupMarkdown), previousMarkdown, secureOptions(root, options));
+    }
     await syncTransactionFiles(dir, journal);
-    await writeTransactionJournal(dir, journal);
+    await writeTransactionJournal(root, dir, journal, options);
     await options.phaseHook?.('prepared');
-    const currentId = await currentSnapshotId(json, options);
+    const currentId = await currentSnapshotId(root, json, options);
     if (currentId !== expectedSnapshotId) throw storeError('confirmation-stale');
     journal.phase = 'committing';
-    await writeTransactionJournal(dir, journal);
+    await writeTransactionJournal(root, dir, journal, options);
     await options.phaseHook?.('committing');
     await renameForCommit(jsonTmp, json);
     journal.phase = 'json-committed';
-    await writeTransactionJournal(dir, journal);
+    await writeTransactionJournal(root, dir, journal, options);
     await options.phaseHook?.('json-committed');
     await renameForCommit(mdTmp, markdown);
     journal.phase = 'committed';
-    await writeTransactionJournal(dir, journal);
+    await writeTransactionJournal(root, dir, journal, options);
     await options.phaseHook?.('committed');
     await cleanupTransaction(dir, journal);
   } catch (error) {
     if (error.simulatedCrash) throw error;
-    try { await recoverStateTransaction(root); }
+    try { await recoverStateTransaction(root, options); }
     catch (rollbackError) { throw storeError('state-rollback-failed', new AggregateError([error, rollbackError])); }
     for (const name of Object.values(names)) await rm(path.join(dir, name), { force: true }).catch(() => undefined);
     throw error;
@@ -150,12 +165,11 @@ async function writeStateIfCurrentLocked(root, state, expectedSnapshotId, option
 export async function validateState(root, options = {}) {
   const clock = options.clock ?? nowIso();
   const { json, markdown } = statePaths(root);
-  let raw;
-  try {
-    raw = await readFile(json, 'utf8');
-  } catch {
+  const rawBytes = await readOwnerOnlyFile(json, secureOptions(root, options));
+  if (rawBytes === null) {
     return { ok: false, errors: [{ path: '$', code: 'missing-state', message: 'no continuity.json to validate' }] };
   }
+  const raw = rawBytes.toString('utf8');
   const decoded = decodeEnvelope(raw, { clock, policy: options.policy });
   if (!decoded.ok) return { ok: false, errors: decoded.errors };
 
@@ -163,7 +177,8 @@ export async function validateState(root, options = {}) {
   const compatibility = classifyCompatibility(decoded.state, observed);
   const trustProjection = compatibility.status === 'advanced' ? projectAdvancedTrust(decoded.state) : undefined;
   const expected = renderKernel(decoded.state, { compatibility, snapshotId: decoded.state.envelope.snapshot_id, trustProjection });
-  const actual = (await readFile(markdown, 'utf8').catch(() => '')).replace(/\n$/, '');
+  const markdownBytes = await readOwnerOnlyFile(markdown, secureOptions(root, options));
+  const actual = (markdownBytes?.toString('utf8') ?? '').replace(/\n$/, '');
   const errors = [];
   if (compatibility.status === 'foreign') {
     errors.push({ path: '$.repository', code: 'foreign', message: 'persisted state belongs to a different repository' });
@@ -224,53 +239,42 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-async function currentSnapshotId(jsonPath, options) {
-  let raw;
-  try { raw = await readFile(jsonPath, 'utf8'); } catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  }
+async function currentSnapshotId(root, jsonPath, options) {
+  const bytes = await readOwnerOnlyFile(jsonPath, secureOptions(root, options));
+  if (bytes === null) return null;
+  const raw = bytes.toString('utf8');
   const decoded = decodeEnvelope(raw, { clock: options.clock ?? nowIso(), policy: options.policy });
   if (!decoded.ok) throw storeError('state-unreadable');
   return decoded.state.envelope.snapshot_id;
 }
 
-async function readOptional(file) {
-  try { return await readFile(file); } catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  }
+async function readOptional(file, root, options) {
+  return readOwnerOnlyFile(file, secureOptions(root, options));
 }
 
-async function restoreFile(target, bytes) {
+async function restoreFile(root, target, bytes, options) {
   if (bytes === null) {
     await rm(target, { force: true });
     return;
   }
-  const temporary = `${target}.${randomUUID()}.restore`;
-  try {
-    await writeFile(temporary, bytes, { mode: 0o600, flag: 'wx' });
-    await rename(temporary, target);
-  } finally {
-    await rm(temporary, { force: true }).catch(() => undefined);
-  }
+  await atomicOwnerOnlyWrite(target, bytes, secureOptions(root, options));
 }
 
-async function recoverStateTransaction(root) {
+async function recoverStateTransaction(root, options = {}) {
   const { dir, json, markdown } = statePaths(root);
   const journalPath = path.join(dir, '.continuity-transaction.json');
   let journal;
-  try { journal = JSON.parse(await readFile(journalPath, 'utf8')); }
-  catch (error) {
-    if (error.code === 'ENOENT') return;
-    throw storeError('state-transaction-invalid', error);
-  }
+  try {
+    const journalBytes = await readOwnerOnlyFile(journalPath, secureOptions(root, options));
+    if (journalBytes === null) return;
+    journal = JSON.parse(journalBytes.toString('utf8'));
+  } catch (error) { throw storeError('state-transaction-invalid', error); }
   validateJournal(journal);
   if (journal.phase !== 'committed') {
-    const backupJson = journal.hadJson ? await readFile(path.join(dir, journal.backupJson)) : null;
-    const backupMarkdown = journal.hadMarkdown ? await readFile(path.join(dir, journal.backupMarkdown)) : null;
-    await restoreFile(json, backupJson);
-    await restoreFile(markdown, backupMarkdown);
+    const backupJson = journal.hadJson ? await readOptional(path.join(dir, journal.backupJson), root, options) : null;
+    const backupMarkdown = journal.hadMarkdown ? await readOptional(path.join(dir, journal.backupMarkdown), root, options) : null;
+    await restoreFile(root, json, backupJson, options);
+    await restoreFile(root, markdown, backupMarkdown, options);
   }
   await cleanupTransaction(dir, journal);
 }
@@ -282,17 +286,10 @@ async function cleanupTransaction(dir, journal) {
   await syncDirectory(dir);
 }
 
-async function writeTransactionJournal(dir, journal) {
+async function writeTransactionJournal(root, dir, journal, options) {
   const target = path.join(dir, '.continuity-transaction.json');
-  const temporary = `${target}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, `${JSON.stringify(journal)}\n`, { mode: 0o600, flag: 'wx' });
-    await syncFile(temporary);
-    await rename(temporary, target);
-    await syncDirectory(dir);
-  } finally {
-    await rm(temporary, { force: true }).catch(() => undefined);
-  }
+  await atomicOwnerOnlyWrite(target, `${JSON.stringify(journal)}\n`, secureOptions(root, options));
+  await syncDirectory(dir);
 }
 
 async function syncTransactionFiles(dir, journal) {
@@ -313,7 +310,7 @@ function validateJournal(journal) {
   }
 }
 
-async function withStateLock(root, operation) {
+async function withStateLock(root, operation, options = {}) {
   const dir = statePaths(root).dir;
   await ensureContainedDir(root, dir);
   await chmod(dir, 0o700);
@@ -355,4 +352,8 @@ async function syncDirectory(dir) { return syncDirectoryPath(dir); }
 
 function storeError(code, cause) {
   return Object.assign(new Error(code, { cause }), { code });
+}
+
+function secureOptions(root, options = {}) {
+  return { ...(options.secureFileOptions || {}), root };
 }

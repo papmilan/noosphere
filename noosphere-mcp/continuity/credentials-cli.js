@@ -1,11 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import {
-  chmod,
-  readFile,
-  rename,
-  unlink,
-  writeFile,
-} from 'node:fs/promises';
+import { unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline/promises';
@@ -15,6 +9,11 @@ import { pathToFileURL } from 'node:url';
 import { CredentialStore } from '../lifecycle/credentials.js';
 import { noosphereHome } from '../lifecycle/registry.js';
 import { resolveRelayerPath } from '../lifecycle/relayer-source.js';
+import {
+  atomicOwnerOnlyWrite,
+  readOwnerOnlyFile,
+  writeOwnerOnlyFileExclusive,
+} from './secure-fs.js';
 
 const relayerPath = resolveRelayerPath();
 const {
@@ -228,6 +227,7 @@ export async function migrateEnvironmentFile(
   {
     envPath = null,
     validator = validateCredentials,
+    secureFileOptions = {},
   } = {},
 ) {
   envPath = envPath || readFlag('--env') || await findEnvironmentFile();
@@ -235,7 +235,9 @@ export async function migrateEnvironmentFile(
     throw new Error('No Noosphere .env file was found');
   }
 
-  const content = await readFile(envPath, 'utf8');
+  const source = await readOwnerOnlyFile(envPath, secureFileOptions);
+  if (source === null) throw new Error(`No Noosphere .env file was found at ${envPath}`);
+  const content = source.toString('utf8');
   const parsed = parseEnvironment(content);
   const credentials = normalizeCredentials(parsed);
 
@@ -245,9 +247,7 @@ export async function migrateEnvironmentFile(
   await validator(credentials);
 
   const backupPath = `${envPath}.${randomUUID()}.migration-backup`;
-  const temporaryPath = `${envPath}.${randomUUID()}.tmp`;
-  await writeFile(backupPath, content, { mode: 0o600 });
-  await chmod(backupPath, 0o600);
+  await writeOwnerOnlyFileExclusive(backupPath, content, secureFileOptions);
 
   try {
     store.setPassword(JSON.stringify(credentials));
@@ -260,16 +260,13 @@ export async function migrateEnvironmentFile(
       .filter((line) => !/^\s*MEMWAL_(PRIVATE_KEY|ACCOUNT_ID|NETWORK)\s*=/.test(line))
       .join('\n')
       .replace(/\n*$/, '\n');
-    await writeFile(
-      temporaryPath,
+    await atomicOwnerOnlyWrite(
+      envPath,
       `${scrubbed}# Walrus credentials are stored in the OS credential store.\n`,
-      { mode: 0o600 },
+      secureFileOptions,
     );
-    await rename(temporaryPath, envPath);
-    await chmod(envPath, 0o600);
     console.log(`Migrated credentials from ${envPath}.`);
   } catch (error) {
-    await unlink(temporaryPath).catch(() => undefined);
     throw error;
   } finally {
     await unlink(backupPath).catch(() => undefined);
@@ -423,11 +420,22 @@ async function enableLocalFileMode(envPath) {
 async function setMemoryBackendMode(
   envPath,
   backend,
-  { requireExisting = false } = {},
+  { requireExisting = false, secureFileOptions = {} } = {},
 ) {
   let contents;
   try {
-    contents = await readFile(envPath, 'utf8');
+    const source = await readOwnerOnlyFile(envPath, secureFileOptions);
+    if (source === null) {
+      if (requireExisting) {
+        throw new Error(
+          `Relayer .env not found at ${envPath}. ` +
+          'Run `npm --prefix noosphere-mcp run install:user` first, ' +
+          'then re-run `noosphere setup --local`.',
+        );
+      }
+      return false;
+    }
+    contents = source.toString('utf8');
   } catch (error) {
     if (error.code === 'ENOENT' && requireExisting) {
       throw new Error(
@@ -442,8 +450,7 @@ async function setMemoryBackendMode(
 
   let updated = setEnvLine(contents, 'NOOSPHERE_MEMORY_BACKEND', backend);
   updated = setEnvLine(updated, 'DEMO_MODE', 'false');
-  await writeFile(envPath, updated, { mode: 0o600 });
-  await chmod(envPath, 0o600);
+  await atomicOwnerOnlyWrite(envPath, updated, secureFileOptions);
   return true;
 }
 

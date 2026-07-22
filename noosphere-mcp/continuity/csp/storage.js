@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -16,10 +15,14 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { syncDirectoryPath } from '../acp/durability.js';
-import { ensureContainedDir, PathBoundaryError } from '../secure-fs.js';
+import {
+  ensureContainedDir,
+  PathBoundaryError,
+  readOwnerOnlyFile,
+  writeOwnerOnlyFileExclusive,
+} from '../secure-fs.js';
 import { validateState } from './validate.js';
 
-const NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
 const execFileAsync = promisify(execFile);
 const LOCAL_RUNTIME_EXCLUDES = [
   '.noosphere/runtime-state.json',
@@ -200,17 +203,11 @@ async function writeJsonAtomic(root, target, bytes, expectedIdentity, readRecord
   await ensureContainedDir(root, paths.dir);
   const stem = path.basename(target, '.json');
   const temporary = path.join(paths.dir, `.${stem}-${process.pid}-${randomUUID()}.tmp`);
-  let handle;
   try {
-    handle = await open(
-      temporary,
-      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | NOFOLLOW,
-      0o600,
-    );
-    await handle.writeFile(bytes);
-    await handle.sync();
-    await handle.close();
-    handle = null;
+    await writeOwnerOnlyFileExclusive(temporary, bytes, {
+      ...options.secureFileOptions,
+      root,
+    });
     const current = await readRecord(root);
     if ((current?.identity ?? null) !== expectedIdentity) {
       throw cspError('csp-write-stale', `${path.basename(target)} identity changed before commit`);
@@ -224,7 +221,6 @@ async function writeJsonAtomic(root, target, bytes, expectedIdentity, readRecord
     await replaceWithoutOverwrite(paths, target, temporary, bytes, expectedIdentity);
     await syncDirectoryPath(paths.dir);
   } finally {
-    await handle?.close().catch(() => undefined);
     await rm(temporary, { force: true }).catch(() => undefined);
   }
 }
@@ -299,19 +295,11 @@ async function readRawFile(file) {
   if (entry.isSymbolicLink()) {
     throw new PathBoundaryError('state-file-symlink', `refusing symlinked file: ${file}`);
   }
-  let handle;
   try {
-    handle = await open(file, fs.constants.O_RDONLY | NOFOLLOW);
+    return { bytes: await readOwnerOnlyFile(file) };
   } catch (error) {
     if (error.code === 'ENOENT') return null;
     throw mapNoFollowError(error, file);
-  }
-  try {
-    const details = await handle.stat();
-    if (!details.isFile()) throw cspError('csp-state-not-file', `${file} is not a regular file`);
-    return { bytes: await handle.readFile() };
-  } finally {
-    await handle.close();
   }
 }
 

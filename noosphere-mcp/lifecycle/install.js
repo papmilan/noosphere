@@ -4,7 +4,6 @@ import { execFile } from 'node:child_process';
 import {
   access,
   appendFile,
-  chmod,
   cp,
   mkdir,
   readdir,
@@ -22,6 +21,7 @@ import { resolveRelayerPath } from './relayer-source.js';
 import { CredentialStore } from './credentials.js';
 import { formatServiceInstallError } from './service-errors.js';
 import { escapeRegExp, exists, npmCommand, npmSpawnOptions } from './util.js';
+import { atomicOwnerOnlyWrite, readOwnerOnlyFile } from '../continuity/secure-fs.js';
 
 const execFileAsync = promisify(execFile);
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -146,11 +146,12 @@ async function install() {
   const sourceEnv = path.join(sourceRelayer, '.env');
   const targetEnv = path.join(installedRelayer, '.env');
   if (await exists(sourceEnv) && !(await exists(targetEnv))) {
-    await cp(sourceEnv, targetEnv, { force: true });
-    await chmod(targetEnv, 0o600);
+    await atomicOwnerOnlyWrite(targetEnv, await readOwnerOnlyFile(sourceEnv));
   } else if (!(await exists(targetEnv))) {
-    await cp(path.join(installedRelayer, 'env.example'), targetEnv);
-    await chmod(targetEnv, 0o600);
+    await atomicOwnerOnlyWrite(
+      targetEnv,
+      await readFile(path.join(installedRelayer, 'env.example')),
+    );
   }
 
   if (process.env.NOOSPHERE_SKIP_NPM !== '1') {
