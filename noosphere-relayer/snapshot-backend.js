@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { access, chmod, constants, mkdir, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { syncDirectoryPath, syncFilePath } from './durability.js';
-import { ensureContainedDir } from './secure-fs.js';
+import { ensureContainedDir, secureOwnerOnlyWindows } from './secure-fs.js';
 
 const SNAPSHOT_ID = /^sha256:[0-9a-f]{64}$/;
 const NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
@@ -123,6 +123,8 @@ async function atomicOwnerOnlyWrite(target, bytes) {
   try {
     await writeFile(temporary, bytes, { mode: 0o600, flag: 'wx' });
     await chmod(temporary, 0o600);
+    // SEC-03 (Windows): owner-only ACL on the temp before it becomes canonical.
+    secureOwnerOnlyWindows(temporary);
     await syncFilePath(temporary);
     await rename(temporary, target);
     await syncDirectoryPath(path.dirname(target));

@@ -8,7 +8,7 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import { syncDirectoryPath, syncFilePath } from './durability.js';
-import { PathBoundaryError, ensureRealDirectoryPath, readContainedStateFile } from './secure-fs.js';
+import { PathBoundaryError, ensureRealDirectoryPath, readContainedStateFile, secureOwnerOnlyWindows } from './secure-fs.js';
 
 const DEFAULT_RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -238,6 +238,9 @@ export class DurableStore {
       `${JSON.stringify(this.state, null, 2)}\n`,
       { encoding: 'utf8', mode: 0o600 },
     );
+    // SEC-03 (Windows): lock the ACL on the temp before it becomes the canonical
+    // file, so the persisted state is never briefly readable by other local users.
+    secureOwnerOnlyWindows(temporary);
     await syncFilePath(temporary);
     await rename(temporary, this.filePath);
     await syncDirectoryPath(path.dirname(this.filePath));

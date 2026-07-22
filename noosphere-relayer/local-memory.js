@@ -4,7 +4,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
-import { PathBoundaryError, ensureRealDirectoryPath, readContainedStateFile } from './secure-fs.js';
+import { PathBoundaryError, ensureRealDirectoryPath, readContainedStateFile, secureOwnerOnlyWindows } from './secure-fs.js';
 
 export class LocalMemoryStore {
   constructor(env, { defaultPath }) {
@@ -125,6 +125,8 @@ export class LocalMemoryStore {
       )}\n`,
       { encoding: 'utf8', mode: 0o600 },
     );
+    // SEC-03 (Windows): owner-only ACL on the temp before it becomes canonical.
+    secureOwnerOnlyWindows(temporary);
     await rename(temporary, this.filePath);
   }
 }

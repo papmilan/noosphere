@@ -1,7 +1,10 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+
+const IS_WINDOWS = process.platform === 'win32';
 
 // Centralized filesystem trust boundary. A cloned repository (or a local attacker)
 // can pre-create a Noosphere state directory, credential file, or path component as
@@ -207,6 +210,58 @@ export function writeFileNoFollowSync(file, data, mode = 0o600) {
     fs.fchmodSync(fd, mode);
   } finally {
     fs.closeSync(fd);
+  }
+  // SEC-03 (Windows): 0o600 is not owner-only on Windows; lock the ACL down.
+  secureOwnerOnlyWindows(file);
+}
+
+// SEC-03 (Windows owner-only): Node's 0o600 mode is NOT an owner-only ACL on
+// Windows — a persisted secret/state file can inherit broad read ACEs (Everyone /
+// BUILTIN\Users / Authenticated Users), letting another local account read it. Apply
+// an explicit owner-only ACL with icacls: strip inheritance and grant Full only to
+// the current user, SYSTEM, and Administrators. Arguments are passed as an argv array
+// (execFileSync, no shell), so the path is never interpolated into a command line.
+// Fails closed (state-acl-failed) and verifies the effective ACL grants no broad
+// principal (state-acl-broad). No-op on POSIX, where 0o600 is authoritative.
+const BROAD_PRINCIPAL = /(^|\s)(Everyone|BUILTIN\\Users|(NT AUTHORITY\\)?Authenticated Users):/i;
+let cachedWindowsPrincipal;
+function currentWindowsPrincipal() {
+  if (cachedWindowsPrincipal) return cachedWindowsPrincipal;
+  try {
+    cachedWindowsPrincipal = execFileSync('whoami', [], { encoding: 'utf8' }).trim();
+  } catch {
+    const domain = process.env.USERDOMAIN || process.env.COMPUTERNAME || '';
+    const user = process.env.USERNAME || '';
+    cachedWindowsPrincipal = domain && user ? `${domain}\\${user}` : user;
+  }
+  if (!cachedWindowsPrincipal) {
+    throw new PathBoundaryError('state-acl-failed', 'could not resolve current Windows principal for owner-only ACL');
+  }
+  return cachedWindowsPrincipal;
+}
+
+export function secureOwnerOnlyWindows(file) {
+  if (!IS_WINDOWS) return;
+  const user = currentWindowsPrincipal();
+  try {
+    execFileSync('icacls', [
+      file,
+      '/inheritance:r',
+      '/grant:r', `${user}:(F)`,
+      '/grant:r', 'SYSTEM:(F)',
+      '/grant:r', 'BUILTIN\\Administrators:(F)',
+    ], { stdio: 'pipe' });
+  } catch (error) {
+    throw new PathBoundaryError('state-acl-failed', `could not apply owner-only ACL to ${file}: ${error.message}`);
+  }
+  let acl;
+  try {
+    acl = execFileSync('icacls', [file], { encoding: 'utf8' });
+  } catch (error) {
+    throw new PathBoundaryError('state-acl-failed', `could not read back ACL for ${file}: ${error.message}`);
+  }
+  if (BROAD_PRINCIPAL.test(acl)) {
+    throw new PathBoundaryError('state-acl-broad', `owner-only ACL not effective for ${file}`);
   }
 }
 

@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assertContainedChainSync, ensureContainedDirSync, readFileNoFollowSync, writeFileNoFollowSync } from './secure-fs.js';
+import { assertContainedChainSync, ensureContainedDirSync, readFileNoFollowSync, secureOwnerOnlyWindows, writeFileNoFollowSync } from './secure-fs.js';
 
 const SERVICE_NAME = 'noosphere';
 const CREDENTIAL_KEYS = [
@@ -290,7 +290,11 @@ export class CredentialStore {
     // does on write, then no-follow read. Rejects a symlinked ancestor as well as a
     // symlinked final file. Absent chain -> no secret.
     if (assertContainedChainSync(this.home, path.dirname(this.fallbackPath)) === null) return null;
-    return readFileNoFollowSync(this.fallbackPath);
+    const secret = readFileNoFollowSync(this.fallbackPath);
+    // SEC-03 (Windows): repair a legacy credential file written before owner-only
+    // ACLs were applied, so another local user cannot read it going forward.
+    if (secret !== null) secureOwnerOnlyWindows(this.fallbackPath);
+    return secret;
   }
 
   #ensureDirectory() {
