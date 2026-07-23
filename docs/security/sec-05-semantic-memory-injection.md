@@ -1,9 +1,16 @@
 # SEC-05 — Semantic-memory prompt/control injection: threat model & plan
 
-> **Status: DESIGN v3 (REMEDIATED, no implementation started).** SEC-01 and
+> **Status: DESIGN v4 (REMEDIATED, no implementation started).** SEC-01 and
 > SEC-03 are CLOSED. SEC-05 is the active security milestone and the last
 > public-release blocker. This document is the pre-implementation design, threat
 > model, and PR roadmap. No implementation code is changed by this document.
+>
+> **v4** closes the final review's majors/minors atop v3: full trust-store
+> rollback classified as an explicit out-of-scope accepted residual (§4.8.1),
+> canonical MAC serialization (§4.8.2), normalizer-version + raw/normalized hash
+> binding in approval (§4.7), atomic generation minting (§4.7), and the machine-
+> key lifecycle (§4.8.3). Invariants 18–22 added; §9 maps M3/M4/m5/m6. No
+> architectural (B1/B2) change; roadmap ordering unchanged.
 >
 > **v2 supersedes the v1 trust anchor** (path-based trust); v1 allowed
 > untrusted recall written by the Walrus restore flow into an owner-source local
@@ -424,13 +431,88 @@ mandatory:
   mismatch ⇒ untrusted (fail-closed).
 - **Replay-safe:** a replayed approval event cannot authorize different bytes or a
   different version — the record is bound to `contentHash` + `generation`.
+- **Normalizer-version bound (m4):** the record binds `normAlgo` (algorithm id)
+  and `normVersion` alongside `contentHash`. Hash policy is explicit — the
+  `contentHash` is over the **normalized** bytes produced by `(normAlgo,
+  normVersion)`, and the record **also** stores `rawHash` (SHA-256 of the exact
+  raw bytes) so a normalizer change cannot silently re-map an old approval.
+  Verification recomputes with the record's pinned `(normAlgo, normVersion)`; if
+  the running normalizer differs, or `rawHash` mismatches, the record is **not
+  current** → fail closed. Changing the normalization algorithm/version
+  **invalidates** prior approvals until re-approved by the owner (§ invariant 19).
+- **Serialized minting (m5):** generation minting is **atomic** — a
+  compare-and-swap / SEC-03 owner-only exclusive lock (`createOwnerOnlyLock`) /
+  append-only transaction guards it, so concurrent approvals can never mint two
+  records claiming the same or ambiguous current `generation`. Ordering is
+  deterministic; a losing concurrent approval re-reads and mints `current+1`
+  (§ invariant 20).
 
 Explicit rollback to older bytes is itself a new approval producing a new
 `generation` (§4.3) — never a silent revert.
 
+### 4.8 Anti-rollback, canonical serialization, machine-key lifecycle (v4)
+
+**4.8.1 Full trust-store rollback (M3) — decision: Option B, explicit accepted
+residual, with Option A as optional hardening.**
+
+A rollback of the **entire** owner-only out-of-tree trust store to an earlier
+self-consistent snapshot (old records + old generations, still MAC-valid under
+the persistent machine key) would recreate an older authority state. This is
+**out of the SEC-05 attacker model** and is an **accepted residual**, because:
+
+- SEC-05 defends against **repository-controlled** attacks (clone / import /
+  recall / commit / issue / PR / tool-output). Writing or replacing the
+  owner-only out-of-tree trust store requires **owner-only local file write** —
+  an already-local, same-user capability that is **out of scope**, the same class
+  SEC-03 accepts (same-user TOCTOU, active local administrator).
+- The trust store lives outside the project tree and is **never** included in
+  repository backup, Walrus/project backup, or sync/restore; project
+  restore/migration touch only project `.noosphere/` artifacts, never
+  `~/.noosphere/trust/`. Authoritative trust state is therefore never carried by
+  a restorable/attacker-influenced backup.
+- Individual-artifact restore is still fully defended by current-generation
+  matching (§4.3); only a wholesale owner-store rollback by a local same-user
+  principal is residual.
+
+**Stated explicitly:** complete rollback of owner-only local security state is an
+accepted residual, consistent with the SEC-03 local-owner residuals, and is
+disclosed (not an undisclosed defect).
+
+*Optional hardening (Option A), not required for SEC-05 closure:* where a portable
+platform primitive exists (OS keychain monotonic value, TPM/Secure-Enclave
+counter), a high-water-mark generation may be anchored outside the restorable
+store such that the authoritative generation never decreases and a restored store
+presenting a lower generation fails closed. This is future hardening; Node has no
+uniform cross-platform monotonic primitive, so it is not mandated.
+
+**4.8.2 Canonical serialization (M4).** Every authenticated record has exactly
+**one canonical serialized form**; the MAC is always computed and verified over
+that canonical form. Alternative/non-canonical encodings never verify, and parser
+normalization can never produce two valid encodings of the same record. The
+concrete format (canonical JSON, CBOR/CTAP2 canonical, etc.) is an implementation
+choice **provided** canonical encoding is mandatory and deterministic
+(§ invariant 18).
+
+**4.8.3 Machine-key lifecycle (m6).**
+- **Creation:** random ≥256-bit secret minted on first local init, stored
+  owner-only out-of-tree under the SEC-03 boundary (no-follow, owner-only ACL/
+  mode), never in any repository or project tree.
+- **Permissions:** owner-only; unreadable by other users; never logged, never
+  emitted in tool results.
+- **Import from untrusted backup:** importing an unknown/foreign key **never
+  preserves trust** — records under a key this machine did not mint fail closed.
+- **Silent replacement forbidden:** a changed/replaced key invalidates all prior
+  records (MAC fails) → fail closed; replacement is never silent.
+- **Loss/corruption:** key loss or corrupt material fails closed (no fallback to
+  path-based or unsigned trust); the owner must re-approve to rebuild records.
+- **Rotation:** requires explicit owner re-approval of each slot (new records
+  under the new key); no bulk auto-migration.
+- **Machine migration:** a new machine is a **new trust root** — prior records do
+  not transfer unless the owner explicitly re-approves on the new machine.
+
 ---
 
-## 5. Security invariants (mandatory, v3)
+## 5. Security invariants (mandatory, v4)
 
 1. **Trust is a provenance property, never a filesystem location.** Trust comes
    from an authenticated slot record, not from a path/name.
@@ -469,6 +551,22 @@ Explicit rollback to older bytes is itself a new approval producing a new
 16. **Mixed-trust derived artifacts are untrusted as a whole** (§4.6).
 17. **Repository-delivered sidecars/manifests are ignored for trust decisions**
     (§4.1).
+
+**v4 additions:**
+
+18. **Authenticated records have exactly one canonical serialized form**, and the
+    MAC is computed/verified over it; non-canonical encodings never verify (§4.8.2).
+19. **Approval binds the normalizer algorithm + version and both normalized and
+    raw hashes**; a normalizer algo/version change invalidates prior approvals
+    until re-approved (§4.7).
+20. **Generation minting is atomic/serialized**; concurrent approvals can never
+    produce an ambiguous current generation (§4.7).
+21. **The machine key fails closed on loss/replacement/foreign-import**; no
+    fallback to path-based or unsigned trust; rotation/migration require explicit
+    owner re-approval (§4.8.3).
+22. **Full owner trust-store rollback is an out-of-scope accepted residual**
+    (local same-user), disclosed; the trust store is never in repository/Walrus
+    backup or restore (§4.8.1).
 
 ---
 
@@ -575,6 +673,17 @@ owner record — repository/clone/restore content cannot be authority. Phases 2�
 only tighten normalization, widen sink coverage, and add restore/approval/replay
 machinery on top of an already-closed exploit; none re-opens authority.
 
+**v4 additions — no reordering required.** Canonical serialization (M4, §4.8.2),
+atomic generation minting (m5, §4.7), and machine-key creation/permissions/fail-
+closed (m6, §4.8.3) are intrinsic to the Phase 1 trust store and land in Phase 1.
+Normalizer-version binding (M4, §4.7) is coordinated: the record schema carries
+`normAlgo`/`normVersion`/`rawHash` in Phase 1, and Phase 2's normalizer registers
+its version; because Phase 1 binds `rawHash` too, a later normalizer change fails
+closed rather than silently re-mapping — safe across the Phase 1→2 boundary. Key
+rotation/migration re-approval (m6) rides with the full approval protocol in
+Phase 4. The M3 residual (§4.8.1) is a disclosure, no code — stated in the Phase 5
+`SECURITY.md`/tracker docs.
+
 ---
 
 ## 8. Open questions
@@ -621,6 +730,10 @@ implementation.
 | **M1** — owner-approval under-specified | Major | §4.7 full protocol: explicit, authenticated, bytes/hash/slot/scope/generation-bound, audited, non-inferable, no bulk, summary/source independent, mutation-invalidates, replay-safe; invariant 14 |
 | **M2** — restore re-trust lacked currency (rollback) | Major | §4.3 current-generation-only re-trust; explicit rollback = new approval + new generation; `generation` is sole ordering authority; invariant 15 |
 | **Minor** — mixed-trust derived re-promotion | Minor | §4.6 derived artifact untrusted as a whole; authority decisions return to the source slot record; invariant 16 |
+| **M3** — full trust-store snapshot rollback | Major | §4.8.1 Option B: explicit accepted residual (out-of-scope local same-user, SEC-03 class); trust store never in repo/Walrus backup/restore; Option A (platform monotonic anchor) noted as optional hardening; invariant 22 |
+| **M4** — canonical serialization + normalizer binding as free "impl choices" | Major | §4.8.2 exactly one canonical serialized form, MAC over it (invariant 18); §4.7 approval binds `normAlgo`/`normVersion` + `rawHash`, algo/version change invalidates approvals (invariant 19) |
+| **m5** — approval concurrency race | Minor | §4.7 atomic/serialized generation minting (CAS / SEC-03 lock / append-only); invariant 20 |
+| **m6** — machine-key lifecycle unspecified | Minor | §4.8.3 creation/permissions/rotation/migration/loss/replacement/foreign-import all fail closed; invariant 21 |
 
 ---
 
