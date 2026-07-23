@@ -1,5 +1,17 @@
 # SEC-03 Windows ACL Boundary Remediation Implementation Plan
 
+> **Status: COMPLETED / MERGED.** This plan was fully executed and merged in
+> [PR #24](https://github.com/papmilan/noosphere/pull/24), merge commit
+> `33c2737e9e7171482c908a8753f951b7cd694969` (approved repaired head
+> `5a405c9f5e8a9f2b10ee55fb5489715282e51290`). SEC-03 is CLOSED; see
+> [../../security/sec-03-windows-owner-only-boundary.md](../../security/sec-03-windows-owner-only-boundary.md)
+> and
+> [../../../noosphere-relayer/SECURITY-FOLLOWUPS.md](../../../noosphere-relayer/SECURITY-FOLLOWUPS.md).
+> The "Do not merge PR #24 or begin SEC-05" constraint below is historical (it
+> governed execution while the plan was in flight); PR #24 is now merged and SEC-05
+> is the next active milestone. Unchecked `- [ ]` boxes are preserved as the
+> original tracking record and do not indicate outstanding SEC-03 work.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace post-write, friendly-name Windows ACL handling with one SID-based, pre-write, fail-closed persistence boundary shared by every sensitive relayer and MCP file path.

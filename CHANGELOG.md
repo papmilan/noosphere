@@ -12,6 +12,23 @@ Dates are npm publish dates. The format follows
 
 ## noosphere-continuity
 
+### Unreleased
+
+- **SEC-03 (Windows owner-only persistence) — closes SEC-03.** The centralized
+  `@noosphere/secure-fs` boundary now enforces an exact three-SID Windows DACL
+  (token user SID, `S-1-5-18`, `S-1-5-32-544`) via a fixed PowerShell/.NET helper:
+  sensitive bytes are never written before a staged file's ACL is installed and
+  read back, existing sensitive files are repaired before they are read, and
+  directory junctions/reparse points are refused. Windows junction/reparse and
+  owner-only ACL behavior, plus lifecycle-installed runtime packaging, run in
+  mandatory Windows/Ubuntu/macOS CI with no relevant skips. This completes the
+  SEC-03 filesystem boundary that the 2.3.1 patch began on POSIX. Merged in
+  [PR #24](https://github.com/papmilan/noosphere/pull/24), merge commit
+  `33c2737e9e7171482c908a8753f951b7cd694969`. Residual same-user TOCTOU,
+  Developer-Mode symbolic links, and active local-administrator compromise are
+  accepted by design (see
+  [noosphere-relayer/SECURITY-FOLLOWUPS.md](noosphere-relayer/SECURITY-FOLLOWUPS.md)).
+
 ### 2.4.0 — 2026-07-18
 
 - Added Continuation State Protocol v1: strict Git-tracked
@@ -47,10 +64,13 @@ Dates are npm publish dates. The format follows
 - **SEC-01 (ACP exact-state):** the ACP exact-state sync client no longer owns
   the API token; it is routed through the same authority boundary, closing the
   automatic `activateProject` token-exfiltration path.
-- **SEC-03:** centralized secure-filesystem boundary (no-follow, exclusive
-  creation, realpath containment) applied to ACP project/execution state,
-  locks, journals, temp files, and local memory; symlinked/reparse state
-  directories and path components are rejected.
+- **SEC-03 (POSIX increment):** centralized secure-filesystem boundary
+  (no-follow, exclusive creation, realpath containment) applied to ACP
+  project/execution state, locks, journals, temp files, and local memory;
+  symlinked/reparse state directories and path components are rejected on POSIX.
+  This was the POSIX portion; Windows junction/reparse containment and the
+  owner-only SID ACL boundary that fully close SEC-03 landed later in PR #24 (see
+  the Unreleased entry above). SEC-03 was not fully closed as of this 2.3.1 patch.
 - **SEC-05:** recalled semantic memory is treated as untrusted quoted data —
   control characters, terminal escapes, and system-role/markup impersonation
   are sanitized, and recalled text is never injected into adapter instructions

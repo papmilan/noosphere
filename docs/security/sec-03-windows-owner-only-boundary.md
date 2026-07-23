@@ -1,5 +1,23 @@
 # SEC-03 Windows owner-only persistence boundary
 
+> **Status: SEC-03 CLOSED.** Merged in
+> [PR #24](https://github.com/papmilan/noosphere/pull/24), merge commit
+> `33c2737e9e7171482c908a8753f951b7cd694969` (approved repaired head
+> `5a405c9f5e8a9f2b10ee55fb5489715282e51290`). Post-merge CI on the merge commit
+> is green across `noosphere-mcp`/`noosphere-relayer` on Windows, Ubuntu, and
+> macOS; the exact-head approval evidence is CI
+> [run 30026543705](https://github.com/papmilan/noosphere/actions/runs/30026543705)
+> and deploy verification
+> [run 30026543758](https://github.com/papmilan/noosphere/actions/runs/30026543758)
+> on the same SHA. Lifecycle-installed runtime packaging is verified by the
+> distribution regression (see "Lifecycle distribution coverage" below). Residual
+> assumptions (same-user TOCTOU, symbolic links under Developer Mode, active local
+> administrator compromise, unsupported filesystem semantics) are accepted by
+> design and tracked in
+> [noosphere-relayer/SECURITY-FOLLOWUPS.md](../../noosphere-relayer/SECURITY-FOLLOWUPS.md),
+> not open findings. SEC-05 is the next active security milestone; the repository
+> is not public-ready while SEC-05 remains open.
+
 ## Identity and DACL policy
 
 `@noosphere/secure-fs` invokes a fixed PowerShell/.NET helper with argv and

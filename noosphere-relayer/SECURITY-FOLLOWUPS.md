@@ -99,27 +99,56 @@ check with the full-chain `assertContainedChain`, closing the ancestor gap and
 making the reader identical to the writer, and applies the same to the credential
 fallback read.
 
-### Still open (SEC-03 remains open)
+### Windows junction/reparse containment (closed by PR #24)
 
-- **Windows junctions / reparse points.** `O_NOFOLLOW` is a POSIX-only flag
-  (`fs.constants.O_NOFOLLOW` is `0` on Windows), and `lstat().isSymbolicLink()`
-  does not reliably classify directory junctions or reparse points. On Windows the
-  no-follow reads degrade to follow-prone and the directory-component check is
-  weaker. **This keeps SEC-03 open.** Not addressed in this increment.
+The Windows gap is now closed. The centralized `@noosphere/secure-fs` boundary
+adds a fixed PowerShell/.NET owner-only helper: Windows writes exclusively create
+a same-directory staging file, install and read back an exact three-SID DACL (the
+token user SID, `S-1-5-18`, `S-1-5-32-544`) before any sensitive bytes, repair
+existing sensitive files before reading them, and refuse directory junctions and
+reparse points. Junction/reparse and owner-only ACL behavior is exercised by the
+mandatory Windows CI suites (`noosphere-mcp` and `noosphere-relayer`
+`windows-latest`) with no relevant skips. See
+[docs/security/sec-03-windows-owner-only-boundary.md](../docs/security/sec-03-windows-owner-only-boundary.md).
+
+- Merged in [PR #24](https://github.com/papmilan/noosphere/pull/24), merge commit
+  `33c2737e9e7171482c908a8753f951b7cd694969` (approved repaired head
+  `5a405c9f5e8a9f2b10ee55fb5489715282e51290`).
+- Exact-head CI [run 30026543705](https://github.com/papmilan/noosphere/actions/runs/30026543705)
+  and post-merge CI on the merge commit both green across Windows, Ubuntu, and
+  macOS; deploy verification green on the same SHA.
+
+### Accepted residual risks (not open SEC-03 findings)
+
 - **TOCTOU / no `openat`.** Directory containment is validated by path, then the
   file is written by path; Node has no `openat`/dir-fd write, so a concurrent local
   attacker who swaps a validated directory for a symlink between the check and the
-  write can still escape. Requires an active local race with write access to the
-  root's parent — not reachable by the static cloned-repo attacker. Removing the
-  redundant `mkdir` in `atomicOwnerOnlyWrite` narrows but does not close the window.
+  write can still escape. Requires an active local same-user race with write access
+  to the root's parent — not reachable by the static cloned-repo attacker. This is
+  a documented, accepted-by-design limitation, not an open SEC-03 defect.
+- **Windows symbolic links under Developer Mode.** The mandatory CI covers
+  junctions/reparse points (the elevation-free primitive an attacker can create).
+  The manual symbolic-link kit scenarios require Developer Mode and remain an
+  accepted residual (unsupported/optional filesystem semantics), not an open
+  finding. See
+  [docs/security/windows-filesystem-verification.md](../docs/security/windows-filesystem-verification.md).
 - **Operator-controlled roots.** An operator who points `NOOSPHERE_STATE_PATH` /
   `NOOSPHERE_SNAPSHOT_PATH` / `LOCAL_MEMORY_PATH` through a tree they themselves
   made a symlink is trusting their own configuration; this is operator trust, not
   the repository-controlled threat, and is out of SEC-03 scope.
+- **Active local administrator compromise.** An attacker already running as a
+  local administrator can rewrite ACLs and files directly; defending against an
+  already-privileged local principal is outside the SEC-03 boundary.
 
 ## Scope note
 
-SEC-03 remains **open** until the Windows junction/reparse-point work is complete.
-SEC-05 (semantic-memory prompt/control injection) remains **open** and is not
-addressed here. Per the security mandate, the repository is not public-ready while
-SEC-03 remains open.
+**SEC-03 is CLOSED** as of PR #24 (merge commit
+`33c2737e9e7171482c908a8753f951b7cd694969`): POSIX containment, Windows
+junction/reparse containment, the Windows owner-only SID boundary,
+repair-before-read, pre-write ACL enforcement, and lifecycle-installed runtime
+packaging are all verified by mandatory Windows/Ubuntu/macOS CI. The items under
+"Accepted residual risks" above are disclosed by design, not open findings.
+
+SEC-05 (semantic-memory prompt/control injection) remains **open** and is the
+active security milestone. Per the security mandate, the repository is **not
+public-ready** while SEC-05 remains open.

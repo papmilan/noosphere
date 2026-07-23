@@ -103,14 +103,18 @@ These residuals are disclosed intentionally; they are not undisclosed defects:
   as the same user who swaps a path component between the check and the write is
   not fully prevented, because fd-relative (`openat`) semantics are not available
   in the Node core API. This requires an already-local same-user attacker.
-- **Windows filesystem behavior.** Junction/reparse-point containment was
-  verified on commit `66a2e490cefd77a4aad0941d2c8869d89a4c14bc` with
-  `PASS=4`, `FAIL=0`, and `SKIP=3`. The ACP Project State, Execution State,
-  credential-store, and case-insensitive Project State junction scenarios all
-  passed. The three symbolic-link scenarios were skipped because Developer Mode
-  was unavailable. Junction containment is verified; full Windows symbolic-link
-  coverage remains pending until a Developer Mode run. See
-  [docs/security/windows-filesystem-verification.md](docs/security/windows-filesystem-verification.md).
+- **Windows filesystem behavior.** Windows junction/reparse-point containment and
+  the owner-only three-SID DACL boundary (token user SID, `S-1-5-18`,
+  `S-1-5-32-544`, with repair-before-read and pre-write ACL enforcement) are
+  verified by **mandatory** CI on `windows-latest` for both packages, alongside
+  the Ubuntu and macOS POSIX suites — merged in
+  [PR #24](https://github.com/papmilan/noosphere/pull/24), merge commit
+  `33c2737e9e7171482c908a8753f951b7cd694969`. Symbolic-link scenarios that require
+  Developer Mode are covered only by the optional manual kit and remain an accepted
+  residual, not an open finding. See
+  [docs/security/windows-filesystem-verification.md](docs/security/windows-filesystem-verification.md)
+  and
+  [docs/security/sec-03-windows-owner-only-boundary.md](docs/security/sec-03-windows-owner-only-boundary.md).
 
 ## Security model
 

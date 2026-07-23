@@ -93,10 +93,32 @@ Windows threat) and marks the symlink scenarios `SKIP`. A run with `SKIP` rows
 verifies junction containment but does not cover symlink containment; enable
 Developer Mode to get full coverage before declaring symlink safety.
 
+## Automated Windows CI (SEC-03 closed)
+
+SEC-03 is CLOSED as of
+[PR #24](https://github.com/papmilan/noosphere/pull/24), merge commit
+`33c2737e9e7171482c908a8753f951b7cd694969` (approved repaired head
+`5a405c9f5e8a9f2b10ee55fb5489715282e51290`). Windows junction/reparse containment
+and the owner-only three-SID DACL boundary now run in **mandatory** CI on
+`windows-latest` for both `noosphere-mcp` and `noosphere-relayer`, with no
+relevant skips, alongside the Ubuntu and macOS POSIX suites. Exact-head evidence
+is CI
+[run 30026543705](https://github.com/papmilan/noosphere/actions/runs/30026543705)
+and deploy verification
+[run 30026543758](https://github.com/papmilan/noosphere/actions/runs/30026543758);
+post-merge CI on the merge commit is green across all three platforms. The
+owner-only boundary detail lives in
+[sec-03-windows-owner-only-boundary.md](sec-03-windows-owner-only-boundary.md).
+
+The manual verification kit below predates PR #24 and remains useful for local
+symbolic-link coverage under Developer Mode. Its skipped symbolic-link scenarios
+are an **accepted residual** (optional/unsupported filesystem semantics requiring
+Developer Mode), not an open SEC-03 finding.
+
 ## Completed Windows verification
 
 Verification was completed on commit
-`66a2e490cefd77a4aad0941d2c8869d89a4c14bc`.
+`66a2e490cefd77a4aad0941d2c8869d89a4c14bc` (manual pre-PR#24 run).
 
 | Windows version | Node version | Symlinks | Result | Date | Runner |
 | --- | --- | --- | --- | --- | --- |
