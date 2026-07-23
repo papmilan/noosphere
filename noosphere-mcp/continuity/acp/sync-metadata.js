@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { chmod, lstat, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalize } from '@noosphere/acp-protocol';
 import { RECONCILIATION_POLICY_VERSION, SYNC_PROTOCOL_VERSION } from '@noosphere/acp-protocol';
-import { syncDirectoryPath, syncFilePath } from './durability.js';
+import { syncDirectoryPath } from './durability.js';
+import { atomicOwnerOnlyWrite, readOwnerOnlyFile } from '../secure-fs.js';
 
 const METADATA_FILE = 'continuity-sync.json';
 const CONFIRMATION_LIMIT = 16;
@@ -19,10 +20,12 @@ const OBSERVATION_KEYS = [
 const REPOSITORY_KEYS = ['ancestors', 'branch', 'dirty', 'head', 'root_identity', 'workspace_fingerprint'];
 const CONFIRMATION_ACTIONS = new Set(['fast-forward-local', 'remote-only-restore', 'historical-advanced']);
 
-export async function readSyncMetadata(root) {
+export async function readSyncMetadata(root, options = {}) {
   const file = metadataPath(root);
   try {
-    const parsed = JSON.parse(await readFile(file, 'utf8'));
+    const bytes = await readOwnerOnlyFile(file, secureOptions(root, options));
+    if (bytes === null) return normalizeMetadata();
+    const parsed = JSON.parse(bytes.toString('utf8'));
     return normalizeMetadata(parsed);
   } catch (error) {
     if (error.code === 'ENOENT') return normalizeMetadata();
@@ -30,18 +33,18 @@ export async function readSyncMetadata(root) {
   }
 }
 
-export async function writeSyncMetadata(root, metadata) {
+export async function writeSyncMetadata(root, metadata, options = {}) {
   return mutateSyncMetadata(root, (current) => {
     for (const key of Object.keys(current)) delete current[key];
     Object.assign(current, structuredClone(metadata));
-  });
+  }, options);
 }
 
-export async function mutateSyncMetadata(root, mutation) {
+export async function mutateSyncMetadata(root, mutation, options = {}) {
   return withMetadataLock(root, async () => {
-    const metadata = await readSyncMetadata(root);
+    const metadata = await readSyncMetadata(root, options);
     const result = await mutation(metadata);
-    await writeSyncMetadataUnlocked(root, metadata);
+    await writeSyncMetadataUnlocked(root, metadata, options);
     return result;
   });
 }
@@ -50,23 +53,17 @@ export function withUploadReservationLock(root, operation) {
   return withOwnerLock(root, 'continuity-upload.lock', 'upload-lock-timeout', operation);
 }
 
-async function writeSyncMetadataUnlocked(root, metadata) {
+async function writeSyncMetadataUnlocked(root, metadata, options = {}) {
   const file = metadataPath(root);
   const dir = path.dirname(file);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await chmod(dir, 0o700);
-  const temporary = `${file}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, `${JSON.stringify(normalizeMetadata(metadata), null, 2)}\n`, {
-      encoding: 'utf8', mode: 0o600, flag: 'wx',
-    });
-    await syncFilePath(temporary);
-    await rename(temporary, file);
-    await chmod(file, 0o600);
-    await syncDirectoryPath(dir);
-  } finally {
-    await rm(temporary, { force: true }).catch(() => undefined);
-  }
+  await atomicOwnerOnlyWrite(
+    file,
+    `${JSON.stringify(normalizeMetadata(metadata), null, 2)}\n`,
+    secureOptions(root, options),
+  );
+  await syncDirectoryPath(dir);
 }
 
 export function digestRepositoryObservation(observed) {
@@ -292,3 +289,7 @@ function hashHex(bytes) { return createHash('sha256').update(bytes).digest('hex'
 function digest(value) { return `sha256:${hashHex(Buffer.from(value, 'utf8'))}`; }
 function clockMs(clock) { return typeof clock === 'function' ? clockMs(clock()) : typeof clock === 'string' ? Date.parse(clock) : Number(clock); }
 function syncError(code, cause) { return Object.assign(new Error(code, { cause }), { code }); }
+
+function secureOptions(root, options = {}) {
+  return { ...(options.secureFileOptions || {}), root };
+}

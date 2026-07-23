@@ -18,12 +18,14 @@ export class CredentialStore {
       platform = process.platform,
       home = os.homedir(),
       run = spawnSync,
+      secureFileOptions = {},
     } = {},
   ) {
     this.account = account;
     this.platform = platform;
     this.run = run;
     this.home = home;
+    this.secureFileOptions = secureFileOptions;
     this.fallbackPath = path.join(
       home,
       '.noosphere',
@@ -282,7 +284,10 @@ export class CredentialStore {
   #fallbackStore(secret) {
     this.#ensureDirectory();
     // No-follow write: refuse to write the secret through a pre-planted symlink.
-    writeFileNoFollowSync(this.fallbackPath, secret, 0o600);
+    writeFileNoFollowSync(this.fallbackPath, secret, 0o600, {
+      ...this.secureFileOptions,
+      root: this.home,
+    });
   }
 
   #fallbackGet() {
@@ -290,7 +295,12 @@ export class CredentialStore {
     // does on write, then no-follow read. Rejects a symlinked ancestor as well as a
     // symlinked final file. Absent chain -> no secret.
     if (assertContainedChainSync(this.home, path.dirname(this.fallbackPath)) === null) return null;
-    return readFileNoFollowSync(this.fallbackPath);
+    // The shared reader repairs and verifies the Windows DACL before it returns a
+    // single credential byte. POSIX keeps the retained-fd O_NOFOLLOW read.
+    return readFileNoFollowSync(this.fallbackPath, {
+      ...this.secureFileOptions,
+      root: this.home,
+    });
   }
 
   #ensureDirectory() {

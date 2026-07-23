@@ -1,5 +1,5 @@
-import { constants } from 'node:fs';
-import { lstat, open, stat } from 'node:fs/promises';
+import { lstat, stat } from 'node:fs/promises';
+import { writeOwnerOnlyFileExclusive } from '@noosphere/secure-fs';
 import { syncDirectoryPath } from './durability.js';
 
 const [filename, expectedDev, expectedIno] = process.argv.slice(2);
@@ -22,20 +22,12 @@ try {
     if (size > MAX_BYTES) fail('quarantine-too-large');
     chunks.push(chunk);
   }
-  let handle;
   try {
-    handle = await open(filename, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW || 0), 0o600);
+    await writeOwnerOnlyFileExclusive(filename, Buffer.concat(chunks, size), { root: process.cwd() });
   } catch (error) {
-    if (error.code === 'ELOOP') fail('quarantine-symlink');
-    if (error.code === 'EEXIST') fail('quarantine-exists');
+    if (error.code === 'state-file-symlink') fail('quarantine-symlink');
+    if (error.code === 'state-file-exists') fail('quarantine-exists');
     throw error;
-  }
-  try {
-    await handle.writeFile(Buffer.concat(chunks, size));
-    await handle.chmod(0o600);
-    await handle.sync();
-  } finally {
-    await handle.close();
   }
   await syncDirectoryPath('.');
 } catch (error) {

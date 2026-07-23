@@ -4,7 +4,6 @@ import { execFile } from 'node:child_process';
 import {
   access,
   appendFile,
-  chmod,
   cp,
   mkdir,
   readdir,
@@ -22,12 +21,29 @@ import { resolveRelayerPath } from './relayer-source.js';
 import { CredentialStore } from './credentials.js';
 import { formatServiceInstallError } from './service-errors.js';
 import { escapeRegExp, exists, npmCommand, npmSpawnOptions } from './util.js';
+import { atomicOwnerOnlyWrite, readOwnerOnlyFile } from '../continuity/secure-fs.js';
 
 const execFileAsync = promisify(execFile);
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const sourceMcp = path.resolve(directory, '..');
 const sourceRoot = path.resolve(sourceMcp, '..');
 const sourceRelayer = resolveRelayerPath();
+const secureFsRuntimeEntries = [
+  'package.json',
+  'index.js',
+  'windows-owner-only.ps1',
+];
+const acpProtocolRuntimeEntries = [
+  'package.json',
+  'constants.js',
+  'execution-schema.json',
+  'execution-state.js',
+  'head-set.js',
+  'index.js',
+  'project-state.js',
+  'schema.json',
+  'wire.js',
+];
 const action = process.argv[2] || 'install';
 const home = noosphereHome();
 const appRoot = path.join(home, 'app');
@@ -108,6 +124,30 @@ async function install() {
     'package.json',
     'README.md',
   ]);
+  const sourceSecureFs = await resolveSecureFsPath();
+  const sourceAcpProtocol = await resolveAcpProtocolPath();
+  // The installed MCP runs after its source package may no longer exist, so
+  // copy its bundled internal dependency explicitly instead of development
+  // node_modules.  Keep the same canonical package beside the relayer too:
+  // its file: dependency resolves it during production npm ci.
+  await copyRuntime(
+    sourceSecureFs,
+    path.join(appRoot, 'noosphere-secure-fs'),
+    secureFsRuntimeEntries,
+    { dereference: true },
+  );
+  await copyRuntime(
+    sourceAcpProtocol,
+    path.join(installedMcp, 'node_modules', '@noosphere', 'acp-protocol'),
+    acpProtocolRuntimeEntries,
+    { dereference: true },
+  );
+  await copyRuntime(
+    sourceSecureFs,
+    path.join(installedMcp, 'node_modules', '@noosphere', 'secure-fs'),
+    secureFsRuntimeEntries,
+    { dereference: true },
+  );
   // Ensure ide-bridge.js is always present in the installed lifecycle directory.
   // copyRuntime copies the entire 'lifecycle' folder above, so this is a
   // belt-and-suspenders guard that survives partial copies or future
@@ -117,19 +157,7 @@ async function install() {
     path.join(installedMcp, 'lifecycle'),
     ['ide-bridge.js'],
   );
-  const relayerRuntimeEntries = [
-    'index.js',
-    'memory.js',
-    'walrus-memory.js',
-    'durable-store.js',
-    'security.js',
-    'local-projects.js',
-    'credentials.js',
-    'public',
-    'package.json',
-    'npm-shrinkwrap.json',
-    'env.example',
-  ];
+  const relayerRuntimeEntries = await manifestRuntimeEntries(sourceRelayer);
   await copyRuntime(
     sourceRelayer,
     installedRelayer,
@@ -142,15 +170,22 @@ async function install() {
     '.noosphere-runtime',
     'node_modules',
   ]);
+  await copyRuntime(
+    sourceSecureFs,
+    path.join(installedRelayer, 'node_modules', '@noosphere', 'secure-fs'),
+    secureFsRuntimeEntries,
+    { dereference: true },
+  );
 
   const sourceEnv = path.join(sourceRelayer, '.env');
   const targetEnv = path.join(installedRelayer, '.env');
   if (await exists(sourceEnv) && !(await exists(targetEnv))) {
-    await cp(sourceEnv, targetEnv, { force: true });
-    await chmod(targetEnv, 0o600);
+    await atomicOwnerOnlyWrite(targetEnv, await readOwnerOnlyFile(sourceEnv));
   } else if (!(await exists(targetEnv))) {
-    await cp(path.join(installedRelayer, 'env.example'), targetEnv);
-    await chmod(targetEnv, 0o600);
+    await atomicOwnerOnlyWrite(
+      targetEnv,
+      await readFile(path.join(installedRelayer, 'env.example')),
+    );
   }
 
   if (process.env.NOOSPHERE_SKIP_NPM !== '1') {
@@ -241,13 +276,19 @@ async function doctor() {
 // File copying
 // ---------------------------------------------------------------------------
 
-async function copyRuntime(source, destination, entries) {
+async function copyRuntime(
+  source,
+  destination,
+  entries,
+  { dereference = false } = {},
+) {
   if (path.resolve(source) === path.resolve(destination)) return;
   await mkdir(destination, { recursive: true, mode: 0o700 });
   for (const entry of entries) {
     const from = path.join(source, entry);
     if (await exists(from)) {
       await cp(from, path.join(destination, entry), {
+        dereference,
         recursive: true,
         force: true,
         filter: (file) =>
@@ -256,6 +297,51 @@ async function copyRuntime(source, destination, entries) {
       });
     }
   }
+}
+
+async function manifestRuntimeEntries(source) {
+  const manifest = JSON.parse(
+    await readFile(path.join(source, 'package.json'), 'utf8'),
+  );
+  if (!Array.isArray(manifest.files)) {
+    throw new Error(`Runtime package has no files manifest: ${source}`);
+  }
+  return [
+    ...new Set([
+      'package.json',
+      ...manifest.files.map((entry) => entry.replaceAll('\\', '/').split('/')[0]),
+    ]),
+  ];
+}
+
+async function resolveSecureFsPath() {
+  const candidates = [
+    path.join(sourceRoot, 'noosphere-secure-fs'),
+    path.join(sourceMcp, 'node_modules', '@noosphere', 'secure-fs'),
+  ];
+  for (const candidate of candidates) {
+    if (
+      await exists(path.join(candidate, 'package.json'))
+      && await exists(path.join(candidate, 'index.js'))
+      && await exists(path.join(candidate, 'windows-owner-only.ps1'))
+    ) return candidate;
+  }
+  throw new Error('Could not locate bundled @noosphere/secure-fs runtime package.');
+}
+
+async function resolveAcpProtocolPath() {
+  const candidates = [
+    path.join(sourceRoot, 'noosphere-acp-protocol'),
+    path.join(sourceMcp, 'node_modules', '@noosphere', 'acp-protocol'),
+  ];
+  for (const candidate of candidates) {
+    if (
+      await exists(path.join(candidate, 'package.json'))
+      && await exists(path.join(candidate, 'index.js'))
+      && await exists(path.join(candidate, 'schema.json'))
+    ) return candidate;
+  }
+  throw new Error('Could not locate bundled @noosphere/acp-protocol runtime package.');
 }
 
 // ---------------------------------------------------------------------------

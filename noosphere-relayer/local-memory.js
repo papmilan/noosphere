@@ -1,18 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import {
-  rename,
-  writeFile,
-} from 'node:fs/promises';
 import path from 'node:path';
-import { PathBoundaryError, ensureRealDirectoryPath, readContainedStateFile } from './secure-fs.js';
+import { PathBoundaryError, atomicOwnerOnlyWrite, ensureRealDirectoryPath, readContainedStateFile } from './secure-fs.js';
 
 export class LocalMemoryStore {
-  constructor(env, { defaultPath }) {
+  constructor(env, { defaultPath, secureFileOptions = {} }) {
     this.memories = new Map();
     this.loaded = false;
     this.persistent = env.NODE_ENV !== 'test';
     this.filePath = env.LOCAL_MEMORY_PATH || defaultPath;
     this.writeChain = Promise.resolve();
+    this.secureFileOptions = secureFileOptions;
   }
 
   health(mode) {
@@ -79,7 +76,7 @@ export class LocalMemoryStore {
     try {
       // SEC-03: read through the same trust boundary writeToDisk() uses — reject a
       // symlinked directory/file and never follow one outside the root.
-      raw = await readContainedStateFile(this.filePath);
+      raw = await readContainedStateFile(this.filePath, this.secureFileOptions);
     } catch (error) {
       // Boundary violation: fail closed AND stay retryable — do not mark loaded, so
       // every subsequent call keeps rejecting until the hostile path is corrected
@@ -115,16 +112,14 @@ export class LocalMemoryStore {
   async writeToDisk() {
     const dir = path.dirname(this.filePath);
     await ensureRealDirectoryPath(dir, { mode: 0o700 });
-    const temporary = `${this.filePath}.${randomUUID()}.tmp`;
-    await writeFile(
-      temporary,
+    await atomicOwnerOnlyWrite(
+      this.filePath,
       `${JSON.stringify(
         { projects: Object.fromEntries(this.memories) },
         null,
         2,
       )}\n`,
-      { encoding: 'utf8', mode: 0o600 },
+      this.secureFileOptions,
     );
-    await rename(temporary, this.filePath);
   }
 }

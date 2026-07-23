@@ -1,14 +1,12 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import {
   access,
   constants,
-  rename,
   unlink,
-  writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
-import { syncDirectoryPath, syncFilePath } from './durability.js';
-import { PathBoundaryError, ensureRealDirectoryPath, readContainedStateFile } from './secure-fs.js';
+import { syncDirectoryPath } from './durability.js';
+import { PathBoundaryError, atomicOwnerOnlyWrite, ensureRealDirectoryPath, readContainedStateFile } from './secure-fs.js';
 
 const DEFAULT_RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -19,12 +17,14 @@ export class DurableStore {
     receiptTtlMs = DEFAULT_RECEIPT_TTL_MS,
     now = () => Date.now(),
     shared = false,
+    secureFileOptions = {},
   }) {
     this.filePath = filePath;
     this.persist = persist;
     this.receiptTtlMs = receiptTtlMs;
     this.now = now;
     this.shared = shared;
+    this.secureFileOptions = secureFileOptions;
     this.state = this.emptyState();
     this.loaded = false;
     this.initializationPromise = null;
@@ -45,7 +45,7 @@ export class DurableStore {
     try {
       // SEC-03: read through the same trust boundary writeState() uses — reject a
       // symlinked directory/file and never follow one outside the root.
-      raw = await readContainedStateFile(this.filePath);
+      raw = await readContainedStateFile(this.filePath, this.secureFileOptions);
     } catch (error) {
       if (error instanceof PathBoundaryError) throw error; // fail closed on symlink
       throw new Error(`Could not load runtime state: ${error.message}`);
@@ -232,14 +232,11 @@ export class DurableStore {
   async writeState() {
     const directory = path.dirname(this.filePath);
     await ensureRealDirectoryPath(directory, { mode: 0o700 });
-    const temporary = `${this.filePath}.${randomUUID()}.tmp`;
-    await writeFile(
-      temporary,
+    await atomicOwnerOnlyWrite(
+      this.filePath,
       `${JSON.stringify(this.state, null, 2)}\n`,
-      { encoding: 'utf8', mode: 0o600 },
+      this.secureFileOptions,
     );
-    await syncFilePath(temporary);
-    await rename(temporary, this.filePath);
     await syncDirectoryPath(path.dirname(this.filePath));
   }
 

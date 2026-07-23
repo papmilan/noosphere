@@ -8,7 +8,7 @@ import path from 'node:path';
 import { canonicalize } from '@noosphere/acp-protocol';
 import { createExecutionState } from './execution-state.js';
 import { renderExecutionKernel } from './execution-render.js';
-import { ensureContainedDir } from '../secure-fs.js';
+import { ensureContainedDir, readOwnerOnlyFile, writeOwnerOnlyFileExclusive } from '../secure-fs.js';
 
 const DEFAULT_AGENT_ID = 'default';
 const AGENT_ID = /^[a-z0-9](?:[a-z0-9-]{0,62})?$/;
@@ -40,11 +40,9 @@ export async function executionGeneration(root, agentId = DEFAULT_AGENT_ID) {
 
 export async function readExecutionState(root, options = {}) {
   const { json } = executionPaths(root, options.agentId);
-  let raw;
-  try { raw = await readFile(json, 'utf8'); } catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  }
+  const bytes = await readOwnerOnlyFile(json, secureOptions(root, options));
+  if (bytes === null) return null;
+  const raw = bytes.toString('utf8');
   let envelope;
   try { envelope = JSON.parse(raw); } catch {
     return { ok: false, errors: [{ path: '$', code: 'malformed-json', message: 'execution checkpoint is not valid JSON' }] };
@@ -77,7 +75,12 @@ export async function writeExecutionState(root, envelope, options = {}) {
   return withAgentLock(root, paths, async () => {
     const generation = await readGeneration(paths.generation);
     if (options.expectedGeneration != null && options.expectedGeneration !== generation) throw executionError('checkpoint-cleared');
-    const previous = await readExecutionState(root, { agentId, now: options.now, policy: options.policy });
+    const previous = await readExecutionState(root, {
+      agentId,
+      now: options.now,
+      policy: options.policy,
+      secureFileOptions: options.secureFileOptions,
+    });
     if (previous?.ok && previous.state.envelope.origin.agent_id !== envelope.origin.agent_id) {
       throw executionError('agent-id-collision');
     }
@@ -90,8 +93,8 @@ export async function writeExecutionState(root, envelope, options = {}) {
     const jsonTmp = `${paths.json}.${token}.tmp`;
     const mdTmp = `${paths.markdown}.${token}.tmp`;
     try {
-      await writeFile(jsonTmp, `${JSON.stringify(sealed, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
-      await writeFile(mdTmp, `${kernel}\n`, { mode: 0o600, flag: 'wx' });
+      await writeOwnerOnlyFileExclusive(jsonTmp, `${JSON.stringify(sealed, null, 2)}\n`, secureOptions(root, options));
+      await writeOwnerOnlyFileExclusive(mdTmp, `${kernel}\n`, secureOptions(root, options));
       await (options.rename ?? rename)(jsonTmp, paths.json);
       await (options.rename ?? rename)(mdTmp, paths.markdown);
     } finally {
@@ -158,3 +161,7 @@ function defaultVerdict(envelope) {
 }
 
 function executionError(code) { return Object.assign(new Error(code), { code }); }
+
+function secureOptions(root, options = {}) {
+  return { ...(options.secureFileOptions || {}), root };
+}

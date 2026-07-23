@@ -208,10 +208,10 @@ describe('ACP sync metadata confirmations', () => {
 });
 
 describe('ACP quarantine', () => {
-  it('changes permissions only through the already-open file descriptor', async () => {
+  it('routes quarantine bytes through the shared pre-write owner-only boundary', async () => {
     const source = await readFile(QUARANTINE_WRITER, 'utf8');
-    assert.match(source, /handle\.chmod\(0o600\)/);
-    assert.doesNotMatch(source, /chmod\(filename/);
+    assert.match(source, /writeOwnerOnlyFileExclusive/);
+    assert.doesNotMatch(source, /handle\.writeFile/);
     assert.match(source, /syncDirectoryPath\('\.'\)/);
   });
 

@@ -1,6 +1,7 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+
+import { atomicOwnerOnlyWrite, readOwnerOnlyFile } from './secure-fs.js';
 
 // Trust boundary for the relayer credential (NOOSPHERE_API_TOKEN).
 //
@@ -97,15 +98,15 @@ function classifyIpv6(host) {
   return 'public';
 }
 
-export async function loadApprovedOrigins(env = process.env) {
-  const raw = await readFile(approvedOriginsPath(env), 'utf8').catch((error) => {
+export async function loadApprovedOrigins(env = process.env, secureFileOptions = {}) {
+  const raw = await readOwnerOnlyFile(approvedOriginsPath(env), secureFileOptions).catch((error) => {
     if (error.code === 'ENOENT') return null;
     throw error;
   });
   if (raw === null) return new Set();
   let parsed;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(raw.toString('utf8'));
   } catch {
     throw new RelayerAuthorityError('approved-store-corrupt', 'approved relayer store is not valid JSON');
   }
@@ -119,16 +120,19 @@ export async function loadApprovedOrigins(env = process.env) {
   }).filter(Boolean));
 }
 
-export async function approveOrigin(relayerUrl, env = process.env) {
+export async function approveOrigin(relayerUrl, env = process.env, secureFileOptions = {}) {
   const { origin, scheme, host } = normalizeOrigin(relayerUrl);
   if (classifyHost(host) !== 'loopback' && scheme !== 'https:') {
     throw new RelayerAuthorityError('insecure-relayer-scheme', 'only HTTPS origins can be approved (loopback excepted)');
   }
   const file = approvedOriginsPath(env);
-  const approved = await loadApprovedOrigins(env);
+  const approved = await loadApprovedOrigins(env, secureFileOptions);
   approved.add(origin);
-  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  await writeFile(file, `${JSON.stringify({ version: 1, approved_origins: [...approved].sort() }, null, 2)}\n`, { mode: 0o600 });
+  await atomicOwnerOnlyWrite(
+    file,
+    `${JSON.stringify({ version: 1, approved_origins: [...approved].sort() }, null, 2)}\n`,
+    secureFileOptions,
+  );
   return origin;
 }
 

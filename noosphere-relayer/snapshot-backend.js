@@ -1,45 +1,10 @@
-import { createHash, randomUUID } from 'node:crypto';
-import fs from 'node:fs';
-import { access, chmod, constants, mkdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { access, constants, mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { syncDirectoryPath, syncFilePath } from './durability.js';
-import { ensureContainedDir } from './secure-fs.js';
+import { syncDirectoryPath } from './durability.js';
+import { PathBoundaryError, atomicOwnerOnlyWrite, ensureContainedDir, readOwnerOnlyFile } from './secure-fs.js';
 
 const SNAPSHOT_ID = /^sha256:[0-9a-f]{64}$/;
-const NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
-
-// Read a snapshot file without following a final-component symlink. Returns a
-// Buffer, null on ENOENT, or throws a fail-closed error if the path is a symlink
-// (an attacker-planted link must never redirect a read outside the root).
-function readSnapshotNoFollow(target) {
-  // SEC-03 (Windows): O_NOFOLLOW is a no-op when unavailable (NOFOLLOW === 0), so
-  // reject a reparse final component with an explicit lstat pre-check there. On
-  // POSIX the O_NOFOLLOW open is authoritative and this is skipped.
-  if (NOFOLLOW === 0) {
-    let info;
-    try {
-      info = fs.lstatSync(target);
-    } catch (error) {
-      if (error.code === 'ENOENT') return null;
-      throw error;
-    }
-    if (info.isSymbolicLink()) throw exactError('snapshot-path-symlink', 409);
-  }
-  let fd;
-  try {
-    fd = fs.openSync(target, fs.constants.O_RDONLY | NOFOLLOW);
-  } catch (error) {
-    if (error.code === 'ELOOP') throw exactError('snapshot-path-symlink', 409);
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  }
-  try {
-    return fs.readFileSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
 export class SnapshotBackend {
   async put() { throw new Error('not-implemented'); }
   async get() { throw new Error('not-implemented'); }
@@ -47,11 +12,12 @@ export class SnapshotBackend {
 }
 
 export class FileSnapshotBackend extends SnapshotBackend {
-  constructor({ root, shared = false }) {
+  constructor({ root, shared = false, secureFileOptions = {} }) {
     super();
     this.root = root;
     this.shared = shared;
     this.writes = new Map();
+    this.secureFileOptions = secureFileOptions;
   }
 
   pathFor(projectId, snapshotId) {
@@ -75,9 +41,12 @@ export class FileSnapshotBackend extends SnapshotBackend {
     const previous = this.writes.get(target) || Promise.resolve();
     const operation = previous.catch(() => undefined).then(async () => {
       await this.ensureContainedDirFor(target);
-      const existing = readSnapshotNoFollow(target);
+      const existing = await readSnapshotOwnerOnly(target, this.root, this.secureFileOptions);
       if (existing && !existing.equals(bytes)) throw exactError('snapshot-integrity-conflict');
-      if (!existing) await atomicOwnerOnlyWrite(target, bytes);
+      if (!existing) {
+        await atomicOwnerOnlyWrite(target, bytes, { ...this.secureFileOptions, root: this.root });
+        await syncDirectoryPath(path.dirname(target));
+      }
       return { backend: 'file', locator: snapshotId, bytes: bytes.length };
     });
     this.writes.set(target, operation);
@@ -89,7 +58,7 @@ export class FileSnapshotBackend extends SnapshotBackend {
   async get(projectId, snapshotId) {
     const target = this.pathFor(projectId, snapshotId);
     await this.ensureContainedDirFor(target);
-    const bytes = readSnapshotNoFollow(target);
+    const bytes = await readSnapshotOwnerOnly(target, this.root, this.secureFileOptions);
     if (bytes === null) throw exactError('snapshot-not-found', 404);
     return bytes;
   }
@@ -98,6 +67,17 @@ export class FileSnapshotBackend extends SnapshotBackend {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     await access(this.root, constants.R_OK | constants.W_OK);
     return { ready: true, durable: true, shared: this.shared, backend: 'file' };
+  }
+}
+
+async function readSnapshotOwnerOnly(target, root, secureFileOptions) {
+  try {
+    return await readOwnerOnlyFile(target, { ...secureFileOptions, root });
+  } catch (error) {
+    if (error instanceof PathBoundaryError && error.code === 'state-file-symlink') {
+      throw exactError('snapshot-path-symlink', 409);
+    }
+    throw error;
   }
 }
 
@@ -112,26 +92,6 @@ export function exactError(code, status = 409, details) {
   if (details !== undefined) error.details = details;
   return error;
 }
-
-async function atomicOwnerOnlyWrite(target, bytes) {
-  // SEC-03: the per-project directory was already created and symlink-validated by
-  // ensureContainedDirFor() in the only caller (put), so a second recursive mkdir
-  // here is dead — and a follow-prone one that only widens the TOCTOU window. The
-  // O_EXCL ('wx') temp create plus a rename that replaces (never follows) the final
-  // link keep the write contained.
-  const temporary = `${target}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, bytes, { mode: 0o600, flag: 'wx' });
-    await chmod(temporary, 0o600);
-    await syncFilePath(temporary);
-    await rename(temporary, target);
-    await syncDirectoryPath(path.dirname(target));
-  } catch (error) {
-    await unlink(temporary).catch(() => undefined);
-    throw error;
-  }
-}
-
 
 function hash(value) {
   return createHash('sha256').update(value, 'utf8').digest('hex');
