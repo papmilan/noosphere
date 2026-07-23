@@ -1,18 +1,25 @@
 # SEC-05 — Semantic-memory prompt/control injection: threat model & plan
 
-> **Status: DESIGN v2 (REMEDIATED, no implementation started).** SEC-01 and
+> **Status: DESIGN v3 (REMEDIATED, no implementation started).** SEC-01 and
 > SEC-03 are CLOSED. SEC-05 is the active security milestone and the last
 > public-release blocker. This document is the pre-implementation design, threat
 > model, and PR roadmap. No implementation code is changed by this document.
 >
-> **v2 supersedes the v1 trust anchor.** The architecture review found an
-> authority-laundering path: untrusted recall written by the Walrus restore flow
-> into an owner-source local path (`index.js:1975‑1979`) was re-read as
-> `origin=local-file` and rendered as unquoted "Pinned master prompt" authority
-> (`index.js:908‑914`). v1's `trusted = origin=local-file` rule blessed it.
-> §4 now defines trust by a **persisted, hash-bound, owner-authored provenance
-> record** — never by filesystem location — and the roadmap lands provenance and
-> filesystem taint **before** any phase that grants authority.
+> **v2 supersedes the v1 trust anchor** (path-based trust); v1 allowed
+> untrusted recall written by the Walrus restore flow into an owner-source local
+> path (`index.js:1975‑1979`) to be re-read as `origin=local-file` and rendered as
+> unquoted "Pinned master prompt" authority (`index.js:908‑914`).
+>
+> **v3 supersedes the v2 provenance *location*.** The re-review found that an
+> in-tree, self-asserting "owner-only sidecar" is still forgeable: a `git clone` /
+> import / archive / restore can ship a provenance record already asserting
+> `trust=trusted, origin=owner, ownerScope=<victim>, contentHash=<match>` — the
+> SEC-01 repository-controlled-trust mistake. v3 makes **trust-bearing provenance
+> live in an owner-only, out-of-tree, machine-authenticated trust store** that
+> repository content can never populate, binds a **non-repo project identity**,
+> disables legacy path-based authority in the **first** merged phase (fail-closed),
+> and fully specifies **owner approval** and **restore currency** (anti-rollback).
+> Blocker/major mapping in §9.
 
 ## 0. Current state (what already exists)
 
@@ -224,24 +231,78 @@ trusted transition is an explicit, authenticated owner-approval event recorded i
 provenance (or, on restore, an authenticated content-hash + owner-scope match to
 a prior owner-authored record). Trust is never inferred from a filename or path.
 
-### 4.1 Persistent provenance model (survives filesystem round-trips)
+### 4.1 Authenticated provenance store (out-of-tree, not repository-controlled)
 
-Every managed artifact carries a provenance record persisted **beside it** in an
-owner-only sidecar (SEC-03 boundary), never recomputed from location:
+**Repository-delivered provenance is always discarded for trust decisions.** No
+file inside the project tree — no `.prov`, no manifest, no tracked
+`.noosphere/*`, nothing arriving via git/clone/checkout/archive/import/migration/
+package/backup/restore — can carry authoritative trust. Such data is untrusted
+input, period (invariants 1, 2, 8).
 
-- **provenance.origin** ∈ `{owner, recall, walrus-restore, import, summary, tool, repo}`
-- **trust** — `trusted | untrusted` (persisted `trusted` only for origin=`owner`
-  with empty untrusted lineage)
-- **ownership** — `ownerScope` (authenticated SEC-01 owner scope), `authoredBy`
-- **authenticity** — `recordId`, `contentHash` (SHA-256 of normalized bytes),
-  `ts`, optional `signature` (future, delegate key)
-- **lineage** — `derivedFrom[]` (input recordIds/hashes); taint = max over lineage
-- **approval** — `approvedBy`, `approvedAt` (the sole untrusted→trusted path)
+**Trust-bearing provenance lives only in an owner-only, out-of-tree trust store**
+(the SEC-01 pattern applied to SEC-05): under the owner's home, e.g.
+`~/.noosphere/trust/<owner-scope>/<project-identity>/<slot>.json`, protected by
+the SEC-03 owner-only boundary (no-follow, owner-only ACL/mode). It is never in
+the project tree, so a clone cannot ship it.
 
-Read rule: loading bytes loads the sidecar; a **missing or hash-mismatched**
-sidecar **fails closed to untrusted**. Migration of legacy files without a
-sidecar ⇒ untrusted until explicit owner re-authorship/approval (no auto-trust).
-Backup carries the sidecar; restore is handled in §4.3.
+**Authenticity construction — Option C (both).**
+1. *Out-of-tree owner-only store* is the primary anchor: only the owner process on
+   this machine can create/read it; repository content cannot reach it.
+2. *Machine-local keyed MAC*: each slot record carries
+   `mac = HMAC(machineKey, canonical(record))`. `machineKey` is a random secret
+   generated on first init, stored owner-only out-of-tree (never in any repo),
+   protected by SEC-03. A record that was copied from another machine/owner, or
+   mutated, fails MAC verification → untrusted. This stops transplanting the trust
+   store itself.
+
+**Authoritative slot record** (per §5 restore/approval), stored out-of-tree:
+- `projectIdentity` (see §4.1.1), `slotIdentity` (e.g. `master-prompt`)
+- `ownerScope`, `contentHash` (SHA-256 of normalized current bytes)
+- `generation` (monotonic ≥ previous; the ordering authority for currency)
+- `approvedAt` (audit only, **not** the ordering authority), `approvedBy`
+- `auditLog[]` (append-only), `mac`
+
+**Per-object provenance** (in-memory / cache metadata; not a trust anchor):
+`{origin ∈ {owner, recall, walrus-restore, import, summary, tool, repo},
+trust, derivedFrom[], recordId, contentHash, ts}`. `trust=trusted` is only ever
+derived by matching an authenticated out-of-tree slot record (identity + slot +
+`contentHash` + `ownerScope`, MAC-valid, current `generation`) — never persisted
+into or read from repo-reachable storage.
+
+**Read/keying rules.** Trust for `(projectIdentity, slotIdentity, bytes)` is
+established **only** when an out-of-tree slot record exists whose `contentHash`
+equals the SHA-256 of the current normalized bytes, `ownerScope` matches the
+live owner, the MAC verifies, and the `generation` is current. **Missing,
+unreadable, MAC-invalid, hash-mismatched, ambiguous, or non-current** records
+**fail closed to untrusted.** A repository-controlled `projectId` string is never
+sufficient by itself (see §4.1.1). Legacy/migrated installs without a slot record
+are untrusted until an explicit owner approval (§4.7).
+
+### 4.1.1 Project identity (not selectable by repository content)
+
+Trust is **machine-local ∧ owner-local ∧ project-instance-local**. Project
+identity is an **owner-only, out-of-tree instance id** minted at first local
+`init` and stored in the trust store, mapped to the local instance. It is **not**
+derived from — and cannot be selected by — any repository-controlled value:
+path, repo name, remote URL, or an in-repo `projectId`. A repository-history
+anchor (root-commit oid) may be recorded as a **non-authoritative hint** to help
+map a re-clone, but authority always requires the local out-of-tree record; the
+hint alone never confers trust.
+
+Consequences (security ∧ usability):
+
+| Scenario | Identity/trust outcome |
+| --- | --- |
+| Legitimate project (approved on this machine/owner) | has a local instance id + slot records → trust works |
+| Fork / clone in another dir / copied working tree | **no** local slot record for those bytes → **untrusted** until the owner explicitly approves locally |
+| Repository with a forged remote URL / chosen `projectId` | ignored; identity is out-of-tree, so no inherited trust (a malicious clone cannot *select* a trusted project's identity) |
+| Fresh clone after machine reinstall | trust store gone → everything untrusted until re-approval (fail-closed) |
+| Multiple worktrees | each worktree is its own instance unless the owner approves it; no implicit sharing |
+| Repository ownership transfer | new `ownerScope` → prior records don't match → untrusted until re-approval |
+
+Usability cost (accepted): a fresh clone / new machine renders owner-source
+files as **quoted, non-authoritative** until the owner runs the approval
+operation (§4.7). Security win: repository content can never bootstrap authority.
 
 ### 4.2 Filesystem taint (sticky taint across the FS boundary)
 
@@ -267,26 +328,49 @@ Sticky taint spans memory **and** the filesystem:
 
 Restore MUST NOT create an object a later read interprets as owner-authored.
 **Preferred:** restored bytes land in a distinct staging path (e.g. `*.restored`)
-rendered quoted; **alternative:** write the source path but stamp a
-`restored/untrusted` sidecar the renderer honors. Either satisfies the invariants;
-staging is preferred so owner-source paths keep meaning "owner-authored".
+rendered quoted; **alternative:** write the source path but the renderer trusts it
+only via §4.1 (an out-of-tree slot record for those exact bytes). Either way,
+repository/restored bytes never confer authority by themselves.
+
+**Restore currency (anti-rollback).** Authenticated restore may regain trust
+**only** when the restored bytes match the **current** authoritative slot record
+for that slot (`contentHash` **and** current `generation`), MAC-valid, owner/
+project scope matching. An older, previously-trusted version does **not**
+automatically replace the current version — that is a trusted-state rollback and
+is refused (rendered quoted). Handling:
+
+| Case | Behavior |
+| --- | --- |
+| Explicit owner rollback | requires a **new** owner approval event (§4.7) that mints a **new** monotonic `generation` for the old bytes; never silent |
+| Stale backup restored | `generation` < current ⇒ untrusted/quoted |
+| Concurrent machines | each machine's store is independent; a record from another machine fails MAC ⇒ untrusted |
+| Cloned project | no local slot record ⇒ untrusted |
+| Deleted trust-store state / disaster recovery | nothing trusted until owner re-approval (fail-closed) |
+
+`approvedAt` is audit metadata only; `generation` is the sole ordering authority
+(clock skew/replay cannot reorder currency).
 
 ### 4.4 Authority model (rendering — documented separately from provenance)
 
-The renderer is a pure function of `(text, provenanceRecord)`. **Unquoted
-authority allowlist** — rendered as authority **only** when
-`trust=trusted ∧ origin=owner ∧ lineage has no untrusted ancestor`, and the
-artifact is one of:
-- owner-authored `master-prompt.md`
-- owner-authored `instructions.md`
-- owner-authored `followups.jsonl` entries
-- owner-authored `baseline.md`
+The renderer is a pure function of `(text, authenticatedTrustLookup)`. **Unquoted
+authority is rendered only when ALL of these hold** (every condition mandatory):
+- the artifact is an allowlisted slot: owner-authored `master-prompt.md`,
+  `instructions.md`, `followups.jsonl` entries, or `baseline.md`;
+- an **out-of-tree** slot record (§4.1) exists for the exact current normalized
+  bytes with `origin=owner`;
+- `trust=trusted` and lineage has no untrusted ancestor;
+- `ownerScope` matches the live owner and `projectIdentity` matches the local
+  instance (§4.1.1);
+- `contentHash` equals SHA-256 of the current normalized bytes;
+- the slot record's **`generation` is current** (anti-rollback, §4.3);
+- the record's **MAC verifies** with the machine-local key.
 
 **Everything else is always quoted data:** recalled, restored, derived, summary,
 cached (incl. `context.md` contents), imported, replayed, journal handoffs, or any
-artifact with a missing/failed provenance record. The renderer decides on the
-provenance record alone — never on which prompt section/slot the content fills —
-so no adapter can re-derive trust.
+artifact with a missing / MAC-invalid / hash-mismatched / non-current / repo-
+delivered provenance record. The renderer consults the authenticated trust store
+alone — never a path, a filename, an in-tree sidecar, or which prompt section the
+content fills — so no adapter can re-derive trust.
 
 ### 4.5 Artifact classification
 
@@ -304,35 +388,87 @@ so no adapter can re-derive trust.
 | replay artifacts / duplicate recalls | replayed | untrusted | no |
 | `runtime-state.json` | observational / machine | n/a (not prompt authority) | no |
 
+### 4.6 Mixed-trust derived artifacts
+
+**A derived artifact containing both trusted and untrusted excerpts is untrusted
+as a whole.** Trusted excerpts inside `context.md`, summaries, caches, indexes,
+rendered prompts, or exported diagnostics **cannot be re-promoted from the derived
+artifact**. Any later authority decision must return to the **original
+authenticated source slot record and the exact source bytes** (§4.1/§4.4) — never
+lift a "trusted-looking" excerpt back out of a derived file.
+
+### 4.7 Owner-approval protocol (the sole untrusted→trusted transition)
+
+Approval **materializes a new authenticated owner slot record for the exact
+current bytes and slot** (preferred model — approval creates a new owner-authored
+record, it does not bless arbitrary foreign bytes in place). Every condition is
+mandatory:
+
+- **Explicit owner action** through a dedicated approval operation
+  (e.g. `noosphere approve-source <slot>`); never implicit, never a side effect.
+- **Authenticated owner authority** — the local owner running the CLI under the
+  SEC-03 owner-only boundary; the record is MAC-signed with the machine-local key.
+- **Exact bytes shown/bound** — the operation displays and binds the exact
+  normalized bytes and their `contentHash` being approved.
+- **Exact slot, project scope, owner scope** bound into the record.
+- **New monotonic `generation`** minted (≥ previous), recorded as the ordering
+  authority.
+- **Immutable append-only audit record** (`auditLog[]`) in the out-of-tree store.
+- **No inference** of approval from natural-language prompts, model output,
+  issues, PRs, commit messages, tool outputs, or recalled memory.
+- **No wildcard / bulk approval** of unseen descendants.
+- **Summary/source independence:** approving a summary does not approve its
+  sources; approving a source does not approve later summaries, transformations,
+  or edits.
+- **Mutation invalidates trust:** any post-approval byte change ⇒ `contentHash`
+  mismatch ⇒ untrusted (fail-closed).
+- **Replay-safe:** a replayed approval event cannot authorize different bytes or a
+  different version — the record is bound to `contentHash` + `generation`.
+
+Explicit rollback to older bytes is itself a new approval producing a new
+`generation` (§4.3) — never a silent revert.
+
 ---
 
-## 5. Security invariants (mandatory, v2)
+## 5. Security invariants (mandatory, v3)
 
-1. **Trust is a provenance property, never a filesystem location.** Trust is read
-   from a persisted, hash-bound provenance record, not inferred from a path/name.
-2. **Only owner-authored source is trusted.** `origin=owner` with no untrusted
-   lineage; every other class (derived, restored, imported, replayed, summary,
-   cached) is untrusted by default.
-3. **No auto-promotion.** Untrusted→trusted happens only via an explicit,
-   authenticated owner-approval event (or authenticated `contentHash`+`ownerScope`
-   match on restore), recorded in provenance.
-4. **Provenance survives filesystem round-trips.** Owner-only sidecar, content-hash
-   bound; a missing/mismatched sidecar fails closed to `untrusted`.
-5. **Reading never upgrades taint.** Taint = max over lineage; a read cannot raise
-   trust.
-6. **Authority = allowlisted owner-authored source only.** Unquoted authority is
-   rendered only for the §4.4 allowlist; everything else is always quoted data, at
-   every sink, in every adapter. The renderer decides on provenance alone.
-7. **Structural neutralization is complete.** After normalization no recalled line
-   can forge a delimiter/fence/heading/role label, and no invisible/format/tag/
-   bidi/escape/`U+2028`/`U+2029` character survives.
-8. **Sticky taint spans memory and filesystem.** restore/backup/import/cache/
-   context regeneration preserve `untrusted`; content can never re-enter as
-   trusted by round-tripping through a file (closes the restore-laundering path).
-9. **Approval is never inferred.** Approval/policy/execution state is read only
-   from owner-only stores, never from prompts, memory, or rendered artifacts.
-10. **Every trusted object has an authenticated origin and a content hash.** No
-    trusted object exists without an owner-scope origin and a verifiable hash.
+1. **Trust is a provenance property, never a filesystem location.** Trust comes
+   from an authenticated slot record, not from a path/name.
+2. **Only owner-authored source is trusted.** `origin=owner`, no untrusted
+   lineage; derived/restored/imported/replayed/summary/cached are untrusted by
+   default.
+3. **No auto-promotion.** Untrusted→trusted only via the explicit authenticated
+   owner-approval protocol (§4.7), or a current-generation authenticated restore
+   match (§4.3).
+4. **Reading never upgrades taint.** Taint = max over lineage.
+5. **Authority = allowlisted owner-authored source only**, and only when all §4.4
+   conditions hold; everything else is always quoted, at every sink/adapter.
+6. **Structural neutralization is complete.** After normalization no recalled line
+   can forge a delimiter/fence/heading/role label; no invisible/format/tag/bidi/
+   escape/`U+2028`/`U+2029` character survives.
+7. **Sticky taint spans memory and filesystem.** restore/backup/import/cache/
+   context regeneration preserve `untrusted`.
+8. **Approval is never inferred** from prompts, memory, model output, or rendered
+   artifacts (§4.7); approval/policy/execution state reads only from owner-only
+   stores.
+9. **Every trusted object has an authenticated origin and content hash** (MAC-valid
+   out-of-tree slot record).
+
+**v3 additions:**
+
+10. **Repository-controlled data can never authenticate trust.**
+11. **Trust-bearing provenance is authenticated outside repository control**
+    (out-of-tree owner-only store + machine-local MAC, §4.1).
+12. **Project identity cannot be selected or forged by repository content** (§4.1.1).
+13. **The first implementation phase disables all legacy path-based authority**
+    (fail-closed, §7 Phase 1).
+14. **Approval is explicit, bytes/hash-bound, slot-bound, scope-bound,
+    current-generation-bound, and audited** (§4.7).
+15. **Authenticated restore cannot roll an authoritative slot back automatically**
+    (§4.3).
+16. **Mixed-trust derived artifacts are untrusted as a whole** (§4.6).
+17. **Repository-delivered sidecars/manifests are ignored for trust decisions**
+    (§4.1).
 
 ---
 
@@ -345,8 +481,10 @@ Design **red tests first** (fail on today's code), then implement to green.
   zero-width & format chars (ZWSP, WJ, BOM, `U+2060–2064`); **Tag block
   `U+E00xx`**; bidi; nested markup (`<system>`, fenced, heading, `---` pairs);
   NFC idempotence; length bounds; `U+2028` line-split coverage of `quote`.
-- **Unit — provenance/trust:** trusted only for local origin; recall/repo/tool
-  forced untrusted; sticky taint on re-store; render-without-provenance rejected.
+- **Unit — trust store / provenance:** trust only from a MAC-valid, current-
+  generation, scope-matching **out-of-tree** slot record; in-tree/clone-delivered
+  provenance ignored; recall/repo/tool forced untrusted; sticky taint on re-store;
+  render-without-authenticated-record ⇒ quoted; mutation-after-approval ⇒ quoted.
 - **Integration — every sink:** `buildOllamaSystemPrompt`, `context.md`
   generation, and each generated adapter — assert no untrusted block is emitted
   unquoted (parametrized over all adapters, not just Ollama), incl. the
@@ -364,95 +502,108 @@ Design **red tests first** (fail on today's code), then implement to green.
 
 ---
 
-## 7. Implementation roadmap (v2 — reordered; independently reviewable PRs)
+## 7. Implementation roadmap (v3 — no unsafe intermediate state)
 
 Each phase is a self-contained PR: red tests → minimal boundary → green →
-evidence. **Ordering rule: persistent provenance and filesystem taint (Phase 1)
-and normalizer closure (Phase 2) land BEFORE any phase that grants authority
-(Phase 3) or writes to source paths (Phase 4).** No phase ships a state where
-authority can be laundered; each phase preserves the invariants of the phases
-before it.
+evidence. **Safety rule: the FIRST merged phase closes the laundering path
+(fail-closed); no mergeable phase knowingly retains `untrusted recall → local
+write → local read → unquoted authority`.**
 
-### Phase 1 — Persistent provenance & filesystem taint core (grants NO authority)
-- **Files:** new `noosphere-mcp/continuity/provenance.js`; owner-only sidecar via
-  `@noosphere/secure-fs`; provenance types in `memory-safety.js`; new
-  `tests/memory-provenance.test.js`.
-- **Interface:** provenance record (§4.1); persist-beside-artifact; `contentHash`
-  binding; lineage taint = max; read = fail-closed `untrusted` on missing/
-  mismatched sidecar; the only untrusted→trusted path is an explicit approval
-  event. No renderer or authority change in this phase.
-- **Tests:** trust-class matrix; sticky taint across write→read; missing/tampered
-  sidecar fails closed; legacy-file migration = untrusted.
-- **Merge criteria:** invariants 1–5, 8, 10 enforced; behavior otherwise
-  unchanged (still quoted where already quoted).
+### Phase 1 — Authenticated trust store + fail-closed authority gate (closes the exploit)
+- **Files:** new `noosphere-mcp/continuity/trust-store.js` (out-of-tree owner-only
+  store + machine-local MAC via `@noosphere/secure-fs`), `provenance.js`; the
+  minimal explicit approval op (`approve-source`); wire the render decision in
+  `index.js` (`context.md` master-prompt/instructions/followups/baseline branches)
+  and `ollama.js` behind the gate; `tests/trust-store.test.js`,
+  `tests/authority-failclosed.test.js`.
+- **Interface:** out-of-tree slot records (§4.1) with project identity (§4.1.1),
+  `contentHash`, `generation`, MAC; **quote-unless-authenticated** gate —
+  **the legacy path-based unquoted "Pinned master prompt"/instructions rendering
+  is disabled**; an artifact is authority only if it satisfies every §4.4
+  condition. Minimal explicit `approve-source` (§4.7) so legit owners can restore
+  authority for current local bytes. Restore stays untrusted/quoted (no re-trust
+  path yet).
+- **Tests (red→green):** the restore-laundering exploit (untrusted recall →
+  `master-prompt.md` → authority) is **blocked**; clone-delivered/in-tree
+  provenance ignored; missing/MAC-invalid/hash-mismatch/wrong-scope ⇒ quoted;
+  approved current bytes ⇒ authority; mutation-after-approval ⇒ quoted.
+- **Merge criteria:** invariants 1–5, 8–14, 17 enforced; **B1 + B2 closed in this
+  single merge.**
 
 ### Phase 2 — Normalizer character-class closure
-- **Files:** `noosphere-mcp/continuity/memory-safety.js`,
-  `noosphere-mcp/tests/memory-safety.test.js`.
+- **Files:** `memory-safety.js`, `tests/memory-safety.test.js`.
 - **Interface:** extend `sanitizeMemoryText`/add `normalizeUntrusted`: NFC;
   `U+2028/2029`/NEL→`\n`; strip all Cf/zero-width, Tag block `U+E00xx`,
-  interlinear, variation selectors; keep `quoteUntrustedMemory` line-split
-  correct under the new separators.
+  interlinear, variation selectors; keep `quoteUntrustedMemory` line-split correct.
 - **Tests:** A2(2028)/A4/A5/A6 red→green; NFC idempotence; existing cases green.
-- **Merge criteria:** invariant 7; no line escapes `> ` quoting; zero regressions.
+- **Merge criteria:** invariant 6.
 
-### Phase 3 — Single renderer + authority allowlist (all adapters)
-- **Files:** `ollama.js` (incl. the `instructions` sink), the generated-adapter
+### Phase 3 — Renderer/sink unification + adapter inventory
+- **Files:** `ollama.js` (incl. `instructions` sink), all generated-adapter
   builders, `context.md`; `tests/adapter-injection.test.js`. Enumerate the full
   adapter inventory as a merge gate.
-- **Interface:** one renderer = pure `(text, provenanceRecord)`; unquoted only for
-  the §4.4 allowlist; every other block quoted + framed; the `instructions` sink
-  is provenance-checked, not sanitize-only.
+- **Interface:** one renderer consulting the authenticated trust store; every
+  non-authoritative block quoted + framed at every sink.
 - **Tests:** parametrized over **every** adapter — no untrusted block unquoted;
-  A1/A14 red→green; A11 tool-trigger strings stay quoted; Ollama test preserved.
-- **Merge criteria:** invariant 6 at every sink; adapter inventory complete.
+  A1/A14; A11 tool-trigger strings stay quoted; Ollama test preserved.
+- **Merge criteria:** invariant 5 at every sink; inventory complete.
 
-### Phase 4 — Restore / backup / import / migration hardening
-- **Files:** `continuity/index.js` restore path (`~L1964‑1992`) and recall/
-  promotion path; `csp/summary.js` (summary origin); `tests/restore-taint.test.js`.
-- **Interface:** restored bytes → `restored/untrusted` (staging path or tainted
-  sidecar, §4.3); migration fail-closed; authenticated `contentHash`+`ownerScope`
-  re-trust path; summaries carry `derivedFrom`.
-- **Tests:** the review's restore-laundering exploit (untrusted recall →
-  `master-prompt.md` → unquoted authority) is **blocked**; A7/A9/A10.
-- **Merge criteria:** invariants 3, 8; laundering test red→green.
+### Phase 4 — Restore / import / migration / backup + approval + slot generations
+- **Files:** `index.js` restore path (`~L1964‑1992`) and recall/promotion path;
+  `csp/summary.js` (summary origin, `derivedFrom`); full `approve-source` audit +
+  rollback; `tests/restore-currency.test.js`.
+- **Interface:** current-generation authenticated re-trust on restore (§4.3);
+  anti-rollback; migration fail-closed; full owner-approval protocol (§4.7) with
+  audit log and explicit-rollback-as-new-generation.
+- **Tests:** stale-version restore refused (M2); confused-deputy/replayed approval
+  refused (M1); A7/A9/A10.
+- **Merge criteria:** invariants 3, 7, 14, 15.
 
-### Phase 5 — Retrieval authenticity, replay/freshness, approval-non-inference, docs & closure
+### Phase 5 — Retrieval authenticity, replay/freshness, docs & closure
 - **Files:** recall dedup/freshness in `index.js`; approval-non-inference test;
   `docs/project-memory/THREAT_MODEL.md`, `noosphere-relayer/MEMORY_SECURITY.md`,
   `SECURITY.md`, `CHANGELOG.md`, `noosphere-relayer/SECURITY-FOLLOWUPS.md`.
-- **Tests:** A8 ranking-abuse never fills a trusted slot; A12 approval cannot be
-  set/inferred; A13 replayed memory gains no trust.
-- **Merge criteria:** invariant 9; SEC-05 marked resolved only after all phases
-  merge with green tri-platform CI; only then may the public-readiness statement
-  change.
+- **Tests:** A8 ranking-abuse never fills a trusted slot; A12 approval-non-
+  inference; A13 replayed memory gains no trust.
+- **Merge criteria:** invariant 8; SEC-05 resolved only after all phases merge
+  with green tri-platform CI; only then may the public-readiness statement change.
+
+**Why every mergeable phase is secure:** Phase 1 alone replaces legacy path-based
+authority with the fail-closed authenticated gate, so from the first merge onward
+nothing is authority unless it has an out-of-tree, MAC-valid, current-generation
+owner record — repository/clone/restore content cannot be authority. Phases 2–5
+only tighten normalization, widen sink coverage, and add restore/approval/replay
+machinery on top of an already-closed exploit; none re-opens authority.
 
 ---
 
 ## 8. Open questions
 
-**Resolved in v2 (these changed the security model):**
-- *Trust anchor* → an owner-authored, hash-bound provenance record, never a path
-  (§4.0/§4.1). **Resolved.**
-- *Trusted-slot / master-prompt promotion (was Q2)* → restored/recalled content is
-  untrusted and quoted, never promoted to an authoritative slot; promotion only
-  via explicit owner approval or authenticated hash+scope match (§4.3/§4.4).
-  **Resolved.**
-- *Authenticity anchor (was Q3)* → owner scope + `contentHash` now; delegate-key
-  signature is optional future hardening (§4.1). **Resolved.**
-- *Summary re-ingestion (was Q5)* → untrusted-derived with lineage taint
-  (§4.2/§4.5). **Resolved.**
-- *`context.md` classification* → cached rendering / untrusted-derived, never
-  authority (§4.5). **Resolved.**
+**Security-model decisions — all resolved (v2 + v3):**
+- *Trust anchor* → authenticated out-of-tree, MAC-valid slot record; never a path
+  or in-tree file (§4.1). **Resolved.**
+- *Provenance location & authenticity* → owner-only out-of-tree store + machine-
+  local keyed MAC; repository-delivered provenance discarded (§4.1). **Resolved.**
+- *Project-identity binding* → out-of-tree owner-local instance id, not selectable
+  by repo content (§4.1.1). **Resolved.**
+- *First-phase fail-closed* → legacy path-based authority disabled in Phase 1;
+  quote-unless-authenticated (§7 Phase 1). **Resolved.**
+- *Approval semantics* → explicit, bytes/hash/slot/scope/generation-bound,
+  audited, non-inferable (§4.7). **Resolved.**
+- *Restore currency / rollback* → current-generation match only; explicit rollback
+  = new approval + new generation (§4.3). **Resolved.**
+- *Trusted-slot / master-prompt promotion, summary re-ingestion, `context.md`
+  classification, mixed-trust* → §4.3/§4.4/§4.5/§4.6. **Resolved.**
 
-**Remaining — implementation-level only (do NOT change the guarantees):**
-- **NFC vs NFKC** — both satisfy the explicit strip-list; proposed NFC. Impl detail.
-- **Sidecar shape** — one owner-only manifest vs per-file `.prov`; either works
-  under the SEC-03 boundary. Impl detail.
-- **Restore destination** — distinct `*.restored` staging path vs tainted sidecar
-  in place; both satisfy the invariants (staging preferred). Impl choice.
-- **Freshness key** — exact `recordId + ts + ownerScope + contentHash` composition
-  and retention window vs the server idempotency model. Impl detail (Phase 5).
+**Remaining — implementation-level only (do NOT change any guarantee):**
+- **NFC vs NFKC** — both satisfy the explicit strip-list; proposed NFC.
+- **Store serialization shape** — single owner-only manifest vs per-slot file
+  out-of-tree; either works (both out-of-tree + MAC). Impl choice.
+- **MAC construction** — HMAC-SHA-256 vs an AEAD over the record; both meet the
+  guarantee. Impl choice.
+- **Restore destination** — `*.restored` staging vs in-place-write-then-gate; both
+  satisfy the invariants (staging preferred). Impl choice.
+- **Freshness key composition & retention** — Phase 5 detail atop `generation`.
 - **Adapter inventory** — enumerate the full adapter/`context.md` consumer set as a
   Phase 3 merge gate. Impl gate, not a model change.
 
@@ -461,15 +612,33 @@ implementation.
 
 ---
 
+## 9. Finding-resolution map (re-review B1/B2/M1/M2 + minor)
+
+| Finding | Was | Resolved by |
+| --- | --- | --- |
+| **B1** — in-tree/self-asserting sidecar forgeable via clone/import | Blocker | §4.1 out-of-tree owner-only store + machine-local MAC; §4.1.1 non-repo project identity; invariants 10–12, 17; "repository-delivered provenance is always discarded" |
+| **B2** — roadmap left laundering active across merged phases | Blocker | §7 Phase 1 now ships the fail-closed quote-unless-authenticated gate **and disables legacy path-based authority in the first merge**; invariant 13; "why every mergeable phase is secure" |
+| **M1** — owner-approval under-specified | Major | §4.7 full protocol: explicit, authenticated, bytes/hash/slot/scope/generation-bound, audited, non-inferable, no bulk, summary/source independent, mutation-invalidates, replay-safe; invariant 14 |
+| **M2** — restore re-trust lacked currency (rollback) | Major | §4.3 current-generation-only re-trust; explicit rollback = new approval + new generation; `generation` is sole ordering authority; invariant 15 |
+| **Minor** — mixed-trust derived re-promotion | Minor | §4.6 derived artifact untrusted as a whole; authority decisions return to the source slot record; invariant 16 |
+
+---
+
 ## Review readiness
 
 - **No hidden assumptions** — SEC-01/03 dependencies stated; model-trust
   explicitly excluded as a control.
-- **No circular trust** — trust flows one way; provenance is owner-authored only
-  and sticky taint spans the filesystem, so recall→file→trust laundering is closed.
-- **No hidden promotion path** — the only untrusted→trusted transition is an
-  explicit authenticated owner-approval event (§4.0/invariant 3).
+- **No repository-controlled trust** — trust-bearing provenance is out-of-tree,
+  owner-only, MAC-authenticated; repository/clone/import/restore-delivered records
+  are discarded (§4.1, invariants 10–12, 17), so recall→file→trust laundering and
+  clone-shipped-sidecar laundering are both closed.
+- **No hidden promotion path** — the only untrusted→trusted transition is the
+  explicit authenticated owner-approval protocol (§4.7/invariants 3, 14).
+- **No rollback** — authenticated restore matches current `generation` only;
+  explicit rollback is a new approval (§4.3/invariant 15).
+- **No unsafe intermediate merge** — Phase 1 disables legacy path-based authority
+  and ships the fail-closed gate in the first merge (§7/invariant 13).
 - **No missing trust boundary** — all four transitions in §2 have a named gate;
-  the filesystem write-back channel is now an explicit boundary (§4.2/§4.3).
-- **No implementation started** — this document only; code phases are §7, with
-  provenance + taint ordered before any authority-granting phase.
+  the filesystem write-back and clone/import channels are explicit boundaries
+  (§4.1/§4.3).
+- **No implementation started** — this document only; code phases are §7.
