@@ -1,9 +1,18 @@
 # SEC-05 — Semantic-memory prompt/control injection: threat model & plan
 
-> **Status: DESIGN (no implementation started).** SEC-01 and SEC-03 are CLOSED.
-> SEC-05 is the active security milestone and the last public-release blocker.
-> This document is the pre-implementation design, threat model, and PR roadmap.
-> No implementation code is changed by this document.
+> **Status: DESIGN v2 (REMEDIATED, no implementation started).** SEC-01 and
+> SEC-03 are CLOSED. SEC-05 is the active security milestone and the last
+> public-release blocker. This document is the pre-implementation design, threat
+> model, and PR roadmap. No implementation code is changed by this document.
+>
+> **v2 supersedes the v1 trust anchor.** The architecture review found an
+> authority-laundering path: untrusted recall written by the Walrus restore flow
+> into an owner-source local path (`index.js:1975‑1979`) was re-read as
+> `origin=local-file` and rendered as unquoted "Pinned master prompt" authority
+> (`index.js:908‑914`). v1's `trusted = origin=local-file` rule blessed it.
+> §4 now defines trust by a **persisted, hash-bound, owner-authored provenance
+> record** — never by filesystem location — and the roadmap lands provenance and
+> filesystem taint **before** any phase that grants authority.
 
 ## 0. Current state (what already exists)
 
@@ -175,10 +184,9 @@ end-to-end.
   strip C0 (keep `\t\n`), C1, DEL, all bidi + format/zero-width (Cf), the Tag
   block `U+E0000–E007F`, interlinear annotation, variation selectors. One
   `normalizeUntrusted()` shared by every sink.
-- **Trust labeling.** Produce `{ text, origin, trust: 'trusted'|'untrusted',
-  authoredBy?, recordId?, ts? }`. `trusted` is assigned **only** for
-  origin=`local-file` (owner-only per SEC-03). Recall/repo/tool = `untrusted`,
-  always.
+- **Trust labeling.** Produce a persisted provenance record (see §4.1); trust is
+  a property of that record, **never** of filesystem location. Only
+  owner-authored source (origin=`owner`, no untrusted lineage) is trusted (§4.0).
 - **Memory storage.** Provenance persisted with the record; a re-stored recalled
   item stays `untrusted` (taint is sticky — closes A10).
 - **Retrieval.** `recall` returns typed records with provenance; a "trusted slot"
@@ -196,36 +204,135 @@ end-to-end.
   render/parse of memory can never set or imply it (A12) — enforced by an
   invariant test.
 
-**Explicit classification**
-- *Immutable trusted state* — owner-only local `.noosphere/` files, SEC-01/03
-  approvals, CSP durable truth.
-- *Untrusted observations* — recall, repo/doc/issue/PR/commit, tool outputs.
-- *Derived summaries* — untrusted-by-default; may cite but not replace source.
-- *User-controlled content* — the live turn is authoritative; stored user text
-  recalled later is untrusted like any recall.
+### 4.0 Trust model — object classes (replaces `trusted = origin=local-file`)
+
+Trust is a property of an object's **provenance record**, not its path. Classes:
+
+| Class | Definition | Can become trusted? |
+| --- | --- | --- |
+| **Owner-authored source** | Content the owner authored in the live session into an allowlisted source artifact, stamped `origin=owner` with no untrusted lineage | **YES — the only trusted class** |
+| **Derived** | Produced by transforming other content (renders, indexes) | No — taint = max(inputs) |
+| **Restored** | Written from recall / Walrus / backup into any local path | No — always untrusted |
+| **Imported** | Brought in from another project / namespace / external file | No — untrusted until explicit owner promotion |
+| **Replayed** | A previously-seen object re-presented (dup `recordId` / stale `ts`) | No — untrusted, freshness-checked |
+| **Generated summary** | Model/tool condensation | No — untrusted-derived; must cite source |
+| **Cached rendering** | `context.md` and any materialized prompt/cache | No — untrusted-derived (embeds recall) |
+
+**Default rule:** derived or restored content MUST NOT become trusted
+automatically. Only owner-authored source is trusted. The **only** untrusted→
+trusted transition is an explicit, authenticated owner-approval event recorded in
+provenance (or, on restore, an authenticated content-hash + owner-scope match to
+a prior owner-authored record). Trust is never inferred from a filename or path.
+
+### 4.1 Persistent provenance model (survives filesystem round-trips)
+
+Every managed artifact carries a provenance record persisted **beside it** in an
+owner-only sidecar (SEC-03 boundary), never recomputed from location:
+
+- **provenance.origin** ∈ `{owner, recall, walrus-restore, import, summary, tool, repo}`
+- **trust** — `trusted | untrusted` (persisted `trusted` only for origin=`owner`
+  with empty untrusted lineage)
+- **ownership** — `ownerScope` (authenticated SEC-01 owner scope), `authoredBy`
+- **authenticity** — `recordId`, `contentHash` (SHA-256 of normalized bytes),
+  `ts`, optional `signature` (future, delegate key)
+- **lineage** — `derivedFrom[]` (input recordIds/hashes); taint = max over lineage
+- **approval** — `approvedBy`, `approvedAt` (the sole untrusted→trusted path)
+
+Read rule: loading bytes loads the sidecar; a **missing or hash-mismatched**
+sidecar **fails closed to untrusted**. Migration of legacy files without a
+sidecar ⇒ untrusted until explicit owner re-authorship/approval (no auto-trust).
+Backup carries the sidecar; restore is handled in §4.3.
+
+### 4.2 Filesystem taint (sticky taint across the FS boundary)
+
+Sticky taint spans memory **and** the filesystem:
+- **restore / backup / import** — destination inherits source taint; restored
+  content is untrusted even when written into an allowlisted source path.
+- **cache / context regeneration** — `context.md` = derived, taint = max(inputs)
+  ⇒ untrusted (it embeds recall).
+- **summary generation** — origin=`summary`, untrusted-derived,
+  `derivedFrom` = source recordIds.
+- **read** — never upgrades taint; only an explicit owner-approval event flips
+  untrusted→trusted, recorded in provenance.
+
+### 4.3 Restore policy
+
+| Restored artifact | Semantics |
+| --- | --- |
+| master prompt | written as **restored/untrusted**; rendered **quoted**; never occupies the authoritative "Pinned master prompt" slot; trusted only via explicit owner approval **or** authenticated `contentHash`+`ownerScope` match to a prior owner-authored record |
+| instructions | same as master prompt |
+| summaries | untrusted-derived; quoted; cite source; never authority |
+| caches (`context.md`) | regenerated locally as derived/untrusted; never restored as authority |
+| followups | restored/untrusted; quoted as unverified recalled instructions; never authority without owner approval |
+
+Restore MUST NOT create an object a later read interprets as owner-authored.
+**Preferred:** restored bytes land in a distinct staging path (e.g. `*.restored`)
+rendered quoted; **alternative:** write the source path but stamp a
+`restored/untrusted` sidecar the renderer honors. Either satisfies the invariants;
+staging is preferred so owner-source paths keep meaning "owner-authored".
+
+### 4.4 Authority model (rendering — documented separately from provenance)
+
+The renderer is a pure function of `(text, provenanceRecord)`. **Unquoted
+authority allowlist** — rendered as authority **only** when
+`trust=trusted ∧ origin=owner ∧ lineage has no untrusted ancestor`, and the
+artifact is one of:
+- owner-authored `master-prompt.md`
+- owner-authored `instructions.md`
+- owner-authored `followups.jsonl` entries
+- owner-authored `baseline.md`
+
+**Everything else is always quoted data:** recalled, restored, derived, summary,
+cached (incl. `context.md` contents), imported, replayed, journal handoffs, or any
+artifact with a missing/failed provenance record. The renderer decides on the
+provenance record alone — never on which prompt section/slot the content fills —
+so no adapter can re-derive trust.
+
+### 4.5 Artifact classification
+
+| Artifact | Class | Trust | Authority-bearing? |
+| --- | --- | --- | --- |
+| `master-prompt.md` (owner-authored) | source | trusted | yes |
+| `instructions.md` (owner-authored) | source | trusted | yes |
+| `followups.jsonl` (owner-authored) | source | trusted | yes |
+| `baseline.md` (owner-authored) | source | trusted | yes |
+| `*.restored` / restored source files | restored | untrusted | no (quoted) |
+| `context.md` | cached rendering / derived | untrusted-derived | no (observational) |
+| summaries (`csp/summary`) | generated summary | untrusted-derived | no |
+| indexes / recall results | observational | untrusted | no |
+| `journal.md` handoffs | observational (agent-authored) | untrusted | no (quoted) |
+| replay artifacts / duplicate recalls | replayed | untrusted | no |
+| `runtime-state.json` | observational / machine | n/a (not prompt authority) | no |
 
 ---
 
-## 5. Security invariants (mandatory)
+## 5. Security invariants (mandatory, v2)
 
-1. **No auto-promotion.** Untrusted text never becomes trusted without an
-   explicit owner action; origin=recall/repo/tool is always `untrusted`.
-2. **Provenance preserved.** Every recalled item carries origin + trust through
-   storage, retrieval, and rendering; rendering an item without provenance is a
-   bug, not a default.
-3. **Every trusted object has an origin**, and that origin is `local-file`
-   (owner-only). No trusted object without a verifiable local origin.
-4. **Authority is unquoted-and-trusted only.** Any block rendered as untrusted
-   (`> ` quoted) is never authoritative, at every sink, in every adapter.
-5. **Summaries cannot silently replace source.** A summary is untrusted-derived
-   and must be attributable to its source; it never occupies a trusted slot.
-6. **Approval is never inferred from prompts/memory.** Approval/policy/execution
-   state is read only from owner-only stores.
-7. **Structural neutralization is complete.** After normalization no recalled
-   line can forge a delimiter/fence/heading/role label, and no invisible/format/
-   tag/bidi/escape character survives.
-8. **Sticky taint.** Re-storing recalled content preserves `untrusted`; it can
-   never re-enter as trusted (breaks persistence/recursion, A10).
+1. **Trust is a provenance property, never a filesystem location.** Trust is read
+   from a persisted, hash-bound provenance record, not inferred from a path/name.
+2. **Only owner-authored source is trusted.** `origin=owner` with no untrusted
+   lineage; every other class (derived, restored, imported, replayed, summary,
+   cached) is untrusted by default.
+3. **No auto-promotion.** Untrusted→trusted happens only via an explicit,
+   authenticated owner-approval event (or authenticated `contentHash`+`ownerScope`
+   match on restore), recorded in provenance.
+4. **Provenance survives filesystem round-trips.** Owner-only sidecar, content-hash
+   bound; a missing/mismatched sidecar fails closed to `untrusted`.
+5. **Reading never upgrades taint.** Taint = max over lineage; a read cannot raise
+   trust.
+6. **Authority = allowlisted owner-authored source only.** Unquoted authority is
+   rendered only for the §4.4 allowlist; everything else is always quoted data, at
+   every sink, in every adapter. The renderer decides on provenance alone.
+7. **Structural neutralization is complete.** After normalization no recalled line
+   can forge a delimiter/fence/heading/role label, and no invisible/format/tag/
+   bidi/escape/`U+2028`/`U+2029` character survives.
+8. **Sticky taint spans memory and filesystem.** restore/backup/import/cache/
+   context regeneration preserve `untrusted`; content can never re-enter as
+   trusted by round-tripping through a file (closes the restore-laundering path).
+9. **Approval is never inferred.** Approval/policy/execution state is read only
+   from owner-only stores, never from prompts, memory, or rendered artifacts.
+10. **Every trusted object has an authenticated origin and a content hash.** No
+    trusted object exists without an owner-scope origin and a verifiable hash.
 
 ---
 
@@ -257,82 +364,100 @@ Design **red tests first** (fail on today's code), then implement to green.
 
 ---
 
-## 7. Implementation roadmap (independently reviewable PRs)
+## 7. Implementation roadmap (v2 — reordered; independently reviewable PRs)
 
-Each phase is a self-contained PR: red tests → minimal boundary → green → evidence.
+Each phase is a self-contained PR: red tests → minimal boundary → green →
+evidence. **Ordering rule: persistent provenance and filesystem taint (Phase 1)
+and normalizer closure (Phase 2) land BEFORE any phase that grants authority
+(Phase 3) or writes to source paths (Phase 4).** No phase ships a state where
+authority can be laundered; each phase preserves the invariants of the phases
+before it.
 
-### Phase 1 — Complete the normalizer (character-class closure)
+### Phase 1 — Persistent provenance & filesystem taint core (grants NO authority)
+- **Files:** new `noosphere-mcp/continuity/provenance.js`; owner-only sidecar via
+  `@noosphere/secure-fs`; provenance types in `memory-safety.js`; new
+  `tests/memory-provenance.test.js`.
+- **Interface:** provenance record (§4.1); persist-beside-artifact; `contentHash`
+  binding; lineage taint = max; read = fail-closed `untrusted` on missing/
+  mismatched sidecar; the only untrusted→trusted path is an explicit approval
+  event. No renderer or authority change in this phase.
+- **Tests:** trust-class matrix; sticky taint across write→read; missing/tampered
+  sidecar fails closed; legacy-file migration = untrusted.
+- **Merge criteria:** invariants 1–5, 8, 10 enforced; behavior otherwise
+  unchanged (still quoted where already quoted).
+
+### Phase 2 — Normalizer character-class closure
 - **Files:** `noosphere-mcp/continuity/memory-safety.js`,
   `noosphere-mcp/tests/memory-safety.test.js`.
-- **Interface:** extend `sanitizeMemoryText` (or add `normalizeUntrusted`): NFC;
-  `U+2028/2029`/NEL→`\n`; strip all Cf/zero-width, Tag block, interlinear,
-  variation selectors; keep `quoteUntrustedMemory` line-split correctness under
-  the new separators.
-- **Tests:** A2(2028)/A4/A5/A6 red→green; NFC idempotence; existing cases stay green.
-- **Evidence:** MCP suite green tri-platform; new adversarial cases listed.
-- **Merge criteria:** every invisible/format/separator/tag/bidi/escape stripped;
-  no line escapes `> ` quoting; zero regressions.
+- **Interface:** extend `sanitizeMemoryText`/add `normalizeUntrusted`: NFC;
+  `U+2028/2029`/NEL→`\n`; strip all Cf/zero-width, Tag block `U+E00xx`,
+  interlinear, variation selectors; keep `quoteUntrustedMemory` line-split
+  correct under the new separators.
+- **Tests:** A2(2028)/A4/A5/A6 red→green; NFC idempotence; existing cases green.
+- **Merge criteria:** invariant 7; no line escapes `> ` quoting; zero regressions.
 
-### Phase 2 — First-class provenance & trust object
-- **Files:** `memory-safety.js` (types/helpers), `continuity/index.js`
-  (`recallTypedMemories`, `context.md`), new `tests/memory-provenance.test.js`.
-- **Interface:** recalled items become `{text, origin, trust, authoredBy?,
-  recordId?, ts?}`; `trusted` only for origin=`local-file`; a `renderMemory()`
-  that refuses to render without provenance.
-- **Tests:** trust assignment matrix; sticky taint; render-without-provenance
-  rejected (A10 partial, A7/A13 groundwork).
-- **Merge criteria:** invariants #2/#3/#8 enforced by tests.
-
-### Phase 3 — Sink unification (no unquoted untrusted; all adapters)
-- **Files:** `ollama.js` (the `instructions` sink + any others), the generated-
-  adapter builders, `context.md`; `tests/adapter-injection.test.js`.
-- **Interface:** one renderer used by every adapter; untrusted always quoted +
-  framed; `instructions` provenance-checked (trusted-local only, else quoted).
+### Phase 3 — Single renderer + authority allowlist (all adapters)
+- **Files:** `ollama.js` (incl. the `instructions` sink), the generated-adapter
+  builders, `context.md`; `tests/adapter-injection.test.js`. Enumerate the full
+  adapter inventory as a merge gate.
+- **Interface:** one renderer = pure `(text, provenanceRecord)`; unquoted only for
+  the §4.4 allowlist; every other block quoted + framed; the `instructions` sink
+  is provenance-checked, not sanitize-only.
 - **Tests:** parametrized over **every** adapter — no untrusted block unquoted;
-  A1/A14 red→green; A11 (tool-trigger strings stay quoted).
-- **Merge criteria:** invariants #1/#4 hold at every sink; Ollama test preserved.
+  A1/A14 red→green; A11 tool-trigger strings stay quoted; Ollama test preserved.
+- **Merge criteria:** invariant 6 at every sink; adapter inventory complete.
 
-### Phase 4 — Trusted-slot authenticity & anti-ranking-abuse
-- **Files:** `continuity/index.js` recall/promotion path; `csp/summary.js`
-  (summary origin); `tests/recall-authority.test.js`.
-- **Interface:** authoritative slots (master prompt / baseline) fill only from
-  trusted origin; recalled candidates are quoted evidence, never authority;
-  summaries carry source attribution.
-- **Tests:** A7/A8/A9 — poisoned/high-ranked recall never occupies a trusted
-  slot; summary cannot replace source.
-- **Merge criteria:** invariants #4/#5 enforced.
+### Phase 4 — Restore / backup / import / migration hardening
+- **Files:** `continuity/index.js` restore path (`~L1964‑1992`) and recall/
+  promotion path; `csp/summary.js` (summary origin); `tests/restore-taint.test.js`.
+- **Interface:** restored bytes → `restored/untrusted` (staging path or tainted
+  sidecar, §4.3); migration fail-closed; authenticated `contentHash`+`ownerScope`
+  re-trust path; summaries carry `derivedFrom`.
+- **Tests:** the review's restore-laundering exploit (untrusted recall →
+  `master-prompt.md` → unquoted authority) is **blocked**; A7/A9/A10.
+- **Merge criteria:** invariants 3, 8; laundering test red→green.
 
-### Phase 5 — Replay/freshness, approval-non-inference, docs & closure
-- **Files:** recall dedup/freshness in `index.js`; an approval-non-inference
-  invariant test; `docs/project-memory/THREAT_MODEL.md`,
-  `noosphere-relayer/MEMORY_SECURITY.md`, `SECURITY.md`, `CHANGELOG.md`,
-  `noosphere-relayer/SECURITY-FOLLOWUPS.md`.
-- **Tests:** A12/A13 — approval cannot be set/inferred from memory; replayed
-  memory gains no trust.
-- **Merge criteria:** invariant #6 enforced; SEC-05 marked resolved only after
-  all phases merge with green tri-platform CI; then (and only then) the
-  public-readiness statement can be updated.
+### Phase 5 — Retrieval authenticity, replay/freshness, approval-non-inference, docs & closure
+- **Files:** recall dedup/freshness in `index.js`; approval-non-inference test;
+  `docs/project-memory/THREAT_MODEL.md`, `noosphere-relayer/MEMORY_SECURITY.md`,
+  `SECURITY.md`, `CHANGELOG.md`, `noosphere-relayer/SECURITY-FOLLOWUPS.md`.
+- **Tests:** A8 ranking-abuse never fills a trusted slot; A12 approval cannot be
+  set/inferred; A13 replayed memory gains no trust.
+- **Merge criteria:** invariant 9; SEC-05 marked resolved only after all phases
+  merge with green tri-platform CI; only then may the public-readiness statement
+  change.
 
 ---
 
-## 8. Open design questions
+## 8. Open questions
 
-1. **NFC vs NFKC.** NFKC folds more confusables but can alter legitimate content
-   (e.g. ligatures, full-width). Proposed: NFC + explicit strip-list. Confirm
-   NFKC is not required for the threat set.
-2. **Trusted-slot policy for recall-only projects.** When no local master prompt
-   exists and only a recalled one is available, do we (a) show it quoted as
-   evidence with no authority (proposed), or (b) allow a one-time explicit owner
-   confirmation to promote it? Affects Phase 4 UX.
-3. **Authenticity anchor strength.** Is `agent_id` ever bindable to a verifiable
-   signature (SEC-01 delegate key), or do we rely purely on origin=local for
-   trust? Proposed: origin-only for SEC-05; signature-binding is future hardening.
-4. **Adapter inventory completeness.** Confirm the full set of generated adapters
-   and `context.md` consumers so Phase 3's parametrized test covers every sink.
-5. **Summary re-ingestion.** Does any path store a derived summary back into
-   recallable memory? If so it must be tainted `untrusted` (Phase 2/4).
-6. **Replay window.** Freshness/dedup key definition (recordId + ts + owner
-   scope) and retention interplay with the server-side idempotency model.
+**Resolved in v2 (these changed the security model):**
+- *Trust anchor* → an owner-authored, hash-bound provenance record, never a path
+  (§4.0/§4.1). **Resolved.**
+- *Trusted-slot / master-prompt promotion (was Q2)* → restored/recalled content is
+  untrusted and quoted, never promoted to an authoritative slot; promotion only
+  via explicit owner approval or authenticated hash+scope match (§4.3/§4.4).
+  **Resolved.**
+- *Authenticity anchor (was Q3)* → owner scope + `contentHash` now; delegate-key
+  signature is optional future hardening (§4.1). **Resolved.**
+- *Summary re-ingestion (was Q5)* → untrusted-derived with lineage taint
+  (§4.2/§4.5). **Resolved.**
+- *`context.md` classification* → cached rendering / untrusted-derived, never
+  authority (§4.5). **Resolved.**
+
+**Remaining — implementation-level only (do NOT change the guarantees):**
+- **NFC vs NFKC** — both satisfy the explicit strip-list; proposed NFC. Impl detail.
+- **Sidecar shape** — one owner-only manifest vs per-file `.prov`; either works
+  under the SEC-03 boundary. Impl detail.
+- **Restore destination** — distinct `*.restored` staging path vs tainted sidecar
+  in place; both satisfy the invariants (staging preferred). Impl choice.
+- **Freshness key** — exact `recordId + ts + ownerScope + contentHash` composition
+  and retention window vs the server idempotency model. Impl detail (Phase 5).
+- **Adapter inventory** — enumerate the full adapter/`context.md` consumer set as a
+  Phase 3 merge gate. Impl gate, not a model change.
+
+None of the remaining questions changes a security guarantee; none blocks
+implementation.
 
 ---
 
@@ -340,7 +465,11 @@ Each phase is a self-contained PR: red tests → minimal boundary → green → 
 
 - **No hidden assumptions** — SEC-01/03 dependencies stated; model-trust
   explicitly excluded as a control.
-- **No circular trust** — trust flows one way (local-origin only); sticky taint
-  prevents recall→trust cycles.
-- **No missing trust boundary** — all four transitions in §2 have a named gate.
-- **No implementation started** — this document only; code phases are §7.
+- **No circular trust** — trust flows one way; provenance is owner-authored only
+  and sticky taint spans the filesystem, so recall→file→trust laundering is closed.
+- **No hidden promotion path** — the only untrusted→trusted transition is an
+  explicit authenticated owner-approval event (§4.0/invariant 3).
+- **No missing trust boundary** — all four transitions in §2 have a named gate;
+  the filesystem write-back channel is now an explicit boundary (§4.2/§4.3).
+- **No implementation started** — this document only; code phases are §7, with
+  provenance + taint ordered before any authority-granting phase.
