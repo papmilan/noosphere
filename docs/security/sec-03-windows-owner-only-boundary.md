@@ -56,7 +56,8 @@ parsing. A repair or verification error returns no bytes.
 
 PID/token lock files and execution generation counters contain only process and
 serialization metadata, not secret/state payloads; they retain their existing
-exclusive lock implementation. Git excludes, adapters, service definitions,
+exclusive lock implementation. This non-sensitive classification is authoritative
+for execution generation counters. Git excludes, adapters, service definitions,
 and public protocol/config scaffolding are not sensitive persistence.
 
 ## Stable failure behavior

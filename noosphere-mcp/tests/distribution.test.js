@@ -14,6 +14,7 @@ import {
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -26,6 +27,26 @@ const mcpRoot = path.resolve(
 const repositoryRoot = path.resolve(mcpRoot, '..');
 const relayerRoot = path.join(repositoryRoot, 'noosphere-relayer');
 const protocolRoot = path.join(repositoryRoot, 'noosphere-acp-protocol');
+
+async function waitForOutput(stream, chunks, message) {
+  while (!Buffer.concat(chunks).toString().includes(message)) {
+    await once(stream, 'data');
+  }
+}
+
+it('waits for the complete installed-relayer readiness message across stdout chunks', async () => {
+  const stdout = new PassThrough();
+  const chunks = [];
+  stdout.on('data', (chunk) => chunks.push(chunk));
+
+  const ready = waitForOutput(stdout, chunks, 'Noosphere is live');
+  stdout.write('booting\nNoosphere ');
+  await Promise.resolve();
+  assert.equal(await Promise.race([ready.then(() => true), Promise.resolve(false)]), false);
+
+  stdout.write('is live\n');
+  await ready;
+});
 
 describe('published package distribution', () => {
   it('installs from packed artifacts without repository-only files', async () => {
@@ -283,7 +304,7 @@ async function startInstalledRelayer(installedRelayer, fakeHome) {
   child.stderr.on('data', (chunk) => stderr.push(chunk));
   const closed = once(child, 'close');
   const started = Promise.race([
-    once(child.stdout, 'data').then(() => undefined),
+    waitForOutput(child.stdout, stdout, 'Noosphere is live'),
     closed.then(([code]) => {
       throw new Error(`installed relayer exited ${code}: ${Buffer.concat(stderr)}`);
     }),

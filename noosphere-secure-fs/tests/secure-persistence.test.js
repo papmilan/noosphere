@@ -177,6 +177,13 @@ describe('shared owner-only persistence boundary', () => {
       }),
       (error) => error.code === 'state-acl-readback-failed',
     );
+    assert.deepEqual(
+      verifyOwnerOnlyWindows(target, {
+        platform: 'win32',
+        windowsAction: () => Buffer.from('S-1-5-32-544\nS-1-5-18\nS-1-5-18'),
+      }),
+      ['S-1-5-18', 'S-1-5-32-544'],
+    );
   });
 
   test('all Windows boundary failure classes preserve the old target and remove staging files', async () => {

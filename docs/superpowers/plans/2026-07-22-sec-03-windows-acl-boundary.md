@@ -42,7 +42,7 @@
 
 **Files:** Modify `noosphere-mcp/continuity/{secure-fs.js,acp/store.js,acp/execution-store.js}` and their focused tests.
 
-- [ ] Add red tests for canonical state, transaction new/backup/restore/journal files, execution state/generation, temporaries, and repair failure.
+- [ ] Add red tests for canonical state, transaction new/backup/restore/journal files, execution state, temporaries, and repair failure; verify generation counters remain non-sensitive serialization metadata under their existing exclusive implementation.
 - [ ] Route every sensitive read/write through the shared boundary without changing transaction semantics.
 - [ ] Run ACP and execution tests green.
 

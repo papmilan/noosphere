@@ -366,10 +366,17 @@ export function verifyOwnerOnlyWindows(file, options = {}) {
     action: 'verify', file: path.resolve(file), input: null,
   });
   const sids = buffer(output).toString('utf8').split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
-  if (sids.length !== 3 || sids.some((sid) => !/^S-1-(?:\d+-)+\d+$/.test(sid))) {
+  const uniqueSids = [...new Set(sids)].sort();
+  if (
+    uniqueSids.length < 2
+    || uniqueSids.length > 3
+    || uniqueSids.some((sid) => !/^S-1-(?:\d+-)+\d+$/.test(sid))
+    || !uniqueSids.includes('S-1-5-18')
+    || !uniqueSids.includes('S-1-5-32-544')
+  ) {
     throw new PathBoundaryError('state-acl-readback-failed', 'Windows DACL verification returned an invalid SID set');
   }
-  return sids;
+  return uniqueSids;
 }
 
 export function writeFileNoFollowSync(file, data, mode = 0o600, options = {}) {
