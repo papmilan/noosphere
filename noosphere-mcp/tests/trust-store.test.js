@@ -5,13 +5,17 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
+// M-3 (PR-H): the low-level writers and helpers are internal/test-only and live
+// in trust-store-internal.js; production consumes only ./trust-store.js.
+import { isSlotAuthoritative } from '../continuity/trust-store.js';
 import {
   canonicalize,
   ensureMachineKey,
   ensureProjectIdentity,
-  isSlotAuthoritative,
   putSlotRecord,
-} from '../continuity/trust-store.js';
+  readRecord,
+  MAX_TRUST_RECORD_BYTES,
+} from '../continuity/trust-store-internal.js';
 
 // Each test gets an isolated out-of-tree home (NOOSPHERE_HOME) and a temp project
 // tree, with a fixed owner scope for determinism.
@@ -225,5 +229,104 @@ describe('SEC-05 trust store — authenticated authority gate', () => {
   it('canonicalize is deterministic regardless of key insertion order', () => {
     assert.equal(canonicalize({ b: 1, a: 2 }), canonicalize({ a: 2, b: 1 }));
     assert.equal(canonicalize({ a: 2, b: 1 }), '{"a":2,"b":1}');
+  });
+});
+
+// PR-H — trust-store hardening. No new security semantics; these assert the
+// existing fail-closed guarantees hold on the mint/read/creation paths.
+describe('SEC-05 PR-H — trust-store hardening', () => {
+  const keyPath = (home) => path.join(home, 'machine-key');
+
+  // M-1: a present-but-corrupt machine key must fail closed on the mint path and
+  // must NOT be silently regenerated over. Explicit owner reinit is required.
+  it('M-1: corrupt existing key ⇒ ensureMachineKey throws and never overwrites it', async () => {
+    const { env, home } = await freshEnv();
+    const corrupt = 'dead\n'; // 2 bytes of key material, < 32 required
+    await fs.writeFile(keyPath(home), corrupt, { mode: 0o600 });
+
+    await assert.rejects(
+      ensureMachineKey(env),
+      (e) => e && e.code === 'machine-key-corrupt',
+      'mint path must fail closed on a corrupt key',
+    );
+    // The corrupt key file must be untouched (no silent regeneration).
+    assert.equal(await fs.readFile(keyPath(home), 'utf8'), corrupt);
+  });
+
+  it('M-1: a corrupt key makes every slot fail closed (quoted), never authoritative', async () => {
+    const { env, project, home } = await freshEnv();
+    // Establish a real, authenticated record first.
+    await putSlotRecord({ projectRoot: project, slot: 'master-prompt', rawBytes: BYTES, env });
+    assert.equal(
+      await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: BYTES, env }),
+      true,
+    );
+    // Now corrupt the key; authority must collapse to false.
+    await fs.writeFile(keyPath(home), 'beef\n', { mode: 0o600 });
+    assert.equal(
+      await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: BYTES, env }),
+      false,
+    );
+  });
+
+  // M-6: concurrent first-creation must converge on a single key — no split-brain,
+  // no silent overwrite. All racers return the same key and exactly one file exists.
+  it('M-6: concurrent ensureMachineKey creation converges on one key', async () => {
+    const { env, home } = await freshEnv();
+    const keys = await Promise.all([
+      ensureMachineKey(env),
+      ensureMachineKey(env),
+      ensureMachineKey(env),
+      ensureMachineKey(env),
+    ]);
+    const hex = keys.map((k) => k.toString('hex'));
+    assert.equal(new Set(hex).size, 1, 'all concurrent creators must agree on one key');
+    // The on-disk key equals the agreed key (winner was not overwritten).
+    const onDisk = (await fs.readFile(keyPath(home), 'utf8')).trim();
+    assert.equal(onDisk, hex[0]);
+  });
+
+  // M-7: oversized records are rejected before parsing and fail closed. The size
+  // gate must fire ahead of JSON.parse, so oversized garbage reports the size
+  // error rather than a parse error.
+  it('M-7: oversized trust record is rejected before parse (fail closed)', async () => {
+    const { env, project } = await freshEnv();
+    // Mint an instance so a project dir exists to place the record in.
+    const identity = await ensureProjectIdentity({ projectRoot: project, env });
+    assert.ok(identity.projectIdentity);
+    const real = await fs.realpath(project);
+    const dir = path.join(env.NOOSPHERE_HOME, 'trust', crypto.createHash('sha256').update(real).digest('hex'));
+    const big = path.join(dir, 'master-prompt.json');
+    await fs.writeFile(big, 'x'.repeat(MAX_TRUST_RECORD_BYTES + 1), { mode: 0o600 });
+
+    await assert.rejects(
+      readRecord(big),
+      (e) => e && e.code === 'record-too-large',
+      'size gate must fire before JSON.parse',
+    );
+    // And the authority gate stays closed for an oversized record.
+    assert.equal(
+      await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: BYTES, env }),
+      false,
+    );
+  });
+
+  it('M-7: a normally-sized record still reads back', async () => {
+    const { env, project } = await freshEnv();
+    await putSlotRecord({ projectRoot: project, slot: 'master-prompt', rawBytes: BYTES, env });
+    const real = await fs.realpath(project);
+    const dir = path.join(env.NOOSPHERE_HOME, 'trust', crypto.createHash('sha256').update(real).digest('hex'));
+    const record = await readRecord(path.join(dir, 'master-prompt.json'));
+    assert.equal(record.slot, 'master-prompt');
+  });
+
+  // M-3: the production module surface must expose only the authority decision,
+  // never the low-level writers.
+  it('M-3: production trust-store.js exposes no low-level writers', async () => {
+    const mod = await import('../continuity/trust-store.js');
+    assert.equal(typeof mod.isSlotAuthoritative, 'function');
+    for (const writer of ['putSlotRecord', 'ensureProjectIdentity', 'ensureMachineKey', 'readRecord']) {
+      assert.equal(mod[writer], undefined, `production surface must not export ${writer}`);
+    }
   });
 });
