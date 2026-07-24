@@ -26,7 +26,10 @@ describe('SEC-05 Phase 4A-R1 — production writer boundary', () => {
   });
 
   it('keeps the test-only authority harness out of the packed package', () => {
-    const packed = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', '--cache', path.join(os.tmpdir(), 'noosphere-npm-cache')], { cwd: packageRoot, encoding: 'utf8' }));
+    // Windows exposes npm as npm.cmd; execFileSync without a shell cannot spawn a
+    // bare `npm`, so resolve the platform-correct executable name.
+    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const packed = JSON.parse(execFileSync(npmCmd, ['pack', '--dry-run', '--json', '--cache', path.join(os.tmpdir(), 'noosphere-npm-cache')], { cwd: packageRoot, encoding: 'utf8' }));
     const names = packed[0].files.map((entry) => entry.path);
     assert.equal(names.some((name) => name.includes('trust-test-harness')), false);
     assert.equal(names.some((name) => name.startsWith('tests/')), false);
