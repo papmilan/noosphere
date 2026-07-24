@@ -9,6 +9,7 @@ import {
   readOwnerOnlyFile,
   writeOwnerOnlyFileExclusive,
 } from './secure-fs.js';
+import { normalizeUntrusted, NORM_ALGO, NORM_VERSION } from './memory-safety.js';
 
 // SEC-05 Phase 1 — authenticated, out-of-tree trust store (INTERNAL module).
 //
@@ -31,9 +32,10 @@ import {
 
 export const TRUST_SLOTS = Object.freeze(['master-prompt', 'instructions', 'followups', 'baseline']);
 
-// Phase 1 normalization is the identity function; Phase 2 replaces it and bumps
-// the version. Records bind (normAlgo, normVersion) plus rawHash so a future
-// normalizer change fails closed instead of silently re-mapping an approval.
+// Historical Phase-1 normalizer identity (the identity function). The running
+// normalizer is now (NORM_ALGO, NORM_VERSION) from memory-safety.js; these remain
+// exported so a Phase-4 migration can recognize and re-approve legacy 'raw'/0
+// records, which fail closed until re-approved (invariant 19).
 export const PHASE1_NORM_ALGO = 'raw';
 export const PHASE1_NORM_VERSION = 0;
 
@@ -81,6 +83,15 @@ function assertSlot(slot) {
 
 function sha256Hex(bytes) {
   return crypto.createHash('sha256').update(bytes).digest('hex');
+}
+
+// SEC-05 Phase 2: contentHash is the hash of the NORMALIZED content produced by
+// the running registered normalizer (NORM_ALGO, NORM_VERSION); rawHash stays the
+// hash of the exact raw bytes. A record binds both, so a normalizer change fails
+// closed (its normAlgo/normVersion no longer match) and normalization can never
+// launder two different raw byte strings into the same authority.
+function normalizedContentHash(bytes) {
+  return sha256Hex(Buffer.from(normalizeUntrusted(bytes.toString('utf8')), 'utf8'));
 }
 
 // Deterministic, canonical JSON: recursively sorted object keys, no incidental
@@ -214,10 +225,10 @@ export async function putSlotRecord({
     ownerScope: ownerScope(env),
     slot,
     generation,
-    contentHash: sha256Hex(bytes), // Phase 1 normalize = identity, so == rawHash
-    rawHash: sha256Hex(bytes),
-    normAlgo: PHASE1_NORM_ALGO,
-    normVersion: PHASE1_NORM_VERSION,
+    contentHash: normalizedContentHash(bytes), // hash of normalized content
+    rawHash: sha256Hex(bytes), // hash of the exact raw bytes
+    normAlgo: NORM_ALGO,
+    normVersion: NORM_VERSION,
   };
   const record = { ...fields, mac: macOf(key, fields) };
   const dir = await projectDir(env, projectRoot);
@@ -261,12 +272,15 @@ export async function ensureProjectIdentity({ projectRoot, env = process.env, se
 // machine's key, matching project instance identity, matching owner scope,
 // matching slot, matching contentHash + rawHash, matching (normAlgo,
 // normVersion). Any missing precondition, any error, fails closed to false.
+//
+// M-5 (Phase 2): the normalizer identity is NOT a caller parameter. It is pinned
+// to the running registered normalizer (NORM_ALGO, NORM_VERSION); a record minted
+// under a different (older) normalizer no longer matches and fails closed
+// (invariant 19). A caller cannot select or downgrade the normalization.
 export async function isSlotAuthoritative({
   projectRoot,
   slot,
   rawBytes,
-  normAlgo = PHASE1_NORM_ALGO,
-  normVersion = PHASE1_NORM_VERSION,
   env = process.env,
   secureFileOptions = {},
 }) {
@@ -286,14 +300,15 @@ export async function isSlotAuthoritative({
     if (record.projectIdentity !== identity.projectIdentity) return false;
     if (record.ownerScope !== ownerScope(env)) return false;
     if (record.slot !== slot) return false;
-    if (record.normAlgo !== normAlgo || record.normVersion !== normVersion) return false;
+    // M-5: pin to the running registered normalizer, not a caller value.
+    if (record.normAlgo !== NORM_ALGO || record.normVersion !== NORM_VERSION) return false;
     if (!Number.isInteger(record.generation) || record.generation < 0) return false;
 
     const bytes = Buffer.isBuffer(rawBytes) ? rawBytes : Buffer.from(String(rawBytes ?? ''), 'utf8');
-    // Phase 1 normalize = identity, so contentHash == rawHash. Phase 2 will
-    // recompute contentHash with the pinned (normAlgo, normVersion).
+    // rawHash binds the exact raw bytes; contentHash binds the normalized content
+    // under the pinned (normAlgo, normVersion). Both must match.
     if (record.rawHash !== sha256Hex(bytes)) return false;
-    if (record.contentHash !== sha256Hex(bytes)) return false;
+    if (record.contentHash !== normalizedContentHash(bytes)) return false;
 
     // ponytail: generation is schema-bound and MAC-protected here; the
     // current-generation / anti-rollback comparison lands with owner approval and
