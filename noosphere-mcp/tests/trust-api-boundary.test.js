@@ -6,6 +6,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 
+import { npmCommand, npmSpawnOptions } from '../lifecycle/util.js';
+
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 describe('SEC-05 Phase 4A-R1 — production writer boundary', () => {
@@ -26,10 +28,9 @@ describe('SEC-05 Phase 4A-R1 — production writer boundary', () => {
   });
 
   it('keeps the test-only authority harness out of the packed package', () => {
-    // Windows exposes npm as npm.cmd; execFileSync without a shell cannot spawn a
-    // bare `npm`, so resolve the platform-correct executable name.
-    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    const packed = JSON.parse(execFileSync(npmCmd, ['pack', '--dry-run', '--json', '--cache', path.join(os.tmpdir(), 'noosphere-npm-cache')], { cwd: packageRoot, encoding: 'utf8' }));
+    // Reuse the package's own npm-shim helpers: on Windows npm is npm.cmd and
+    // Node refuses to spawn .cmd without shell:true (CVE-2024-27980 mitigation).
+    const packed = JSON.parse(execFileSync(npmCommand(), ['pack', '--dry-run', '--json', '--cache', path.join(os.tmpdir(), 'noosphere-npm-cache')], { cwd: packageRoot, encoding: 'utf8', ...npmSpawnOptions() }));
     const names = packed[0].files.map((entry) => entry.path);
     assert.equal(names.some((name) => name.includes('trust-test-harness')), false);
     assert.equal(names.some((name) => name.startsWith('tests/')), false);
