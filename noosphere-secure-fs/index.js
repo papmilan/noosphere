@@ -188,6 +188,7 @@ export async function atomicOwnerOnlyWrite(file, data, options = {}) {
     await writeOwnerOnlyFileExclusive(temporary, data, { ...options, root: resolved.root });
     await assertFinalNotReparse(resolved.file);
     await (options.rename ?? rename)(temporary, resolved.file);
+    if ((options.platform ?? process.platform) !== 'win32') await fsyncDir(resolved.directory);
   } catch (error) {
     await safeCleanup(temporary);
     throw normalizeSecurityError(error);
@@ -203,6 +204,7 @@ export function atomicOwnerOnlyWriteSync(file, data, options = {}) {
     writeOwnerOnlyFileExclusiveSync(temporary, data, { ...options, root: resolved.root });
     assertFinalNotReparseSync(resolved.file);
     (options.rename ?? fs.renameSync)(temporary, resolved.file);
+    if ((options.platform ?? process.platform) !== 'win32') fsyncDirSync(resolved.directory);
   } catch (error) {
     safeCleanupSync(temporary);
     throw normalizeSecurityError(error);
@@ -311,6 +313,48 @@ export async function acquireOwnerOnlyLock(file, { token = randomUUID(), metadat
       released = true;
     },
   });
+}
+
+// After an atomic rename the file bytes are already fsync'd (writePosixTemporary
+// calls handle.sync()), but the *rename* itself — the directory entry — is only
+// durable once the containing directory is fsync'd. Without this, a power loss
+// can lose or revert a committed manifest (availability, never false authority:
+// a missing/partial manifest fails closed). Best-effort: some filesystems reject
+// directory fsync, and Windows uses the helper path where this does not apply.
+// Some filesystems genuinely do not support fsync on a directory fd and report it
+// with these errno. Those are safe to ignore (nothing to sync). Every other error
+// — EIO, ENOSPC, EACCES, EBADF, EROFS, … — is a real durability failure and must
+// NOT be swallowed silently, or a write would be reported durable when it is not.
+const DIR_FSYNC_UNSUPPORTED = new Set(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP']);
+
+export function isIgnorableDirFsyncError(error) {
+  return Boolean(error) && DIR_FSYNC_UNSUPPORTED.has(error.code);
+}
+
+// Surface a meaningful directory-fsync failure as a diagnostic without failing the
+// write (the file bytes are already fsync'd and the rename already landed; only
+// rename *durability confirmation* is in question). The message carries the errno
+// only — never any path bytes, key, or MAC material. Availability, never authority.
+function reportDirFsyncError(error) {
+  if (isIgnorableDirFsyncError(error)) return;
+  process.emitWarning(
+    `directory fsync did not confirm rename durability (${error?.code ?? 'unknown'}); the write completed but survival across power loss is unconfirmed`,
+    { code: 'NOOSPHERE_DIR_FSYNC' },
+  );
+}
+
+async function fsyncDir(dir) {
+  let handle;
+  try { handle = await open(dir, 'r'); await handle.sync(); }
+  catch (error) { reportDirFsyncError(error); }
+  finally { await handle?.close().catch(() => undefined); }
+}
+
+function fsyncDirSync(dir) {
+  let fd;
+  try { fd = fs.openSync(dir, 'r'); fs.fsyncSync(fd); }
+  catch (error) { reportDirFsyncError(error); }
+  finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already closed */ } } }
 }
 
 async function writePosixTemporary(file, bytes, mode) {
