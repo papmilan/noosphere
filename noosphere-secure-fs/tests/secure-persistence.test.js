@@ -6,6 +6,7 @@ import { describe, test } from 'node:test';
 
 import {
   PathBoundaryError,
+  acquireOwnerOnlyLock,
   atomicOwnerOnlyWrite,
   atomicOwnerOnlyWriteSync,
   currentWindowsSid,
@@ -229,5 +230,37 @@ describe('shared owner-only persistence boundary', () => {
     );
     assert.equal(fs.readFileSync(target, 'utf8'), 'previous');
     assert.deepEqual(fs.readdirSync(dir), ['state.json']);
+  });
+});
+
+describe('SEC-05 Phase 4A-R1 — owner-only transaction lock', () => {
+  const UUID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+
+  test('rejects a non-UUID token (loose hyphen count)', async () => {
+    const dir = temporaryDirectory('secure-lock-');
+    const file = path.join(dir, 'slot.lock');
+    for (const token of ['-'.repeat(36), 'g'.repeat(36), 'aaaaaaaa-aaaa-1aaa-8aaa-aaaaaaaaaaaa', 'short']) {
+      await assert.rejects(acquireOwnerOnlyLock(file, { token, root: dir }), (e) => e.code === 'state-lock-token-invalid');
+    }
+    assert.equal(fs.existsSync(file), false);
+  });
+
+  test('acquires exclusively and blocks a second holder', async () => {
+    const dir = temporaryDirectory('secure-lock-');
+    const file = path.join(dir, 'slot.lock');
+    const lock = await acquireOwnerOnlyLock(file, { token: UUID, root: dir });
+    await assert.rejects(acquireOwnerOnlyLock(file, { token: UUID, root: dir }), (e) => e.code === 'trust-lock-busy');
+    await lock.release();
+    assert.equal(fs.existsSync(file), false);
+  });
+
+  test('release verifies the owner token in constant time', async () => {
+    const dir = temporaryDirectory('secure-lock-');
+    const file = path.join(dir, 'slot.lock');
+    const lock = await acquireOwnerOnlyLock(file, { token: UUID, root: dir });
+    await assert.rejects(lock.release('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'), (e) => e.code === 'trust-lock-not-owner');
+    assert.equal(fs.existsSync(file), true);
+    await lock.release();
+    assert.equal(fs.existsSync(file), false);
   });
 });

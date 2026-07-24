@@ -6,6 +6,10 @@
   "bin": {
     "noosphere": "continuity/index.js"
   },
+  "exports": {
+    "./trust-store": "./continuity/trust-store.js",
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "install:user": "node lifecycle/install.js install",
     "uninstall:user": "node lifecycle/install.js uninstall",

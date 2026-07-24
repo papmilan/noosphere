@@ -44,6 +44,9 @@ export const PHASE1_NORM_VERSION = 0;
 // parsing and fail closed. Generous cap so legitimate records never approach it.
 export const MAX_TRUST_RECORD_BYTES = 64 * 1024;
 
+export const MACHINE_KEY_BYTES = 32;
+export const MACHINE_KEY_HEX_LENGTH = MACHINE_KEY_BYTES * 2;
+
 export class TrustStoreError extends Error {
   constructor(code, message) {
     super(message);
@@ -85,6 +88,34 @@ function sha256Hex(bytes) {
   return crypto.createHash('sha256').update(bytes).digest('hex');
 }
 
+// A key file is a security boundary, not a convenience format. Accept exactly
+// the bytes written by ensureMachineKey: 64 lower-case hex characters and one
+// optional final LF. In particular, do not use trim() or Buffer's permissive
+// hex decoder: both silently accept malformed/replaced key material.
+function decodeMachineKey(raw) {
+  const text = raw.toString('utf8');
+  const material = text.endsWith('\n') ? text.slice(0, -1) : text;
+  if (
+    material.length !== MACHINE_KEY_HEX_LENGTH
+    || !/^[0-9a-f]{64}$/.test(material)
+    || (text !== material && text !== `${material}\n`)
+  ) {
+    throw new TrustStoreError('machine-key-corrupt', 'machine key is not canonical lowercase 256-bit hex');
+  }
+  const key = Buffer.from(material, 'hex');
+  if (key.length !== MACHINE_KEY_BYTES || key.toString('hex') !== material) {
+    throw new TrustStoreError('machine-key-corrupt', 'machine key is not exactly 256 bits');
+  }
+  return key;
+}
+
+// This non-secret identifier is bound into Phase-4 records/manifests. It does
+// not replace MAC verification; it makes key replacement/foreign-key mistakes
+// explicit before any authority state is considered current.
+export function machineKeyId(key) {
+  return sha256Hex(key);
+}
+
 // SEC-05 Phase 2: contentHash is the hash of the NORMALIZED content produced by
 // the running registered normalizer (NORM_ALGO, NORM_VERSION); rawHash stays the
 // hash of the exact raw bytes. A record binds both, so a normalizer change fails
@@ -111,10 +142,7 @@ async function loadMachineKey(env, secureFileOptions) {
     throw error;
   });
   if (raw === null) return null;
-  const key = Buffer.from(raw.toString('utf8').trim(), 'hex');
-  // A truncated / corrupt key must not silently authenticate anything.
-  if (key.length < 32) throw new TrustStoreError('machine-key-corrupt', 'machine key is missing or too short');
-  return key;
+  return decodeMachineKey(raw);
 }
 
 // Generates the machine key if absent (owner-only, out-of-tree, never in any

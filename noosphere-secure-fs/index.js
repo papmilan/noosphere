@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import { lstat, mkdir, open, readFile, realpath, rename, rm } from 'node:fs/promises';
 import os from 'node:os';
@@ -261,6 +261,56 @@ export function writeOwnerOnlyFileExclusiveSync(file, data, options = {}) {
     }
     throw normalizeSecurityError(error);
   }
+}
+
+// Strict RFC 4122 version-4 token. A loose hyphen-count regex would accept
+// non-UUID material (e.g. 36 hyphens); the release owner-check must compare a
+// well-formed token, so acquisition validates the exact v4 shape up front.
+const LOCK_TOKEN_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+// An owner-only, no-follow lock file. The exclusive create is the acquisition
+// operation on every platform; Windows delegates CreateNew to the hardened
+// PowerShell helper, so there is no check-then-create window. Callers attach
+// authenticated metadata (the filesystem boundary deliberately has no access to
+// application MAC keys). Release re-reads and constant-time verifies the token
+// before deletion, preventing one transaction from removing another's lock.
+export async function acquireOwnerOnlyLock(file, { token = randomUUID(), metadata = {}, ...options } = {}) {
+  if (typeof token !== 'string' || !LOCK_TOKEN_V4.test(token)) {
+    throw new PathBoundaryError('state-lock-token-invalid', 'lock token must be an RFC 4122 v4 UUID');
+  }
+  const payload = JSON.stringify({ ...metadata, token });
+  try {
+    await writeOwnerOnlyFileExclusive(file, payload, options);
+  } catch (error) {
+    if (error.code === 'state-file-exists' || error.code === 'EEXIST') {
+      throw new PathBoundaryError('trust-lock-busy', 'an owner-only transaction lock is already held', error);
+    }
+    throw error;
+  }
+  let released = false;
+  return Object.freeze({
+    file,
+    token,
+    async release(candidateToken = token) {
+      if (released) return;
+      const raw = await readOwnerOnlyFile(file, options);
+      if (raw === null) throw new PathBoundaryError('trust-lock-missing', 'transaction lock disappeared before release');
+      let parsed;
+      try { parsed = JSON.parse(raw.toString('utf8')); } catch {
+        throw new PathBoundaryError('trust-lock-malformed', 'transaction lock metadata is malformed');
+      }
+      if (typeof parsed?.token !== 'string') {
+        throw new PathBoundaryError('trust-lock-malformed', 'transaction lock has no token');
+      }
+      const expected = Buffer.from(parsed.token, 'utf8');
+      const actual = Buffer.from(String(candidateToken), 'utf8');
+      if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+        throw new PathBoundaryError('trust-lock-not-owner', 'transaction lock token does not match');
+      }
+      await rm(file, { force: false });
+      released = true;
+    },
+  });
 }
 
 async function writePosixTemporary(file, bytes, mode) {
