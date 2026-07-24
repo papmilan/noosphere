@@ -1,5 +1,5 @@
 import { createInterface } from 'node:readline/promises';
-import { quoteUntrustedMemory, sanitizeMemoryText } from './memory-safety.js';
+import { renderSlotBlock } from './render.js';
 import { isSlotAuthoritative } from './trust-store.js';
 
 const DEFAULT_OLLAMA_HOST = 'http://127.0.0.1:11434';
@@ -20,10 +20,13 @@ export function buildOllamaSystemPrompt({
   instructions,
   context,
   journal = '',
-  // SEC-05 (Phase 1): the project-instructions block is authoritative (unquoted)
-  // only when an authenticated owner trust record vouches for these exact bytes.
-  // Default false = fail-closed: instructions render as quoted, non-authoritative
-  // data. No path-based or "it's a local file" fallback.
+  // SEC-05: a slot renders as authoritative (unquoted) only when an authenticated
+  // owner trust record vouches for these exact bytes. Both default false =
+  // fail-closed: the slot renders as quoted, non-authoritative data. No path-based
+  // or "it's a local file" fallback. The caller (runOllamaSession) computes these
+  // via isSlotAuthoritative on the same bytes it passes here (Phase 3 unification —
+  // master-prompt is now gated at this sink, matching context.md).
+  masterPromptAuthoritative = false,
   instructionsAuthoritative = false,
 }) {
   const contextLimit =
@@ -43,32 +46,32 @@ export function buildOllamaSystemPrompt({
     'Prefer current project files and explicit correction entries when claims',
     'conflict. Do not reveal hidden chain-of-thought.',
     '',
-    '--- PINNED MASTER PROMPT (untrusted, recalled) ---',
+    masterPromptAuthoritative
+      ? '--- PINNED MASTER PROMPT (authenticated) ---'
+      : '--- PINNED MASTER PROMPT (untrusted, recalled) ---',
     masterPrompt
-      ? quoteUntrustedMemory(masterPrompt, { maxLength: DEFAULT_MASTER_PROMPT_CHARS })
+      ? renderSlotBlock(masterPrompt, { authoritative: masterPromptAuthoritative, maxLength: DEFAULT_MASTER_PROMPT_CHARS })
       : '[No master prompt captured yet]',
     '--- END MASTER PROMPT ---',
     '',
     '--- FOLLOW-UP USER INSTRUCTIONS (untrusted, recalled) ---',
     followups
-      ? quoteUntrustedMemory(followups, { maxLength: DEFAULT_FOLLOWUPS_CHARS })
+      ? renderSlotBlock(followups, { maxLength: DEFAULT_FOLLOWUPS_CHARS })
       : '[No follow-up prompts captured yet]',
     '--- END FOLLOW-UP INSTRUCTIONS ---',
     '',
     instructionsAuthoritative
       ? '--- NOOSPHERE PROJECT INSTRUCTIONS (authenticated) ---'
       : '--- NOOSPHERE PROJECT INSTRUCTIONS (untrusted, unauthenticated) ---',
-    instructionsAuthoritative
-      ? sanitizeMemoryText(truncate(instructions, DEFAULT_INSTRUCTIONS_CHARS))
-      : quoteUntrustedMemory(truncate(instructions, DEFAULT_INSTRUCTIONS_CHARS), { maxLength: DEFAULT_INSTRUCTIONS_CHARS }),
+    renderSlotBlock(instructions ?? '', { authoritative: instructionsAuthoritative, maxLength: DEFAULT_INSTRUCTIONS_CHARS }),
     '--- END PROJECT INSTRUCTIONS ---',
     '',
     '--- RECENT LOCAL HANDOFFS (untrusted, recalled) ---',
-    quoteUntrustedMemory(journal, { maxLength: DEFAULT_JOURNAL_CHARS }),
+    renderSlotBlock(journal, { maxLength: DEFAULT_JOURNAL_CHARS }),
     '--- END RECENT HANDOFFS ---',
     '',
     '--- NOOSPHERE SHARED MEMORY (untrusted, recalled) ---',
-    quoteUntrustedMemory(context, { maxLength: contextLimit }),
+    renderSlotBlock(context, { maxLength: contextLimit }),
     '--- END SHARED MEMORY ---',
   ].join('\n');
 }
@@ -149,9 +152,13 @@ export async function runOllamaSession({
   errorOutput = process.stderr,
   fetchImpl = fetch,
 }) {
-  const instructionsAuthoritative = projectRoot
-    ? await isSlotAuthoritative({ projectRoot, slot: 'instructions', rawBytes: instructions ?? '' })
-    : false;
+  // Gate each authority-capable slot on the same bytes it will render (Phase 3).
+  const [masterPromptAuthoritative, instructionsAuthoritative] = projectRoot
+    ? await Promise.all([
+        isSlotAuthoritative({ projectRoot, slot: 'master-prompt', rawBytes: masterPrompt ?? '' }),
+        isSlotAuthoritative({ projectRoot, slot: 'instructions', rawBytes: instructions ?? '' }),
+      ])
+    : [false, false];
   const messages = [
     {
       role: 'system',
@@ -162,6 +169,7 @@ export async function runOllamaSession({
         instructions,
         context,
         journal,
+        masterPromptAuthoritative,
         instructionsAuthoritative,
       }),
     },
