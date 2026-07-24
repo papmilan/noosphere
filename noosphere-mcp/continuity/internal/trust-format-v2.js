@@ -200,8 +200,18 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
   // authenticated live lock is owner-intervention territory, and dead-PID / reuse
   // / reboot are deliberately not auto-distinguished.
   async function inspectLock(binding, slot) {
-    const raw = await readOwnerOnlyFile(lockPath(binding, slot), options);
-    if (raw === null) return null;
+    assertSlot(slot);
+    const lockFile = lockPath(binding, slot);
+    // readOwnerOnlyFile returns null both for a genuinely absent file AND for a
+    // containment/reparse-rejected path, so an unsafe lock (e.g. a symlink) must
+    // NOT be read as "no lock" — that would let recovery proceed fail-open. lstat
+    // distinguishes ENOENT (truly absent → null) from present-but-unsafe (throw).
+    let stat;
+    try { stat = await fs.lstat(lockFile); }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    if (!stat.isFile()) throw new TrustStoreError('trust-lock-unreadable', 'lock path is not a regular file');
+    const raw = await readOwnerOnlyFile(lockFile, options);
+    if (raw === null) throw new TrustStoreError('trust-lock-unreadable', 'lock is present but could not be securely read');
     let parsed;
     try { parsed = JSON.parse(raw.toString('utf8')); } catch { throw new TrustStoreError('trust-lock-malformed', 'lock metadata is not JSON'); }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new TrustStoreError('trust-lock-malformed', 'lock metadata is not an object');
@@ -371,26 +381,36 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
   // journal for an already-superseded generation is cleaned up, a tampered one is
   // quarantined, and a committed journal we cannot corroborate is fatal.
   async function recover(binding, slot) {
-    // Authenticate any present lock; a valid live lock (or a malformed/foreign one)
-    // is fail-closed owner-intervention territory — recovery never reclaims it.
+    assertSlot(slot);
+    // Authenticate any present lock; a valid live lock (or a malformed / foreign /
+    // unreadable one) is fail-closed owner-intervention territory — recovery never
+    // reclaims it.
     if (await inspectLock(binding, slot) !== null) throw new TrustStoreError('trust-lock-live', 'an authenticated transaction lock is held; owner action required');
-    const dir = path.join(rootFor(binding), 'transactions');
-    const entries = await fs.readdir(dir).catch((error) => (error.code === 'ENOENT' ? [] : Promise.reject(error)));
-    for (const entry of entries) {
-      if (!entry.endsWith('.json')) continue;
-      const file = path.join(dir, entry);
-      let journal;
-      try {
-        const raw = await readOwnerOnlyFile(file, options);
-        if (raw === null) continue;
-        journal = parseAuthenticatedRecord(raw, { type: 'transaction-journal', maxBytes: MAX_TRUST_RECORD_BYTES, schema: JOURNAL_SCHEMA });
-        verifyMac(await key(), 'transaction-journal', journal);
-      } catch { await quarantine(file); continue; }
-      if (journal.projectIdentity !== binding.projectIdentity || journal.slot !== slot) { await quarantine(file); continue; }
-      const disposition = await journalDisposition(binding, slot, journal);
-      if (disposition === 'ambiguous') throw new TrustStoreError('recovery-ambiguous', 'committed journal does not match manifest');
-      if (disposition === 'quarantine') { await quarantine(file); continue; }
-      await fs.rm(file, { force: true });
+    // Hold the slot lock while mutating journals so recovery cannot run
+    // concurrently with an in-flight commit: a commit that raced in after the
+    // inspectLock check makes this acquire throw trust-lock-busy (fail-closed).
+    const lock = await acquireLock(binding, slot);
+    try {
+      const dir = path.join(rootFor(binding), 'transactions');
+      const entries = await fs.readdir(dir).catch((error) => (error.code === 'ENOENT' ? [] : Promise.reject(error)));
+      for (const entry of entries) {
+        if (!entry.endsWith('.json')) continue;
+        const file = path.join(dir, entry);
+        let journal;
+        try {
+          const raw = await readOwnerOnlyFile(file, options);
+          if (raw === null) continue;
+          journal = parseAuthenticatedRecord(raw, { type: 'transaction-journal', maxBytes: MAX_TRUST_RECORD_BYTES, schema: JOURNAL_SCHEMA });
+          verifyMac(await key(), 'transaction-journal', journal);
+        } catch { await quarantine(file); continue; }
+        if (journal.projectIdentity !== binding.projectIdentity || journal.slot !== slot) { await quarantine(file); continue; }
+        const disposition = await journalDisposition(binding, slot, journal);
+        if (disposition === 'ambiguous') throw new TrustStoreError('recovery-ambiguous', 'committed journal does not match manifest');
+        if (disposition === 'quarantine') { await quarantine(file); continue; }
+        await fs.rm(file, { force: true });
+      }
+    } finally {
+      await lock.release().catch(() => undefined);
     }
   }
 

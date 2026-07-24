@@ -28,8 +28,22 @@ function crash({ home, project, env }, crashAt, bytes) {
   const result = spawnSync(process.execPath, [CHILD], {
     cwd: path.dirname(path.dirname(CHILD)),
     env: { ...process.env, CRASH_HOME: home, CRASH_PROJECT: project, CRASH_SLOT: SLOT, CRASH_BYTES: bytes, CRASH_AT: crashAt, CRASH_SCOPE: env.NOOSPHERE_OWNER_SCOPE },
+    // Bound the wait: a regression that never reaches the crash hook must fail
+    // this test explicitly, not block the single-concurrency suite until the
+    // global timeout. A timeout surfaces as result.error (asserted below).
+    timeout: 30000,
+    killSignal: 'SIGKILL',
   });
   return result;
+}
+
+// A crash child must be forcibly terminated, never exit cleanly and never fail to
+// spawn / time out. On POSIX self-SIGKILL is observable as signal 'SIGKILL'; on
+// Windows TerminateProcess surfaces as a non-zero status (no POSIX signal).
+function assertKilled(result) {
+  assert.equal(result.error, undefined, `child spawn errored or timed out: ${result.error?.message}`);
+  assert.ok(result.signal === 'SIGKILL' || result.status !== 0, `child must be forcibly terminated (signal=${result.signal}, status=${result.status})`);
+  if (process.platform !== 'win32') assert.equal(result.signal, 'SIGKILL', `POSIX crash must be an uncatchable SIGKILL (signal=${result.signal})`);
 }
 
 describe('SEC-05 Phase 4A-R2 — real process-death recovery', () => {
@@ -43,7 +57,7 @@ describe('SEC-05 Phase 4A-R2 — real process-death recovery', () => {
       const fx = await fixture();
       const { harness, binding } = fx;
       const result = crash(fx, boundary, 'candidate');
-      assert.ok(result.signal === 'SIGKILL' || result.status !== 0, `child must be killed, not exit clean (signal=${result.signal} status=${result.status})`);
+      assertKilled(result);
 
       // A real crash left the held lock on disk: recovery is fail-closed until the
       // owner intervenes (unlike the R1 exception tests, whose finally released it).
@@ -64,11 +78,35 @@ describe('SEC-05 Phase 4A-R2 — real process-death recovery', () => {
     });
   }
 
-  it('rejects a foreign-owner lock during recovery (fail-closed, no reclaim)', async () => {
+  it('rejects a well-formed foreign-owner lock during recovery (fail-closed, no reclaim)', async () => {
     const { harness, binding } = await fixture();
-    // Hand-write a syntactically valid but foreign (unauthenticated) lock.
-    await harness._internal.writeExclusive(harness.pathFor(binding, `locks/${SLOT}.lock`), { type: 'trust-lock', token: 'deadbeef-dead-4dea-8dea-deadbeefdead', mac: 'f'.repeat(64) });
-    await assert.rejects(harness.inspectLock(binding, SLOT), (e) => e.code === 'trust-lock-malformed' || e.code === 'trust-lock-unauthenticated' || e.code === 'trust-lock-foreign');
-    await assert.rejects(harness.recover(binding, SLOT), (e) => e.code && e.code.startsWith('trust-lock-'));
+    const { hmac, machineKeyId, nowIso, writeExclusive } = harness._internal;
+    const machineKey = await harness.ensureMachineKey();
+    const transactionId = crypto.randomUUID();
+    // A complete, MAC-valid lock under THIS machine key but a different owner: it
+    // must reach and fail the ownership check as trust-lock-foreign, not bail out
+    // early as malformed.
+    const fields = { format: 2, type: 'trust-lock', transactionId, projectIdentity: binding.projectIdentity, ownerScope: 'someone-else', slot: SLOT, pid: 4242, startedAt: nowIso(), keyId: machineKeyId(machineKey) };
+    const lock = { ...fields, mac: hmac(machineKey, 'trust-lock', fields), token: transactionId };
+    await writeExclusive(harness.pathFor(binding, `locks/${SLOT}.lock`), lock);
+    await assert.rejects(harness.inspectLock(binding, SLOT), (e) => e.code === 'trust-lock-foreign');
+    await assert.rejects(harness.recover(binding, SLOT), (e) => e.code === 'trust-lock-foreign');
+  });
+
+  it('treats an unsafe (symlink) lock path as fail-closed, not absent', async () => {
+    const { harness, binding } = await fixture();
+    const lockFile = harness.pathFor(binding, `locks/${SLOT}.lock`);
+    await fs.mkdir(path.dirname(lockFile), { recursive: true, mode: 0o700 });
+    await fs.symlink(os.tmpdir(), lockFile);
+    await assert.rejects(harness.inspectLock(binding, SLOT), (e) => e.code === 'trust-lock-unreadable');
+    await assert.rejects(harness.recover(binding, SLOT), (e) => e.code === 'trust-lock-unreadable');
+  });
+
+  it('validates the slot before constructing lock/recovery paths', async () => {
+    const { harness, binding } = await fixture();
+    for (const bad of ['../../evil', 'master-prompt/../x', 'unknown-slot']) {
+      await assert.rejects(harness.inspectLock(binding, bad), (e) => e.code === 'invalid-slot');
+      await assert.rejects(harness.recover(binding, bad), (e) => e.code === 'invalid-slot');
+    }
   });
 });
