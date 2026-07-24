@@ -72,6 +72,9 @@ export function applySchema(record, schema, type) {
     if (!validator(record[field])) throw new TrustStoreError('record-invalid', `${type}.${field} is invalid`);
   }
   for (const field of Object.keys(record)) {
-    if (!(field in schema)) throw new TrustStoreError('record-invalid', `${type} has unexpected field: ${field}`);
+    // Object.hasOwn, not `in`: `field in schema` walks the prototype chain, so a
+    // record field named after an Object.prototype member (constructor,
+    // toString, __proto__, hasOwnProperty, …) would evade unknown-field rejection.
+    if (!Object.hasOwn(schema, field)) throw new TrustStoreError('record-invalid', `${type} has unexpected field: ${field}`);
   }
 }

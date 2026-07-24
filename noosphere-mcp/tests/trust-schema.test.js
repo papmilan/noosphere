@@ -42,6 +42,12 @@ describe('SEC-05 Phase 4A-R1 — strict schema parser', () => {
     assert.throws(() => parse(bytes({ ...good, extra: 1 })), (e) => e.code === 'record-invalid');
   });
 
+  it('rejects unknown fields named after Object.prototype members', () => {
+    for (const key of ['toString', 'constructor', 'hasOwnProperty', '__proto__', 'valueOf']) {
+      assert.throws(() => parse(bytes({ ...good, [key]: 'x' })), (e) => e.code === 'record-invalid', `field ${key} must be rejected`);
+    }
+  });
+
   it('rejects a non-UTC / malformed timestamp', () => {
     for (const at of ['2026-07-24T12:00:00+02:00', '2026-13-40T12:00:00Z', '2026-07-24 12:00:00Z', 'not-a-date']) {
       assert.throws(() => parse(bytes({ ...good, at })), (e) => e.code === 'record-invalid');
