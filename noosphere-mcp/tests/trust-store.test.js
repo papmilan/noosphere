@@ -16,6 +16,7 @@ import {
   readRecord,
   MAX_TRUST_RECORD_BYTES,
 } from '../continuity/trust-store-internal.js';
+import { NORM_ALGO, NORM_VERSION } from '../continuity/memory-safety.js';
 
 // Each test gets an isolated out-of-tree home (NOOSPHERE_HOME) and a temp project
 // tree, with a fixed owner scope for determinism.
@@ -328,5 +329,64 @@ describe('SEC-05 PR-H — trust-store hardening', () => {
     for (const writer of ['putSlotRecord', 'ensureProjectIdentity', 'ensureMachineKey', 'readRecord']) {
       assert.equal(mod[writer], undefined, `production surface must not export ${writer}`);
     }
+  });
+});
+
+// PR-2 (Phase 2 + M-5) — the normalizer identity is pinned to the running
+// registered normalizer; a caller cannot select or downgrade it, and the record
+// binds both the normalized contentHash and the exact-bytes rawHash.
+describe('SEC-05 M-5 — normalization identity is not caller-controlled', () => {
+  const trustDir = (env, project) =>
+    fs.realpath(project).then((real) =>
+      path.join(env.NOOSPHERE_HOME, 'trust', crypto.createHash('sha256').update(real).digest('hex')));
+
+  it('records are minted under the running normalizer (NORM_ALGO, NORM_VERSION)', async () => {
+    const { env, project } = await freshEnv();
+    await putSlotRecord({ projectRoot: project, slot: 'master-prompt', rawBytes: BYTES, env });
+    const record = await readRecord(path.join(await trustDir(env, project), 'master-prompt.json'));
+    assert.equal(record.normAlgo, NORM_ALGO);
+    assert.equal(record.normVersion, NORM_VERSION);
+  });
+
+  it('caller-supplied normAlgo/normVersion are ignored (cannot pin/downgrade)', async () => {
+    const { env, project } = await freshEnv();
+    await putSlotRecord({ projectRoot: project, slot: 'master-prompt', rawBytes: BYTES, env });
+    // Passing bogus normalization identifiers must not change the decision — they
+    // are not parameters of isSlotAuthoritative anymore.
+    assert.equal(
+      await isSlotAuthoritative({
+        projectRoot: project, slot: 'master-prompt', rawBytes: BYTES,
+        normAlgo: 'raw', normVersion: 999, env,
+      }),
+      true,
+    );
+  });
+
+  it('rawHash still binds exact bytes: a normalized-equal but raw-different input is not authoritative', async () => {
+    const { env, project } = await freshEnv();
+    await putSlotRecord({ projectRoot: project, slot: 'master-prompt', rawBytes: BYTES, env });
+    // Appending a zero-width space normalizes to the same content but is different
+    // raw bytes — must fail closed (no laundering via normalization).
+    const laundered = `${BYTES}${String.fromCodePoint(0x200b)}`;
+    assert.equal(
+      await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: laundered, env }),
+      false,
+    );
+  });
+
+  it('a stale-normalizer record fails closed (normVersion mismatch)', async () => {
+    const { env, project } = await freshEnv();
+    await putSlotRecord({ projectRoot: project, slot: 'master-prompt', rawBytes: BYTES, env });
+    const file = path.join(await trustDir(env, project), 'master-prompt.json');
+    const record = await readRecord(file);
+    // Simulate a record left by an older normalizer version. Re-canonicalized so it
+    // parses, but its MAC no longer matches and its normVersion is stale — either
+    // way isSlotAuthoritative must reject it.
+    const stale = { ...record, normVersion: 0 };
+    await fs.writeFile(file, canonicalize(stale), { mode: 0o600 });
+    assert.equal(
+      await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: BYTES, env }),
+      false,
+    );
   });
 });
