@@ -37,18 +37,24 @@ function isVariationSelector(cp) {
 // Truncation is deliberately NOT applied here — content identity (the hash an
 // authenticated record binds) must not depend on a display length bound.
 //
-// Order: NFC first; then drop the entire Unicode Format category (\p{Cf} — zero-
-// width space/joiner/non-joiner, word joiner, invisible operators, bidi marks/
-// embeddings/overrides/isolates, BOM/ZWNBSP, interlinear annotation FFF9-FFFB, and
-// the Tag block E0000-E007F used to smuggle hidden text) in one pass; then walk the
-// remaining code points to collapse every line separator (CRLF, CR, NEL 0x85, LINE
-// SEPARATOR 0x2028, PARAGRAPH SEPARATOR 0x2029) to '\n' and remove controls and
-// variation selectors.
+// Order matters: STRIP first, NFC LAST. Removing an invisible code point (e.g. a
+// zero-width space) that sat between a base character and its combining mark makes
+// them adjacent, so a final NFC composes them — and a second run is then a no-op.
+// Doing NFC before stripping would leave such a pair non-adjacent (uncomposed) on
+// the first pass but composable on the second, breaking idempotence.
+//
+// Pass 1 drops the entire Unicode Format category (\p{Cf} — zero-width space/
+// joiner/non-joiner, word joiner, invisible operators, bidi marks/embeddings/
+// overrides/isolates, BOM/ZWNBSP, interlinear annotation FFF9-FFFB, and the Tag
+// block E0000-E007F used to smuggle hidden text). Pass 2 walks the remaining code
+// points to collapse every line separator (CRLF, CR, NEL 0x85, LINE SEPARATOR
+// 0x2028, PARAGRAPH SEPARATOR 0x2029) to '\n' and remove controls and variation
+// selectors. NFC is applied last.
 export function normalizeUntrusted(text) {
-  const folded = String(text ?? '').normalize('NFC').replace(/\p{Cf}/gu, '');
+  const stripped = String(text ?? '').replace(/\p{Cf}/gu, '');
   let out = '';
   let lastWasCR = false;
-  for (const ch of folded) {
+  for (const ch of stripped) {
     const cp = ch.codePointAt(0);
     if (cp === 0x0d) { out += '\n'; lastWasCR = true; continue; } // CR (and CRLF lead)
     const wasCR = lastWasCR;
@@ -59,7 +65,7 @@ export function normalizeUntrusted(text) {
     if (isVariationSelector(cp)) continue;
     out += ch;
   }
-  return out;
+  return out.normalize('NFC');
 }
 
 export function sanitizeMemoryText(text, { maxLength = 8000 } = {}) {

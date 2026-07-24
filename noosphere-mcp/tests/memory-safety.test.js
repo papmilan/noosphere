@@ -85,6 +85,26 @@ describe('SEC-05 Phase 2 — normalizer character-class closure (invariant 6)', 
     assert.equal(normalizeUntrusted(once), once);
   });
 
+  it('is idempotent when a format char separates a base from its combining mark', () => {
+    // A zero-width space (Cf) between base and combining mark: NFC alone cannot
+    // compose them, but stripping the ZWSP makes them adjacent. Because the
+    // normalizer strips before its final NFC, the first pass already composes and
+    // a second pass is a no-op. (Regression for the NFC-then-strip ordering bug.)
+    for (const [base, mark, composed] of [
+      [0x65, 0x0301, 0xe9], // e + acute -> é
+      [0x61, 0x0308, 0xe4], // a + diaeresis -> ä
+    ]) {
+      const raw = `${cp(base)}${cp(0x200b)}${cp(mark)}`; // base ZWSP mark
+      const once = normalizeUntrusted(raw);
+      assert.equal(once, cp(composed), 'stripped Cf then composed on the first pass');
+      assert.equal(normalizeUntrusted(once), once, 'second pass is a no-op');
+    }
+    // Word joiner between base and mark behaves the same.
+    const wj = normalizeUntrusted(`${cp(0x61)}${cp(0x2060)}${cp(0x0308)}`);
+    assert.equal(wj, cp(0xe4));
+    assert.equal(normalizeUntrusted(wj), wj);
+  });
+
   it('neutralizes ANSI/OSC/BEL introducers', () => {
     const osc = `t${cp(0x1b)}]0;retitled${cp(0x07)}${cp(0x1b)}[31mred`;
     const out = normalizeUntrusted(osc);
