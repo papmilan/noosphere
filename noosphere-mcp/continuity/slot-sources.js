@@ -21,6 +21,8 @@ const SLOT_FILES = Object.freeze({
   baseline: ['.noosphere', 'baseline.md'],
 });
 
+const UTF8 = new TextDecoder('utf-8', { fatal: true });
+
 // The baseline file carries a generated header that is NOT part of the rendered
 // block; refreshContext strips it before rendering, so trust must bind the
 // stripped body. Exported so the sink and the approval service share this exact
@@ -29,14 +31,31 @@ export function baselineBody(text) {
   return String(text ?? '').replace(/^# Noosphere project baseline\s*/i, '').trim();
 }
 
-// Reads the on-disk bytes for a slot exactly as its sink will use them. Returns
-// '' for a missing/unreadable file (callers treat empty as "nothing to approve"
-// / "nothing to gate"), never throws for absence.
-export async function resolveSlotBytes(root, slot) {
+// Reads the on-disk bytes for a slot exactly as its sink will use them. Absence
+// is an empty source; malformed input is refused instead of being silently
+// replaced with U+FFFD before the approval and sink paths can disagree.
+export async function resolveSlotSource(root, slot) {
   const segments = SLOT_FILES[slot];
-  if (!segments) return '';
-  const text = await readFile(path.join(root, ...segments), 'utf8').catch(() => '');
-  return slot === 'baseline' ? baselineBody(text) : text;
+  if (!segments) return { bytes: Buffer.alloc(0), text: '' };
+  const fileBytes = await readFile(path.join(root, ...segments)).catch((error) => {
+    if (error.code === 'ENOENT') return Buffer.alloc(0);
+    throw error;
+  });
+  let fileText;
+  try {
+    fileText = UTF8.decode(fileBytes);
+  } catch {
+    const error = new Error(`${slot} is not valid UTF-8`);
+    error.code = 'slot-invalid-utf8';
+    throw error;
+  }
+  const text = slot === 'baseline' ? baselineBody(fileText) : fileText;
+  return { bytes: Buffer.from(text, 'utf8'), text };
+}
+
+// Compatibility surface for callers that only need the sink text.
+export async function resolveSlotBytes(root, slot) {
+  return (await resolveSlotSource(root, slot)).text;
 }
 
 export function slotSourcePath(root, slot) {

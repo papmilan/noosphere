@@ -23,11 +23,19 @@ import readline from 'node:readline/promises';
 import { normalizeUntrusted } from '../memory-safety.js';
 import { renderSlotBlock } from '../render.js';
 import { TrustStoreError } from '../trust-store-internal.js';
-import { APPROVABLE_SLOTS, resolveSlotBytes, slotSourcePath } from '../slot-sources.js';
+import { APPROVABLE_SLOTS, resolveSlotSource, slotSourcePath } from '../slot-sources.js';
 import { FORMAT2_SLOTS, createFormatV2Store } from './trust-format-v2.js';
 
 function sha256Hex(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+export function escapeBytesForTerminal(value) {
+  return [...Buffer.from(value)].map((byte) =>
+    byte >= 0x20 && byte <= 0x7e && byte !== 0x5c
+      ? String.fromCharCode(byte)
+      : `\\x${byte.toString(16).padStart(2, '0')}`
+  ).join('');
 }
 
 // The typed phrase binds the confirmation to THIS slot and THESE bytes: a phrase
@@ -51,7 +59,7 @@ function assertInteractive({ input = process.stdin, output = process.stdout } = 
 }
 
 // Production confirmation: interactive terminal only.
-async function ttyConfirm({ slot, rawHash, contentHash, byteLength, rendered, sourcePath }, io) {
+async function ttyConfirm({ slot, rawHash, contentHash, byteLength, escapedBytes, rendered, sourcePath }, io) {
   const input = io.input ?? process.stdin;
   const output = io.output ?? process.stdout;
   assertInteractive({ input, output });
@@ -61,6 +69,7 @@ async function ttyConfirm({ slot, rawHash, contentHash, byteLength, rendered, so
     `Slot:        ${slot}`,
     `Source:      ${sourcePath}`,
     `Bytes:       ${byteLength}`,
+    `Byte view:   ${escapedBytes}`,
     `rawHash:     ${rawHash}`,
     `contentHash: ${contentHash}`,
     '',
@@ -104,14 +113,12 @@ export async function approveSlot({
   // recovery: an agent that cannot approve should not be able to touch the trust
   // store at all. (Tests inject `confirm` and are exempt by construction.)
   if (!confirm) assertInteractive({ input, output });
-  const rawBytes = await resolveSlotBytes(projectRoot, slot);
-  if (rawBytes.length === 0) {
+  const source = await resolveSlotSource(projectRoot, slot);
+  if (source.bytes.length === 0) {
     // An empty approval authorizes nothing yet burns a generation and an audit
     // event; refuse it rather than record a meaningless authority transition.
     throw new TrustStoreError('approval-empty-slot', `${slot} is empty; there is nothing to approve`);
   }
-  const bytes = Buffer.from(rawBytes, 'utf8');
-
   const store = createFormatV2Store({ env, secureFileOptions, now });
   const binding = await store.createProjectBinding(projectRoot);
   // Fail closed on a held/foreign/malformed lock or an uncorroborated committed
@@ -121,16 +128,18 @@ export async function approveSlot({
   const approved = await (confirm ?? ((details) => ttyConfirm(details, { input, output })))({
     slot,
     projectRoot,
-    sourcePath: slotSourcePath(projectRoot, slot),
-    byteLength: bytes.length,
-    rawHash: sha256Hex(bytes),
+    sourcePath: escapeBytesForTerminal(slotSourcePath(projectRoot, slot)),
+    byteLength: source.bytes.length,
+    rawHash: sha256Hex(source.bytes),
+    escapedBytes: escapeBytesForTerminal(source.bytes),
+    text: source.text,
     // Derived exactly as trust-format-v2 derives the record's contentHash, so the
     // hash shown to the owner is the hash that lands in the record.
-    contentHash: sha256Hex(Buffer.from(normalizeUntrusted(rawBytes), 'utf8')),
+    contentHash: sha256Hex(Buffer.from(normalizeUntrusted(source.text), 'utf8')),
     // The owner sees the sink's own rendering of these bytes, not a paraphrase.
-    rendered: renderSlotBlock(rawBytes, { authoritative: true }),
+    rendered: renderSlotBlock(source.text, { authoritative: true }),
   });
   if (approved !== true) throw new TrustStoreError('approval-declined', 'approval was not confirmed; nothing was changed');
 
-  return store.commitTransaction({ binding, slot, rawBytes: bytes, sourceOrigin: `cli:trust-approve:${slot}` });
+  return store.commitTransaction({ binding, slot, rawBytes: source.bytes, sourceOrigin: `cli:trust-approve:${slot}` });
 }

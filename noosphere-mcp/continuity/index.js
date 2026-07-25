@@ -64,7 +64,7 @@ import { quoteUntrustedMemory, sanitizeMemoryText } from './memory-safety.js';
 import { renderSlotBlock } from './render.js';
 import { isSlotAuthoritative } from './trust-store.js';
 import { approveSlot } from './internal/approval-service.js';
-import { APPROVABLE_SLOTS, baselineBody, resolveSlotBytes } from './slot-sources.js';
+import { APPROVABLE_SLOTS, resolveSlotSource } from './slot-sources.js';
 import {
   cspPaths,
   loadRuntimeState,
@@ -862,21 +862,18 @@ export async function refreshContext(root, options = {}) {
       config.project_id,
     )}/context?format=text&limit=50&q=${query}`,
   );
-  let baseline = await readFile(
-    path.join(root, '.noosphere', 'baseline.md'),
-    'utf8',
-  ).catch(() => '');
-  let masterPrompt = await readMasterPrompt(root);
+  let baselineSource = await resolveSlotSource(root, 'baseline');
+  let masterPromptSource = await resolveSlotSource(root, 'master-prompt');
   let followups = await readFollowupPrompts(root);
 
-  if (!baseline || !masterPrompt || followups.length === 0) {
+  if (!baselineSource.text || !masterPromptSource.text || followups.length === 0) {
     const walrusRestore = await recallTypedMemories(config, {
-      baseline: !baseline,
-      masterPrompt: !masterPrompt,
+      baseline: !baselineSource.text,
+      masterPrompt: !masterPromptSource.text,
       followups: followups.length === 0,
     });
-    if (!baseline && walrusRestore.baseline) baseline = walrusRestore.baseline;
-    if (!masterPrompt && walrusRestore.masterPrompt) masterPrompt = walrusRestore.masterPrompt;
+    if (!baselineSource.text && walrusRestore.baseline) baselineSource = sourceFromRestoredText(walrusRestore.baseline);
+    if (!masterPromptSource.text && walrusRestore.masterPrompt) masterPromptSource = sourceFromRestoredText(walrusRestore.masterPrompt);
     if (followups.length === 0 && walrusRestore.followups.length > 0) followups = walrusRestore.followups;
   }
 
@@ -884,16 +881,16 @@ export async function refreshContext(root, options = {}) {
   // recall provenance. A slot renders as authoritative (unquoted) only when an
   // authenticated, owner-only, out-of-tree trust record vouches for these exact
   // bytes; otherwise the content is quoted, non-authoritative data (fail-closed).
-  // M-2: gate on the exact bytes that render (the header-stripped body), so the
-  // displayed authoritative content equals the bytes the trust record binds.
-  // Phase 4B: the strip itself lives in slot-sources.js, shared with the approval
-  // command, so the owner approves precisely what this sink renders.
-  const renderedBaseline = baseline ? baselineBody(baseline) : '';
-  const baselineAuthoritative = renderedBaseline
-    ? await isSlotAuthoritative({ projectRoot: root, slot: 'baseline', rawBytes: renderedBaseline })
+  // M-2: gate on the exact bytes that render, so the displayed authoritative
+  // content equals the bytes the trust record binds. resolveSlotSource owns the
+  // baseline derivation; recalled strings derive one Buffer and keep it intact.
+  const renderedBaseline = baselineSource.text;
+  const masterPrompt = masterPromptSource.text;
+  const baselineAuthoritative = baselineSource.bytes.length > 0
+    ? await isSlotAuthoritative({ projectRoot: root, slot: 'baseline', rawBytes: baselineSource.bytes })
     : false;
-  const masterAuthoritative = masterPrompt
-    ? await isSlotAuthoritative({ projectRoot: root, slot: 'master-prompt', rawBytes: masterPrompt })
+  const masterAuthoritative = masterPromptSource.bytes.length > 0
+    ? await isSlotAuthoritative({ projectRoot: root, slot: 'master-prompt', rawBytes: masterPromptSource.bytes })
     : false;
 
   const output = [
@@ -2417,7 +2414,7 @@ async function ollamaFromCli(root) {
   const options = parseOllamaArguments(process.argv.slice(3));
   // Phase 4B: read the instructions slot through the shared resolver, so the
   // bytes this sink gates on are the bytes `trust approve instructions` binds.
-  const instructions = await resolveSlotBytes(root, 'instructions');
+  const instructions = (await resolveSlotSource(root, 'instructions')).text;
   let context;
   try {
     context = await refreshContext(root, {
@@ -2483,15 +2480,16 @@ async function ollamaFromCli(root) {
 }
 
 async function printProtocol(root) {
-  const file = path.join(root, '.noosphere', 'instructions.md');
-  process.stdout.write(await readFile(file, 'utf8'));
+  process.stdout.write((await resolveSlotSource(root, 'instructions')).text);
 }
 
 async function readMasterPrompt(root) {
-  return readFile(
-    path.join(root, '.noosphere', 'master-prompt.md'),
-    'utf8',
-  ).catch(() => '');
+  return (await resolveSlotSource(root, 'master-prompt')).text;
+}
+
+function sourceFromRestoredText(text) {
+  const sourceText = String(text ?? '');
+  return { bytes: Buffer.from(sourceText, 'utf8'), text: sourceText };
 }
 
 async function readFollowupPrompts(root) {

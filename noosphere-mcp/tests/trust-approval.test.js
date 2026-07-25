@@ -13,11 +13,11 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { after, describe, it } from 'node:test';
 
-import { approveSlot, confirmationPhrase } from '../continuity/internal/approval-service.js';
+import { approveSlot, confirmationPhrase, escapeBytesForTerminal } from '../continuity/internal/approval-service.js';
 import { createFormatV2Store } from '../continuity/internal/trust-format-v2.js';
 import { isSlotAuthoritative } from '../continuity/trust-store.js';
 import { putSlotRecord } from '../continuity/trust-store-internal.js';
-import { resolveSlotBytes } from '../continuity/slot-sources.js';
+import { resolveSlotBytes, resolveSlotSource } from '../continuity/slot-sources.js';
 
 const temporary = [];
 after(async () => {
@@ -52,6 +52,57 @@ const hasBidiOverride = (text) => [...text].some((character) => {
 });
 
 describe('SEC-05 Phase 4B — owner approval mints authority for exactly the approved bytes', () => {
+  it('rejects every malformed UTF-8 source before it can be displayed or approved', async () => {
+    const { env, project } = await fresh({ master: null, instructions: undefined });
+    const malformedSources = [
+      ['master-prompt', 'master-prompt.md', Buffer.from([0xc3, 0x28])],
+      ['instructions', 'instructions.md', Buffer.from([0xe2, 0x82])],
+    ];
+
+    for (const [slot, file, bytes] of malformedSources) {
+      await fs.writeFile(path.join(project, '.noosphere', file), bytes);
+      await assert.rejects(
+        resolveSlotSource(project, slot),
+        (error) => error.code === 'slot-invalid-utf8',
+      );
+      await assert.rejects(
+        approveSlot({ projectRoot: project, slot, env, confirm: accept }),
+        (error) => error.code === 'slot-invalid-utf8',
+      );
+    }
+  });
+
+  it('retains the exact valid source bytes and shows a terminal-safe byte representation', async () => {
+    const sourceBytes = Buffer.from(`line\tone\n${RLO}`);
+    const { env, project } = await fresh({ master: null, instructions: undefined });
+    const sources = [
+      ['master-prompt', 'master-prompt.md', sourceBytes, sourceBytes],
+      ['instructions', 'instructions.md', sourceBytes, sourceBytes],
+      ['baseline', 'baseline.md', Buffer.concat([Buffer.from('# Noosphere project baseline\n\n'), sourceBytes]), sourceBytes],
+    ];
+
+    for (const [slot, file, fileBytes, retainedBytes] of sources) {
+      await fs.writeFile(path.join(project, '.noosphere', file), fileBytes);
+      const source = await resolveSlotSource(project, slot);
+      assert.deepEqual(source.bytes, retainedBytes, `${slot} source bytes`);
+      assert.deepEqual(Buffer.from(source.text, 'utf8'), retainedBytes, `${slot} source text`);
+
+      let shown;
+      await approveSlot({
+        projectRoot: project,
+        slot,
+        env,
+        confirm: (details) => { shown = details; return true; },
+      });
+      assert.equal(shown.rawHash, crypto.createHash('sha256').update(retainedBytes).digest('hex'));
+      assert.equal(shown.escapedBytes, 'line\\x09one\\x0a\\xe2\\x80\\xae');
+      assert.ok(!shown.escapedBytes.includes(ESC));
+      assert.ok(!hasBidiOverride(shown.escapedBytes));
+      assert.deepEqual(Buffer.from(shown.text, 'utf8'), retainedBytes, `${slot} approval text`);
+      assert.equal(escapeBytesForTerminal(retainedBytes), shown.escapedBytes);
+    }
+  });
+
   it('approves the current bytes and makes only those bytes authoritative', async () => {
     const { env, project } = await fresh();
     const { manifest, record } = await approveSlot({ projectRoot: project, slot: 'master-prompt', env, confirm: accept });
