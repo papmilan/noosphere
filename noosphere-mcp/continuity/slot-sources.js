@@ -53,6 +53,22 @@ export async function resolveSlotSource(root, slot) {
   return { bytes: Buffer.from(text, 'utf8'), text };
 }
 
+// Read path. Malformed UTF-8 in a slot file must not take down refresh/watch or
+// the Ollama sink: anything with write access to the working tree can plant one
+// bad byte, and a hard throw there turns that into a denial of service. Such a
+// slot is treated as ABSENT — empty bytes never satisfy isSlotAuthoritative, so
+// this degrades while staying fail-closed on authority. The approval path keeps
+// the strict resolveSlotSource refusal, so an owner is never asked to approve
+// bytes a sink could not have rendered.
+export async function resolveSlotSourceForRead(root, slot) {
+  try {
+    return await resolveSlotSource(root, slot);
+  } catch (error) {
+    if (error.code === 'slot-invalid-utf8') return { bytes: Buffer.alloc(0), text: '' };
+    throw error;
+  }
+}
+
 // Compatibility surface for callers that only need the sink text.
 export async function resolveSlotBytes(root, slot) {
   return (await resolveSlotSource(root, slot)).text;

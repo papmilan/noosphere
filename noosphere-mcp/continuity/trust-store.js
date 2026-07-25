@@ -38,9 +38,20 @@ export async function isSlotAuthoritative(request) {
     // Only an absent binding can select format 1. Any other binding state —
     // including a symlink, directory, unreadable file, or lookup failure — is
     // evidence of format-2 state and must fail closed rather than downgrade.
+    // Resolve the binding path OUTSIDE the guarded lstat: bindingPath() calls
+    // realpathSync(projectRoot), which throws ENOENT of its own for an
+    // unresolvable project path. Inside the guard that ENOENT would be read as
+    // "binding absent" and would downgrade to format 1 — a path-resolution
+    // failure is not evidence that the owner never approved this slot.
+    let bindingFile;
+    try {
+      bindingFile = store.bindingPath(projectRoot);
+    } catch {
+      return false;
+    }
     let bindingAbsent = false;
     try {
-      await fs.lstat(store.bindingPath(projectRoot));
+      await fs.lstat(bindingFile);
     } catch (error) {
       if (error.code === 'ENOENT') bindingAbsent = true;
       else return false;

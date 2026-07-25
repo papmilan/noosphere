@@ -17,7 +17,7 @@ import { approveSlot, confirmationPhrase, escapeBytesForTerminal } from '../cont
 import { createFormatV2Store } from '../continuity/internal/trust-format-v2.js';
 import { isSlotAuthoritative } from '../continuity/trust-store.js';
 import { putSlotRecord } from '../continuity/trust-store-internal.js';
-import { resolveSlotBytes, resolveSlotSource } from '../continuity/slot-sources.js';
+import { resolveSlotBytes, resolveSlotSource, resolveSlotSourceForRead } from '../continuity/slot-sources.js';
 
 const temporary = [];
 after(async () => {
@@ -73,6 +73,24 @@ describe('SEC-05 Phase 4B — owner approval mints authority for exactly the app
         (error) => error.code === 'slot-invalid-utf8',
       );
     }
+  });
+
+  it('degrades instead of aborting when a read path meets malformed UTF-8', async () => {
+    const { env, project } = await fresh({ master: null });
+    await fs.writeFile(path.join(project, '.noosphere', 'master-prompt.md'), Buffer.from([0xc3, 0x28]));
+
+    // Read path: absent, not an exception — one planted byte must not break
+    // refresh/watch for every agent on the machine.
+    const source = await resolveSlotSourceForRead(project, 'master-prompt');
+    assert.equal(source.text, '');
+    assert.equal(source.bytes.length, 0);
+    // Absent bytes can never be authoritative, so degrading stays fail-closed.
+    assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: source.bytes, env }), false);
+    // The approval path still refuses outright.
+    await assert.rejects(
+      approveSlot({ projectRoot: project, slot: 'master-prompt', env, confirm: accept }),
+      (error) => error.code === 'slot-invalid-utf8',
+    );
   });
 
   it('retains the exact valid source bytes and shows a terminal-safe byte representation', async () => {
@@ -390,6 +408,42 @@ describe('SEC-05 Phase 4B — format-2 governs a bound slot; format-1 survives e
     } finally {
       await fs.chmod(bindingDirectory, 0o700);
     }
+  });
+
+  it('an unresolvable project path cannot resurrect stale format-1 authority', async (t) => {
+    // The project root must be canonical for this regression: format-1 keys its
+    // lookup on realpath but FALLS BACK to path.resolve when realpath fails
+    // (trust-store-internal.js projectDir), so the stale record is only
+    // reachable when both spellings agree.
+    const { env, home } = await fresh();
+    const parent = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'noosphere-4b-swap-'));
+    temporary.push(parent);
+    const project = path.join(parent, 'project');
+    await fs.mkdir(path.join(project, '.noosphere'), { recursive: true, mode: 0o700 });
+    await fs.writeFile(path.join(project, '.noosphere', 'master-prompt.md'), MASTER, 'utf8');
+    assert.equal(home, env.NOOSPHERE_HOME);
+
+    await approveSlot({ projectRoot: project, slot: 'master-prompt', env, confirm: accept });
+    // The stale Phase-1 record for the same slot is the downgrade bait.
+    await putSlotRecord({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env });
+    assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env }), true);
+
+    // Swap the approved tree for a dangling symlink at the SAME path. Now
+    // bindingPath()'s realpathSync throws ENOENT of its own. Treating that as
+    // "binding absent" would fall through to format 1, which resolves the very
+    // same key via its path.resolve fallback and would hand back authority the
+    // format-2 binding no longer backs.
+    await fs.rm(project, { recursive: true, force: true });
+    try {
+      await fs.symlink(path.join(parent, 'missing-target'), project);
+    } catch (error) {
+      if (process.platform === 'win32' && ['EACCES', 'EPERM'].includes(error.code)) {
+        t.skip('symbolic-link coverage requires Windows privileges');
+        return;
+      }
+      throw error;
+    }
+    assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env }), false);
   });
 
   it('a removed format-2 binding does not silently resurrect a foreign project', async () => {

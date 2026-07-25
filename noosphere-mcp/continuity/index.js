@@ -64,7 +64,7 @@ import { quoteUntrustedMemory, sanitizeMemoryText } from './memory-safety.js';
 import { renderSlotBlock } from './render.js';
 import { isSlotAuthoritative } from './trust-store.js';
 import { approveSlot } from './internal/approval-service.js';
-import { APPROVABLE_SLOTS, resolveSlotSource } from './slot-sources.js';
+import { APPROVABLE_SLOTS, resolveSlotSourceForRead } from './slot-sources.js';
 import {
   cspPaths,
   loadRuntimeState,
@@ -870,8 +870,8 @@ export async function refreshContext(root, options = {}) {
       config.project_id,
     )}/context?format=text&limit=50&q=${query}`,
   );
-  let baselineSource = await resolveSlotSource(root, 'baseline');
-  let masterPromptSource = await resolveSlotSource(root, 'master-prompt');
+  let baselineSource = await resolveSlotSourceForRead(root, 'baseline');
+  let masterPromptSource = await resolveSlotSourceForRead(root, 'master-prompt');
   let followups = await readFollowupPrompts(root);
 
   if (!baselineSource.text || !masterPromptSource.text || followups.length === 0) {
@@ -2428,7 +2428,7 @@ async function ollamaFromCli(root) {
   const options = parseOllamaArguments(process.argv.slice(3));
   // Phase 4B: read the instructions slot through the shared resolver, so the
   // bytes this sink gates on are the bytes `trust approve instructions` binds.
-  const instructions = (await resolveSlotSource(root, 'instructions')).text;
+  const instructions = (await resolveSlotSourceForRead(root, 'instructions')).text;
   let context;
   try {
     context = await refreshContext(root, {
@@ -2494,11 +2494,11 @@ async function ollamaFromCli(root) {
 }
 
 async function printProtocol(root) {
-  process.stdout.write((await resolveSlotSource(root, 'instructions')).text);
+  process.stdout.write((await resolveSlotSourceForRead(root, 'instructions')).text);
 }
 
 async function readMasterPrompt(root) {
-  return (await resolveSlotSource(root, 'master-prompt')).text;
+  return (await resolveSlotSourceForRead(root, 'master-prompt')).text;
 }
 
 function sourceFromRestoredText(text) {
