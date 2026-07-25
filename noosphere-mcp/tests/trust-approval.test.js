@@ -363,14 +363,29 @@ describe('SEC-05 Phase 4B — format-2 governs a bound slot; format-1 survives e
     assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env }), false);
   });
 
-  it('a non-ENOENT binding lookup error cannot resurrect stale format-1 authority', async () => {
+  it('a non-ENOENT binding lookup error cannot resurrect stale format-1 authority', async (t) => {
     const { env, project } = await fresh();
     await approveSlot({ projectRoot: project, slot: 'master-prompt', env, confirm: accept });
     await putSlotRecord({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env });
 
-    const bindingDirectory = path.dirname(createFormatV2Store({ env }).bindingPath(project));
+    const bindingFile = createFormatV2Store({ env }).bindingPath(project);
+    const bindingDirectory = path.dirname(bindingFile);
     await fs.chmod(bindingDirectory, 0o000);
     try {
+      // The assertion is only meaningful once the OS actually denies the lookup.
+      // chmod cannot revoke directory traversal on Windows (Node maps it to the
+      // read-only attribute), and it does not bind root on POSIX, so confirm the
+      // precondition instead of assuming it. The branch under test —
+      // `ENOENT` selects format 1, every other lstat error returns false — is
+      // platform-independent, so POSIX coverage is the real coverage.
+      const deniedCode = await fs.lstat(bindingFile).then(
+        () => null,
+        (error) => (error.code === 'ENOENT' ? null : error.code),
+      );
+      if (!deniedCode) {
+        t.skip('OS does not deny directory lookup via chmod (Windows, or running as root)');
+        return;
+      }
       assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env }), false);
     } finally {
       await fs.chmod(bindingDirectory, 0o700);
