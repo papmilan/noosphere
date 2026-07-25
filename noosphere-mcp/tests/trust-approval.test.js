@@ -46,10 +46,28 @@ async function fresh({ master = MASTER, instructions, baseline, createHome = tru
 const accept = () => true;
 const decline = () => false;
 
-// POSIX-only fixtures: Node cannot create a FIFO, and Windows has no mkfifo.
-// These suites already run POSIX-only shapes (symlinks, modes) elsewhere.
+// POSIX-only fixture. Node cannot create a FIFO, and the mkfifo on the Windows
+// runners is the MSYS one, which produces something Windows treats as an
+// ordinary regular file — no FIFO semantics, so the property under test does not
+// exist there. Verify a real FIFO resulted rather than assuming the command
+// worked, and let callers skip when it did not.
 async function mkfifo(file) {
-  await promisify(execFile)('mkfifo', [file]);
+  if (process.platform === 'win32') return false;
+  await promisify(execFile)('mkfifo', [file]).catch(() => undefined);
+  const stats = await fs.lstat(file).catch(() => null);
+  return Boolean(stats?.isFIFO());
+}
+
+// Windows needs SeCreateSymbolicLinkPrivilege; report rather than throw so the
+// caller can skip that shape instead of failing on an unavailable privilege.
+async function trySymlink(target, file) {
+  try {
+    await fs.symlink(target, file);
+    return true;
+  } catch (error) {
+    if (['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) return false;
+    throw error;
+  }
 }
 
 async function withTimeout(promise, ms, message) {
@@ -116,30 +134,43 @@ describe('SEC-05 Phase 4B — owner approval mints authority for exactly the app
   it('degrades on every classified source failure and marks the slot unusable, not absent', async () => {
     // Each case plants a real filesystem shape a working-tree writer can create
     // and asserts the resulting classification — no hand-copied constants.
+    // `plant` returns false when the OS cannot produce the shape (FIFOs on
+    // Windows, symlinks without privilege); those cases are skipped rather than
+    // asserted against a shape that was never created.
     const cases = [
-      ['EISDIR', async (file) => { await fs.mkdir(file); }],
-      ['slot-not-regular-file', async (file) => { await mkfifo(file); }],
+      ['EISDIR', async (file) => { await fs.mkdir(file); return true; }],
+      ['slot-not-regular-file', async (file) => mkfifo(file)],
       // A symlinked slot file is judged AS a symlink (lstat, not stat) and is
       // never followed, so it classifies here rather than by its target.
-      ['slot-not-regular-file', async (file) => { await fs.symlink('/etc/hosts', file); }],
-      ['slot-not-regular-file', async (file) => { await fs.symlink(file, file); }],
+      ['slot-not-regular-file', async (file) => trySymlink(os.devNull, file)],
+      ['slot-not-regular-file', async (file) => trySymlink(file, file)],
       ['ELOOP', async (file) => {
         // The loop is in a path COMPONENT, which lstat must still resolve.
         const dir = path.dirname(file);
         await fs.rm(dir, { recursive: true, force: true });
-        await fs.symlink(dir, dir);
+        return trySymlink(dir, dir);
       }],
       ['ENOTDIR', async (file) => {
         // A regular file where `.noosphere/` must be a directory.
         await fs.rm(path.dirname(file), { recursive: true, force: true });
         await fs.writeFile(path.dirname(file), 'not a directory', 'utf8');
+        return true;
       }],
-      ['slot-invalid-utf8', async (file) => { await fs.writeFile(file, Buffer.from([0xc3, 0x28])); }],
+      ['slot-invalid-utf8', async (file) => { await fs.writeFile(file, Buffer.from([0xc3, 0x28])); return true; }],
     ];
+    let asserted = 0;
     for (const [code, plant] of cases) {
       const { project } = await fresh({ master: null });
       const file = path.join(project, '.noosphere', 'master-prompt.md');
-      await plant(file);
+      if (!await plant(file)) continue;
+      // Errno cases assert a POSIX classification. Confirm the OS actually
+      // produces that errno for the shape before asserting on it, rather than
+      // hard-coding an expectation Windows may not share.
+      if (['ENOTDIR', 'ELOOP'].includes(code)) {
+        const planted = await fs.lstat(file).then(() => null, (error) => error.code);
+        if (planted !== code) continue;
+      }
+      asserted += 1;
       const source = await resolveSlotSourceForRead(project, 'master-prompt');
       assert.equal(source.bytes.length, 0, code);
       assert.equal(source.unusable, true, code);
@@ -147,12 +178,23 @@ describe('SEC-05 Phase 4B — owner approval mints authority for exactly the app
       // Strict callers still see the raw failure.
       await assert.rejects(resolveSlotSource(project, 'master-prompt'), (error) => error.code === code);
     }
+    // Guards the guard: if every shape silently failed to plant, this test would
+    // pass while asserting nothing. POSIX can produce all of them, so demand
+    // the full set there and never let a skip erode coverage silently.
+    const required = process.platform === 'win32' ? 2 : cases.length;
+    assert.ok(
+      asserted >= required,
+      `only ${asserted} of ${cases.length} shapes were exercised on ${process.platform}`,
+    );
   });
 
-  it('never opens a non-regular slot file, so a FIFO cannot block the read', async () => {
+  it('never opens a non-regular slot file, so a FIFO cannot block the read', async (t) => {
     const { project } = await fresh({ master: null });
     const file = path.join(project, '.noosphere', 'master-prompt.md');
-    await mkfifo(file);
+    if (!await mkfifo(file)) {
+      t.skip('this platform cannot create a FIFO (Windows has no real FIFO semantics)');
+      return;
+    }
 
     // The point is termination, not just classification: opening a FIFO with no
     // writer blocks forever and no error code is ever produced, so error
