@@ -8,6 +8,7 @@ import {
   PathBoundaryError,
   acquireOwnerOnlyLock,
   atomicOwnerOnlyWrite,
+  isIgnorableDirFsyncError,
   atomicOwnerOnlyWriteSync,
   currentWindowsSid,
   readOwnerOnlyFile,
@@ -262,5 +263,17 @@ describe('SEC-05 Phase 4A-R1 — owner-only transaction lock', () => {
     assert.equal(fs.existsSync(file), true);
     await lock.release();
     assert.equal(fs.existsSync(file), false);
+  });
+});
+
+describe('SEC-05 Phase 4A-R2 — directory fsync durability classification', () => {
+  test('ignores only genuine unsupported-operation errno, surfaces meaningful ones', () => {
+    for (const code of ['EINVAL', 'ENOTSUP', 'EOPNOTSUPP']) {
+      assert.equal(isIgnorableDirFsyncError({ code }), true, `${code} must be ignorable`);
+    }
+    for (const code of ['EIO', 'ENOSPC', 'EACCES', 'EBADF', 'EROFS', undefined]) {
+      assert.equal(isIgnorableDirFsyncError({ code }), false, `${code} must be surfaced`);
+    }
+    assert.equal(isIgnorableDirFsyncError(null), false);
   });
 });
