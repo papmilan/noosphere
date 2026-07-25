@@ -7,10 +7,12 @@
 // real by spawning the CLI without a terminal.
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
+import { promisify } from 'node:util';
 import { after, describe, it } from 'node:test';
 
 import { approveSlot, confirmationPhrase, escapeBytesForTerminal } from '../continuity/internal/approval-service.js';
@@ -43,6 +45,26 @@ async function fresh({ master = MASTER, instructions, baseline, createHome = tru
 
 const accept = () => true;
 const decline = () => false;
+
+// POSIX-only fixtures: Node cannot create a FIFO, and Windows has no mkfifo.
+// These suites already run POSIX-only shapes (symlinks, modes) elsewhere.
+async function mkfifo(file) {
+  await promisify(execFile)('mkfifo', [file]);
+}
+
+async function withTimeout(promise, ms, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${message} (exceeded ${ms}ms)`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // Built from code points, never typed literally, so the hostile fixture stays
 // visible in this source file.
@@ -92,9 +114,27 @@ describe('SEC-05 Phase 4B — owner approval mints authority for exactly the app
   });
 
   it('degrades on every classified source failure and marks the slot unusable, not absent', async () => {
+    // Each case plants a real filesystem shape a working-tree writer can create
+    // and asserts the resulting classification — no hand-copied constants.
     const cases = [
       ['EISDIR', async (file) => { await fs.mkdir(file); }],
-      ['ELOOP', async (file) => { await fs.symlink(file, file); }],
+      ['slot-not-regular-file', async (file) => { await mkfifo(file); }],
+      // A symlinked slot file is judged AS a symlink (lstat, not stat) and is
+      // never followed, so it classifies here rather than by its target.
+      ['slot-not-regular-file', async (file) => { await fs.symlink('/etc/hosts', file); }],
+      ['slot-not-regular-file', async (file) => { await fs.symlink(file, file); }],
+      ['ELOOP', async (file) => {
+        // The loop is in a path COMPONENT, which lstat must still resolve.
+        const dir = path.dirname(file);
+        await fs.rm(dir, { recursive: true, force: true });
+        await fs.symlink(dir, dir);
+      }],
+      ['ENOTDIR', async (file) => {
+        // A regular file where `.noosphere/` must be a directory.
+        await fs.rm(path.dirname(file), { recursive: true, force: true });
+        await fs.writeFile(path.dirname(file), 'not a directory', 'utf8');
+      }],
+      ['slot-invalid-utf8', async (file) => { await fs.writeFile(file, Buffer.from([0xc3, 0x28])); }],
     ];
     for (const [code, plant] of cases) {
       const { project } = await fresh({ master: null });
@@ -103,10 +143,33 @@ describe('SEC-05 Phase 4B — owner approval mints authority for exactly the app
       const source = await resolveSlotSourceForRead(project, 'master-prompt');
       assert.equal(source.bytes.length, 0, code);
       assert.equal(source.unusable, true, code);
-      assert.equal(source.reason, code);
+      assert.equal(source.reason, code, `expected ${code}, got ${source.reason}`);
       // Strict callers still see the raw failure.
       await assert.rejects(resolveSlotSource(project, 'master-prompt'), (error) => error.code === code);
     }
+  });
+
+  it('never opens a non-regular slot file, so a FIFO cannot block the read', async () => {
+    const { project } = await fresh({ master: null });
+    const file = path.join(project, '.noosphere', 'master-prompt.md');
+    await mkfifo(file);
+
+    // The point is termination, not just classification: opening a FIFO with no
+    // writer blocks forever and no error code is ever produced, so error
+    // classification alone cannot save a read path. Bound it.
+    const source = await withTimeout(
+      resolveSlotSourceForRead(project, 'master-prompt'),
+      5_000,
+      'reading a FIFO slot did not complete — the read blocked',
+    );
+    assert.equal(source.unusable, true);
+    assert.equal(source.reason, 'slot-not-regular-file');
+
+    await withTimeout(
+      assert.rejects(resolveSlotSource(project, 'master-prompt'), (error) => error.code === 'slot-not-regular-file'),
+      5_000,
+      'the strict read blocked on a FIFO',
+    );
   });
 
   it('marks an absent slot absent, not unusable', async () => {
@@ -116,12 +179,41 @@ describe('SEC-05 Phase 4B — owner approval mints authority for exactly the app
     assert.equal(source.unusable, false);
   });
 
-  it('classifies only repository-controlled failures; unknown codes still throw', async () => {
-    // Guards the classification itself: a catch-all here would hide genuine
-    // faults (EIO, ENOMEM) behind a silently empty slot.
-    assert.deepEqual(
-      [...UNUSABLE_SOURCE_CODES].sort(),
-      ['EACCES', 'EISDIR', 'ELOOP', 'EPERM', 'slot-invalid-utf8'].sort(),
+  it('rethrows unclassified failures instead of hiding them behind an empty slot', async () => {
+    // Behavioural, not a restatement of the constant: an unknown code must
+    // propagate, or a genuine fault (EIO, ENOMEM) becomes a silent empty slot.
+    const { project } = await fresh({ master: null });
+    const originalHas = UNUSABLE_SOURCE_CODES.has.bind(UNUSABLE_SOURCE_CODES);
+    await fs.writeFile(path.join(project, '.noosphere', 'master-prompt.md'), Buffer.from([0xc3, 0x28]));
+    UNUSABLE_SOURCE_CODES.has = (code) => (code === 'slot-invalid-utf8' ? false : originalHas(code));
+    try {
+      await assert.rejects(
+        resolveSlotSourceForRead(project, 'master-prompt'),
+        (error) => error.code === 'slot-invalid-utf8',
+      );
+    } finally {
+      UNUSABLE_SOURCE_CODES.has = originalHas;
+    }
+  });
+
+  it('returns false rather than throwing for unsupported rawBytes types', async () => {
+    // The dispatcher documents "every failure, at any layer, fails closed to
+    // false". Buffer.byteLength THROWS for these, so the guard itself must not
+    // be the thing that propagates an exception where false is the safe answer.
+    const { env, project } = await fresh();
+    await putSlotRecord({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env });
+    for (const rawBytes of [undefined, null, 5, true, {}, ['a'], Symbol('x'), () => MASTER, new Date()]) {
+      assert.equal(
+        await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes, env }),
+        false,
+        `${String(rawBytes)} must fail closed`,
+      );
+    }
+    // Supported types keep working.
+    assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env }), true);
+    assert.equal(
+      await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: Buffer.from(MASTER, 'utf8'), env }),
+      true,
     );
   });
 

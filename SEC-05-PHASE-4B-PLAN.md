@@ -45,10 +45,15 @@ nothing **but** that sentence can do it.
 
 **Documented residual risks (accept, do not paper over):**
 
-1. An adversary that can allocate a PTY *and* read the owner's terminal output
-   can satisfy the typed confirmation. The owner's terminal is the trust
-   boundary; no in-process check can distinguish a human keystroke from a PTY
-   writer. Reducing this needs an out-of-band channel.
+1. **The TTY gate does not establish human presence.** It blocks ordinary piped,
+   redirected, and scripted approval. It does not stop an adversary who can run
+   commands as the owner: that adversary allocates a PTY (`script`, `expect`,
+   `openpty`) and drives the prompt. Reading the terminal output is **not**
+   required — the phrase is `approve <slot> <first 8 hex of rawHash>`, computable
+   offline by anyone who planted or can read the slot file. No in-process check
+   can distinguish a human keystroke from a PTY writer; closing this needs an
+   OS-mediated presence proof (keychain, biometric, re-authentication) that a
+   child process cannot relay.
 2. Someone who can delete format-2 state inside the owner-only trust root and
    retained a superseded format-1 record can fall back to older
    *owner-approved* bytes. It never authorizes attacker-chosen bytes.

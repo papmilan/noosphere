@@ -64,7 +64,7 @@ import { quoteUntrustedMemory, sanitizeMemoryText } from './memory-safety.js';
 import { renderSlotBlock } from './render.js';
 import { isSlotAuthoritative } from './trust-store.js';
 import { approveSlot } from './internal/approval-service.js';
-import { APPROVABLE_SLOTS, UNUSABLE_SOURCE_CODES, resolveSlotSource, resolveSlotSourceForRead } from './slot-sources.js';
+import { APPROVABLE_SLOTS, UNUSABLE_SOURCE_CODES, baselineBody, resolveSlotSource, resolveSlotSourceForRead } from './slot-sources.js';
 import {
   cspPaths,
   loadRuntimeState,
@@ -258,7 +258,11 @@ try {
   console.error(`Noosphere continuity: ${error.message}`);
   process.exitCode = error.exitCode
     ?? (command === 'trust' && error.message === '--path requires a value.' ? 2 : null)
-    ?? (TRUST_REFUSAL_CODES.has(error.code) ? 3 : 1);
+    // Exit 3 means "the owner refused / could not confirm a trust approval".
+    // Scope it to `trust`: other commands share some of these error codes (a
+    // malformed slot raises slot-invalid-utf8 from share-master-prompt too), and
+    // a wrapper script must not read those as an approval refusal.
+    ?? (command === 'trust' && TRUST_REFUSAL_CODES.has(error.code) ? 3 : 1);
 }
 
 export async function initializeProject(root, options = {}) {
@@ -887,8 +891,8 @@ export async function refreshContext(root, options = {}) {
       masterPrompt: masterPromptMissing,
       followups: followups.length === 0,
     });
-    if (baselineMissing && walrusRestore.baseline) baselineSource = sourceFromRestoredText(walrusRestore.baseline);
-    if (masterPromptMissing && walrusRestore.masterPrompt) masterPromptSource = sourceFromRestoredText(walrusRestore.masterPrompt);
+    if (baselineMissing && walrusRestore.baseline) baselineSource = sourceFromRestoredText(walrusRestore.baseline, 'baseline');
+    if (masterPromptMissing && walrusRestore.masterPrompt) masterPromptSource = sourceFromRestoredText(walrusRestore.masterPrompt, 'master-prompt');
     if (followups.length === 0 && walrusRestore.followups.length > 0) followups = walrusRestore.followups;
   }
 
@@ -2510,8 +2514,12 @@ async function ollamaFromCli(root) {
   });
 }
 
+// STRICT: this is an output contract, not a render. Callers pipe `noosphere
+// protocol` into agents; emitting zero bytes with exit 0 for an unreadable or
+// malformed instructions slot would hand them a silently empty protocol. Fail
+// loudly instead.
 async function printProtocol(root) {
-  process.stdout.write((await resolveSlotSourceForRead(root, 'instructions')).text);
+  process.stdout.write((await resolveSlotSource(root, 'instructions')).text);
 }
 
 // STRICT on purpose. Every caller of this either writes the slot
@@ -2543,8 +2551,13 @@ async function readMasterPromptForCapture(root) {
   }
 }
 
-function sourceFromRestoredText(text) {
-  const sourceText = String(text ?? '');
+// Restored (Walrus) content must land on EXACTLY the bytes the local file would
+// have produced. storePreparedBaseline uploads the whole baseline file, header
+// included, so a restored baseline needs the same header strip and trim local
+// content gets — otherwise the sink renders the header for restored content
+// only, and the "one derivation" guarantee in slot-sources.js is false.
+function sourceFromRestoredText(text, slot) {
+  const sourceText = slot === 'baseline' ? baselineBody(text) : String(text ?? '');
   return { bytes: Buffer.from(sourceText, 'utf8'), text: sourceText };
 }
 

@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { lstat, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 // SEC-05 Phase 4B — the single derivation of the bytes an authority-capable slot
@@ -37,7 +37,28 @@ export function baselineBody(text) {
 export async function resolveSlotSource(root, slot) {
   const segments = SLOT_FILES[slot];
   if (!segments) return { bytes: Buffer.alloc(0), text: '' };
-  const fileBytes = await readFile(path.join(root, ...segments)).catch((error) => {
+  const file = path.join(root, ...segments);
+
+  // Decide WHAT the path is before opening it. Opening blindly lets a
+  // working-tree writer hand us something that never returns: `mkfifo
+  // .noosphere/instructions.md` makes readFile block forever — no error code is
+  // ever produced, so no amount of error classification helps, and refresh/watch
+  // hang instead of failing. lstat (not stat) so a symlink is judged as a
+  // symlink rather than as its target.
+  const stats = await lstat(file).catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (stats === null) return { bytes: Buffer.alloc(0), text: '' };
+  if (!stats.isFile()) {
+    const error = new Error(`${slot} is not a regular file`);
+    // A directory keeps its familiar code; every other non-regular object
+    // (FIFO, socket, block/char device, symlink) reports as one class.
+    error.code = stats.isDirectory() ? 'EISDIR' : 'slot-not-regular-file';
+    throw error;
+  }
+
+  const fileBytes = await readFile(file).catch((error) => {
     if (error.code === 'ENOENT') return Buffer.alloc(0);
     throw error;
   });
@@ -59,7 +80,9 @@ export async function resolveSlotSource(root, slot) {
 // errors would hide genuine breakage behind a silently empty slot.
 export const UNUSABLE_SOURCE_CODES = new Set([
   'slot-invalid-utf8', // decodes to nothing a sink could render
+  'slot-not-regular-file', // FIFO, socket, device, symlink — never opened
   'EISDIR', // a directory planted at the slot path
+  'ENOTDIR', // a file planted where a path component must be a directory
   'ELOOP', // symlink loop
   'EACCES', // permissions revoked
   'EPERM',

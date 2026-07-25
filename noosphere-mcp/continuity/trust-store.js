@@ -39,7 +39,12 @@ export async function isSlotAuthoritative(request) {
   // unusable slot to empty bytes rely on this being an invariant rather than an
   // accident. approveSlot refuses to mint one (approval-empty-slot); this is the
   // matching guard on the decision side, where it applies to both formats.
-  if (Buffer.byteLength(rawBytes ?? '') === 0) return false;
+  // Fail closed on the guard itself: Buffer.byteLength THROWS for a number,
+  // object, or array, and an authority decision must never propagate an
+  // exception where false is the safe answer. Only Buffer and string are
+  // supported inputs; anything else is not a slot's bytes.
+  if (!Buffer.isBuffer(rawBytes) && typeof rawBytes !== 'string') return false;
+  if (Buffer.byteLength(rawBytes) === 0) return false;
   if (FORMAT2_SLOTS.includes(slot)) {
     const store = createFormatV2Store({ env, secureFileOptions });
     // Only an absent binding can select format 1. Any other binding state —

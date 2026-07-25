@@ -114,6 +114,111 @@ async function runInGenuinePty(args, { env, project, stdin }) {
   }
 }
 
+// Runs the CLI with a genuine controlling terminal and sends NOTHING. Some
+// branches are only reachable with a TTY on stdin — `master-prompt` with no
+// content is one — so a piped harness silently tests a different code path.
+const PTY_CAPTURE_DRIVER = `
+set timeout 30
+set cmd [split $env(TEST_PTY_CMD) "\\n"]
+eval spawn -noecho $cmd
+expect eof
+set result [wait]
+exit [lindex $result 3]
+`;
+
+async function runInPtyCapture(args, { env, project }) {
+  const argv = [process.execPath, CLI, ...args, '--path', project];
+  const executable = process.platform === 'darwin' ? '/usr/bin/expect' : 'script';
+  const scriptArgs = process.platform === 'darwin'
+    ? ['-c', PTY_CAPTURE_DRIVER]
+    : ['-q', '-e', '-c', argv.map(shellQuote).join(' '), '/dev/null'];
+  const child = execFileAsync(executable, scriptArgs, {
+    cwd: project,
+    env: {
+      ...process.env,
+      ...env,
+      ...(process.platform === 'darwin'
+        ? { TEST_PTY_CMD: ['/usr/bin/script', '-q', '/dev/null', ...argv].join('\n') }
+        : {}),
+    },
+  });
+  child.child.stdin.end('');
+  try {
+    const { stdout, stderr } = await child;
+    return { code: 0, stdout, stderr };
+  } catch (error) {
+    return { code: error.code ?? 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' };
+  }
+}
+
+const REMOTE_BAIT = 'REMOTE CONTENT AN ATTACKER CONTROLS';
+
+// Records every recall the CLI attempts, so a test can assert that remote
+// restoration was NOT triggered as well as that its content never rendered.
+async function stubRelayer(project, recalled) {
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    if (req.method === 'POST' && url.pathname.endsWith('/recall')) {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      recalled.push(body.action_type);
+      // Bait ONLY the two slot types under test. Followups legitimately recall
+      // when none exist locally, and that is not what these tests prove.
+      const baited = ['project-baseline', 'master-prompt'].includes(body.action_type);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ memories: baited ? [{ content: REMOTE_BAIT }] : [] }));
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('stub context\n');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  await fs.writeFile(
+    path.join(project, '.noosphere', 'config.json'),
+    JSON.stringify({
+      project_id: 'phase4b-remote-test',
+      relayer_url: `http://127.0.0.1:${port}`,
+      privacy: { capture_master_prompt: true },
+    }),
+    'utf8',
+  );
+  return server;
+}
+
+// Same stub, but the recalled baseline body is caller-chosen so a test can
+// compare restored rendering against local rendering of the SAME bytes.
+async function stubRelayerReturning(project, recalled, baselineContent) {
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    if (req.method === 'POST' && url.pathname.endsWith('/recall')) {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      recalled.push(body.action_type);
+      const memories = body.action_type === 'project-baseline' ? [{ content: baselineContent }] : [];
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ memories }));
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('stub context\n');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  await fs.writeFile(
+    path.join(project, '.noosphere', 'config.json'),
+    JSON.stringify({
+      project_id: 'phase4b-remote-test',
+      relayer_url: `http://127.0.0.1:${port}`,
+      privacy: { capture_master_prompt: true },
+    }),
+    'utf8',
+  );
+  return server;
+}
+
 // A refused approval must leave the trust store completely untouched — not just
 // unauthoritative. Anything under NOOSPHERE_HOME counts as a trace.
 async function touchedTrustStore({ home }) {
@@ -274,7 +379,8 @@ describe('SEC-05 Phase 4B — an unreadable master prompt still counts as existi
     const file = path.join(context.project, '.noosphere', 'master-prompt.md');
     await fs.writeFile(file, PINNED);
     // The capture commands run behind loadConfig, so the fixture needs a
-    // project config; nothing here contacts the relayer.
+    // project config. Tests that must observe recall attempts replace this with
+    // stubRelayer(); the unreachable port here keeps the others offline.
     await fs.writeFile(
       path.join(context.project, '.noosphere', 'config.json'),
       JSON.stringify({
@@ -295,14 +401,33 @@ describe('SEC-05 Phase 4B — an unreadable master prompt still counts as existi
     assert.deepEqual(await fs.readFile(context.file), PINNED);
   });
 
-  it('never reports it as absent', async () => {
+  it('reports it as unreadable rather than absent on the display branch', {
+    skip: process.platform === 'win32' ? 'requires a POSIX PTY' : false,
+  }, async () => {
     const context = await freshMalformed();
-    const result = await run(['master-prompt', '--content', 'AGENT SUPPLIED PROMPT'], context);
+    const recalled = [];
+    const server = await stubRelayer(context.project, recalled);
+    try {
+      // The display branch needs a TTY on stdin; with a pipe, hasInput is true
+      // and this never runs. Driving it through a real PTY is what makes the
+      // assertions below meaningful rather than vacuous.
+      const result = await runInPtyCapture(['master-prompt'], context);
+      const output = `${result.stdout}${result.stderr}`;
 
-    // "No master prompt has been captured" is the claim that would justify an
-    // overwrite; an unreadable prompt must never produce it.
-    assert.doesNotMatch(result.stdout, /No master prompt has been captured/i);
-    assert.doesNotMatch(result.stderr, /No master prompt has been captured/i);
+      assert.notEqual(result.code, 0, `expected failure, got ${result.code}: ${output}`);
+      assert.match(output, /cannot be read/i);
+      // The claim that would justify an overwrite must never appear.
+      assert.doesNotMatch(output, /No master prompt has been captured/i);
+      // Bytes preserved, no authority minted, and nothing pulled from Walrus.
+      assert.deepEqual(await fs.readFile(context.file), PINNED);
+      assert.equal(
+        await isSlotAuthoritative({ projectRoot: context.project, slot: 'master-prompt', rawBytes: PINNED, env: context.env }),
+        false,
+      );
+      assert.deepEqual(recalled, []);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it('still replaces it when the owner passes --replace', async () => {
@@ -316,24 +441,154 @@ describe('SEC-05 Phase 4B — an unreadable master prompt still counts as existi
   });
 });
 
+describe('SEC-05 Phase 4B — one baseline derivation for local and restored content', () => {
+  const BASELINE_BODY = 'RESTORED BODY LINE';
+  const BASELINE_FILE = `# Noosphere project baseline\n\n${BASELINE_BODY}\n`;
+
+  // Just the baseline section: the surrounding document carries a per-run
+  // `Refreshed:` timestamp that would make any comparison fail for the wrong
+  // reason.
+  async function renderedBaselineSection(project) {
+    const shared = await fs.readFile(path.join(project, '.noosphere', 'context.md'), 'utf8');
+    const start = shared.indexOf('## Initial project baseline');
+    assert.notEqual(start, -1, 'baseline section missing from the rendered context');
+    const end = shared.indexOf('## Pinned master prompt', start);
+    return shared.slice(start, end === -1 ? undefined : end);
+  }
+
+  it('renders identical bytes whether the baseline is local or restored from Walrus', async () => {
+    // Local: the file is present and carries its generated header.
+    const local = await fresh(MASTER);
+    const localServer = await stubRelayer(local.project, []);
+    // Restored: no local file, and Walrus returns the SAME uploaded bytes —
+    // storePreparedBaseline uploads the whole file, header included.
+    const restored = await fresh(MASTER);
+    const restoredRecalls = [];
+    const restoredServer = await stubRelayerReturning(restored.project, restoredRecalls, BASELINE_FILE);
+    try {
+      await fs.writeFile(path.join(local.project, '.noosphere', 'baseline.md'), BASELINE_FILE, 'utf8');
+
+      assert.equal((await run(['refresh'], local)).code, 0);
+      assert.equal((await run(['refresh'], restored)).code, 0);
+      assert.ok(restoredRecalls.includes('project-baseline'), 'the restored case must actually restore');
+
+      const localRendered = await renderedBaselineSection(local.project);
+      const restoredRendered = await renderedBaselineSection(restored.project);
+      assert.equal(restoredRendered, localRendered);
+      // And the generated header is stripped in BOTH, exactly once.
+      assert.doesNotMatch(restoredRendered, /# Noosphere project baseline/);
+      assert.match(restoredRendered, new RegExp(BASELINE_BODY));
+    } finally {
+      await new Promise((resolve) => localServer.close(resolve));
+      await new Promise((resolve) => restoredServer.close(resolve));
+    }
+  });
+});
+
+describe('SEC-05 Phase 4B — exit code 3 means a trust refusal and nothing else', () => {
+  it('does not leak code 3 out of non-trust commands sharing an error code', async () => {
+    const context = await fresh(MASTER);
+    await fs.writeFile(
+      path.join(context.project, '.noosphere', 'master-prompt.md'),
+      Buffer.concat([Buffer.from('PINNED\n'), Buffer.from([0xff])]),
+    );
+    await fs.writeFile(
+      path.join(context.project, '.noosphere', 'config.json'),
+      JSON.stringify({ project_id: 'exit-code-test', relayer_url: 'http://127.0.0.1:1', privacy: {} }),
+      'utf8',
+    );
+
+    // share-master-prompt raises slot-invalid-utf8 too. A wrapper script reading
+    // 3 as "the owner declined an approval" would be wrong.
+    const shared = await run(['share-master-prompt'], context);
+    assert.notEqual(shared.code, 0);
+    assert.notEqual(shared.code, 3, 'only `trust` may exit 3');
+
+    // The trust command still reports refusals as 3.
+    const approval = await run(['trust', 'approve', 'master-prompt'], { ...context, stdin: '' });
+    assert.equal(approval.code, 3);
+  });
+});
+
+describe('SEC-05 Phase 4B — protocol output is a strict contract', () => {
+  it('fails loudly instead of emitting an empty protocol', async () => {
+    for (const [name, plant] of Object.entries({
+      'malformed UTF-8': async (file) => fs.writeFile(file, Buffer.from([0xc3, 0x28])),
+      'a directory': async (file) => fs.mkdir(file),
+    })) {
+      const context = await fresh(MASTER);
+      await plant(path.join(context.project, '.noosphere', 'instructions.md'));
+      const result = await run(['protocol'], context);
+      // Silently printing nothing with exit 0 would hand a consuming agent an
+      // empty agent protocol and look like success.
+      assert.notEqual(result.code, 0, `${name} must fail`);
+      assert.equal(result.stdout, '', `${name} must not emit a partial protocol`);
+    }
+  });
+});
+
 describe('SEC-05 Phase 4B — the TTY gate is documented as non-presence-proving', () => {
   // The gate stops ordinary non-interactive approval; it does NOT prove a human
   // is present, because a shell-capable adversary can allocate a PTY and compute
   // the phrase offline. Owners make trust decisions from this document, so an
   // overstated claim here is itself a security defect.
-  const SECURITY_MD = fileURLToPath(new URL('../../SECURITY.md', import.meta.url));
+  const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 
-  it('states the residual and does not claim shell access is insufficient', async () => {
-    const text = await fs.readFile(SECURITY_MD, 'utf8');
+  // Discovered, not hard-coded: a new document repeating the claim must be
+  // corrected too, and pinning one filename is how the plan doc kept the
+  // retracted wording after SECURITY.md was fixed.
+  async function documentsMentioningTheGate() {
+    const roots = ['SECURITY.md', 'README.md', 'SEC-05-PHASE-4B-PLAN.md', 'docs', 'noosphere-mcp/continuity'];
+    const found = [];
+    async function walk(relative) {
+      const absolute = path.join(REPO_ROOT, relative);
+      const stats = await fs.lstat(absolute).catch(() => null);
+      if (!stats) return;
+      if (stats.isDirectory()) {
+        for (const entry of await fs.readdir(absolute)) {
+          if (entry === 'node_modules' || entry.startsWith('.')) continue;
+          await walk(path.join(relative, entry));
+        }
+        return;
+      }
+      if (!/\.(md|js)$/.test(relative)) return;
+      const text = await fs.readFile(absolute, 'utf8');
+      // Only files that actually make a claim about the TTY gate.
+      if (/TTY/.test(text) && /(approve|approval)/i.test(text)) found.push({ relative, text });
+    }
+    for (const root of roots) await walk(root);
+    return found;
+  }
 
+  it('no document anywhere claims the TTY gate stops a shell-capable adversary', async () => {
+    const documents = await documentsMentioningTheGate();
+    assert.ok(documents.length >= 3, `expected several documents, found ${documents.length}`);
+
+    const retracted = [
+      /non-interactive shell access cannot (approve|use)/i,
+      /allocate a PTY \*?and\*? read/i,
+      /PTY \*and\* read the owner's terminal output/i,
+      /no owner keystroke/i,
+    ];
+    for (const { relative, text } of documents) {
+      for (const pattern of retracted) {
+        assert.doesNotMatch(text, pattern, `${relative} repeats a retracted TTY claim`);
+      }
+    }
+  });
+
+  it('SECURITY.md states the residual in full', async () => {
+    const text = await fs.readFile(path.join(REPO_ROOT, 'SECURITY.md'), 'utf8');
     assert.match(text, /does not prove human presence/i);
     assert.match(text, /allocate a pseudo-terminal/i);
     assert.match(text, /does \*\*not\*\* need to observe the terminal\s+output/i);
-    // The exact overstatement this replaced.
-    assert.doesNotMatch(
-      text,
-      /non-interactive shell access cannot approve anything on your behalf/i,
-    );
+  });
+
+  it('the Phase 4B plan states the residual too', async () => {
+    const text = await fs.readFile(path.join(REPO_ROOT, 'SEC-05-PHASE-4B-PLAN.md'), 'utf8');
+    assert.match(text, /does not establish human presence/i);
+    assert.match(text, /computable\s+offline/i);
+    assert.match(text, /\*\*not\*\*\s+required/i);
   });
 });
 
@@ -342,44 +597,10 @@ describe('SEC-05 Phase 4B — unusable local slots never select remote content',
   // refreshContext: absence is what triggers Walrus restoration, so a tree
   // writer who corrupts the local file could otherwise swap the rendered
   // baseline/master prompt for whatever sits in the relayer namespace.
-  const REMOTE_BAIT = 'REMOTE CONTENT AN ATTACKER CONTROLS';
-
-  async function withStubRelayer(project, recalled) {
-    const server = http.createServer(async (req, res) => {
-      const url = new URL(req.url, 'http://127.0.0.1');
-      if (req.method === 'POST' && url.pathname.endsWith('/recall')) {
-        const chunks = [];
-        for await (const chunk of req) chunks.push(chunk);
-        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-        recalled.push(body.action_type);
-        // Bait ONLY the two slot types under test. Followups legitimately
-        // recall when none exist locally, and that is not what this proves.
-        const baited = ['project-baseline', 'master-prompt'].includes(body.action_type);
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ memories: baited ? [{ content: REMOTE_BAIT }] : [] }));
-        return;
-      }
-      res.writeHead(200, { 'content-type': 'text/plain' });
-      res.end('stub context\n');
-    });
-    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const { port } = server.address();
-    await fs.writeFile(
-      path.join(project, '.noosphere', 'config.json'),
-      JSON.stringify({
-        project_id: 'phase4b-remote-test',
-        relayer_url: `http://127.0.0.1:${port}`,
-        privacy: { capture_master_prompt: true },
-      }),
-      'utf8',
-    );
-    return server;
-  }
-
   it('does not recall a corrupt slot and never renders the remote bait', async () => {
     const context = await fresh(MASTER);
     const recalled = [];
-    const server = await withStubRelayer(context.project, recalled);
+    const server = await stubRelayer(context.project, recalled);
     try {
       // Present but unusable, via two different classified failures.
       await fs.writeFile(
@@ -403,7 +624,7 @@ describe('SEC-05 Phase 4B — unusable local slots never select remote content',
   it('still recalls a genuinely absent slot', async () => {
     const context = await fresh(MASTER);
     const recalled = [];
-    const server = await withStubRelayer(context.project, recalled);
+    const server = await stubRelayer(context.project, recalled);
     try {
       await fs.rm(path.join(context.project, '.noosphere', 'master-prompt.md'));
 
