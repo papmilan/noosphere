@@ -51,9 +51,17 @@ describe('SEC-05 Phase 4A-R1 — production writer boundary', () => {
   // since package.json ships verbatim.
   it('resolves the supported entry point from ESM and CommonJS', async () => {
     const module = await import('noosphere-continuity/trust-store');
-    // The read-only authority check is the supported surface; no writer is exported.
+    // Exact allowlist, not a name denylist: a future writer would simply be a name
+    // no pattern anticipated (ensureMachineKey, mintRecord, …), so the assertion
+    // has to be "these five and nothing else" to actually hold the boundary.
+    assert.deepEqual(Object.keys(module).sort(), [
+      'PHASE1_NORM_ALGO',
+      'PHASE1_NORM_VERSION',
+      'TRUST_SLOTS',
+      'TrustStoreError',
+      'isSlotAuthoritative',
+    ]);
     assert.equal(typeof module.isSlotAuthoritative, 'function');
-    assert.equal(Object.keys(module).some((name) => /commit|write|put|approve/i.test(name)), false);
 
     const require = createRequire(path.join(packageRoot, 'noop.cjs'));
     assert.equal(

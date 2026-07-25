@@ -99,10 +99,17 @@ describe('SEC-05 Phase 4A-R3 — exact record-size boundary', () => {
     await assert.rejects(harness.readImmutableRecord(file), (error) => error.code === 'record-too-large');
   });
 
-  it('enforces the cap before decoding untrusted bytes', async () => {
+  it('enforces the cap before the fatal-UTF8 decode and the parse', async () => {
     const { harness, file } = await seededRecordPath();
-    // Oversized AND invalid UTF-8. Both faults are fatal, so the reported one
-    // tells us which check ran first; it must be the cheap size check.
+    // Oversized AND invalid UTF-8. Both faults are fatal under the current
+    // TextDecoder({ fatal: true }), so the reported code tells us which ran first;
+    // it must be the cheap size check.
+    //
+    // Scope, deliberately: this proves the cap precedes the *fatal* decode and the
+    // parse. It cannot detect a regression that decodes with a LENIENT decoder
+    // (Buffer#toString substitutes U+FFFD rather than throwing) and checks the
+    // byte length afterwards — that would still report record-too-large. The
+    // fatal-decode guarantee itself is covered separately in trust-schema.test.js.
     const oversized = Buffer.concat([Buffer.alloc(MAX_TRUST_RECORD_BYTES + 1, 0x78), Buffer.from([0xff, 0xfe])]);
     await fs.writeFile(file, oversized, { mode: 0o600 });
     await assert.rejects(harness.readImmutableRecord(file), (error) => error.code === 'record-too-large');

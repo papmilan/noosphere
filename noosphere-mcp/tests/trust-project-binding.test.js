@@ -42,7 +42,17 @@ describe('SEC-05 Phase 4A-R3 — project identity is owner-side and tree-scoped'
     assert.equal(binding.realpathHash, pathDigest);
     assert.notEqual(binding.projectIdentity, pathDigest);
     assert.match(binding.projectIdentity, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-    assert.equal(pathDigest.includes(binding.projectIdentity.replace(/-/g, '')), false);
+
+    // Shape assertions alone cannot prove non-derivation: a UUID formatted out of
+    // a digest of the path would satisfy every one of them. The falsifiable proof
+    // is that the SAME path yields a DIFFERENT identity under different owner-side
+    // state — impossible for any pure function of the path.
+    const otherHome = await fs.mkdtemp(path.join(os.tmpdir(), 'noosphere-phase4a-home-'));
+    temporary.push(otherHome);
+    const elsewhere = await createTrustTestHarness({ env: { ...env, NOOSPHERE_HOME: otherHome } })
+      .createProjectBinding(project);
+    assert.equal(elsewhere.realpathHash, binding.realpathHash);
+    assert.notEqual(elsewhere.projectIdentity, binding.projectIdentity);
   });
 
   it('is idempotent: re-binding the same tree returns the same principal', async () => {
