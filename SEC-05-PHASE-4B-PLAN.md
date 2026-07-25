@@ -38,7 +38,7 @@ nothing **but** that sentence can do it.
 | Adversary | Capability | Defence in 4B |
 |-----------|-----------|---------------|
 | Repository content / clone / archive | can write any file inside the project tree | approval requires an owner keystroke; repo bytes never mint authority, and a changed byte invalidates the record (rawHash + contentHash) |
-| Prompt-injected agent with shell access | can spawn any CLI, non-interactively | `trust approve` refuses without a TTY on **both** stdin and stdout; there is no `--yes`, no env bypass, no config bypass |
+| Prompt-injected agent with shell access | can spawn any CLI, non-interactively | `trust approve` refuses without a TTY on **both** stdin and stdout; there is no `--yes`, no env bypass, no config bypass. **Partial mitigation only:** an agent that can allocate a PTY can drive the prompt and compute the phrase offline — see the accepted residual in SECURITY.md |
 | Agent driving the CLI over MCP | MCP server surface | MCP exposes no approval tool; the approval service is not exported (`exports` remains `./trust-store` + `./package.json`) |
 | Local process without the machine key | can write into `~/.noosphere/trust-v2` | every artifact is MAC-authenticated under the machine key; forged/edited artifacts fail closed |
 | Rollback attacker | can restore an older approved state | per-slot format-2 manifest is authoritative once present; a stale **format-1** record for the same slot is ignored, so downgrade-by-fallback is not available |
@@ -152,7 +152,7 @@ format-1 and removes it.
 
 ## 4. Invariants 4B must not break
 
-1. No authority without an owner keystroke at a TTY.
+1. No authority without a keystroke at a TTY. (A TTY is not proof of an owner: see the SECURITY.md residual.)
 2. Approved bytes == displayed bytes == the bytes every sink gates on.
 3. Format-2 present ⇒ format-1 cannot authorize that slot.
 4. Package exports unchanged; no writer reachable from `exports`, deep import,

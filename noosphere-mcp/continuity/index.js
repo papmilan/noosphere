@@ -64,7 +64,7 @@ import { quoteUntrustedMemory, sanitizeMemoryText } from './memory-safety.js';
 import { renderSlotBlock } from './render.js';
 import { isSlotAuthoritative } from './trust-store.js';
 import { approveSlot } from './internal/approval-service.js';
-import { APPROVABLE_SLOTS, resolveSlotSourceForRead } from './slot-sources.js';
+import { APPROVABLE_SLOTS, UNUSABLE_SOURCE_CODES, resolveSlotSource, resolveSlotSourceForRead } from './slot-sources.js';
 import {
   cspPaths,
   loadRuntimeState,
@@ -874,14 +874,21 @@ export async function refreshContext(root, options = {}) {
   let masterPromptSource = await resolveSlotSourceForRead(root, 'master-prompt');
   let followups = await readFollowupPrompts(root);
 
-  if (!baselineSource.text || !masterPromptSource.text || followups.length === 0) {
+  // Restore from Walrus only for a genuinely ABSENT slot. A slot file that is
+  // present but unusable (corrupt bytes, a planted directory, revoked
+  // permissions) must not select remote content: that would let anyone with
+  // working-tree write access swap the rendered baseline or master prompt for
+  // whatever sits in the relayer namespace, by breaking the local file.
+  const baselineMissing = !baselineSource.text && !baselineSource.unusable;
+  const masterPromptMissing = !masterPromptSource.text && !masterPromptSource.unusable;
+  if (baselineMissing || masterPromptMissing || followups.length === 0) {
     const walrusRestore = await recallTypedMemories(config, {
-      baseline: !baselineSource.text,
-      masterPrompt: !masterPromptSource.text,
+      baseline: baselineMissing,
+      masterPrompt: masterPromptMissing,
       followups: followups.length === 0,
     });
-    if (!baselineSource.text && walrusRestore.baseline) baselineSource = sourceFromRestoredText(walrusRestore.baseline);
-    if (!masterPromptSource.text && walrusRestore.masterPrompt) masterPromptSource = sourceFromRestoredText(walrusRestore.masterPrompt);
+    if (baselineMissing && walrusRestore.baseline) baselineSource = sourceFromRestoredText(walrusRestore.baseline);
+    if (masterPromptMissing && walrusRestore.masterPrompt) masterPromptSource = sourceFromRestoredText(walrusRestore.masterPrompt);
     if (followups.length === 0 && walrusRestore.followups.length > 0) followups = walrusRestore.followups;
   }
 
@@ -1446,9 +1453,11 @@ async function approveRelayerFromCli(url) {
 //
 // This is the only supported way to make project content authoritative. It is
 // interactive on purpose: the approval service refuses without a TTY on stdin
-// and stdout, and there is deliberately no --yes/env/config bypass, so an agent
-// with non-interactive shell access cannot approve anything on the owner's
-// behalf.
+// and stdout, and there is deliberately no --yes/env/config bypass, so piped,
+// redirected, and scripted approval are refused. A TTY check is not proof of
+// human presence — an adversary who can run commands as the owner can allocate
+// a PTY and compute the phrase offline. See SECURITY.md for the accepted
+// residual.
 async function trustFromCli(root, args) {
   const remaining = [...args];
   const pathIndex = remaining.indexOf('--path');
@@ -1520,14 +1529,20 @@ async function journalFromCli(root) {
 }
 
 async function masterPromptFromCli(root) {
-  const existing = await readMasterPrompt(root);
+  const { text: existing, exists: existingPresent, unusable: existingUnusable, reason: existingReason } =
+    await readMasterPromptForCapture(root);
   const hasInput =
     Boolean(readFlag('--content')) ||
     contentPositionals().length > 0 ||
     !process.stdin.isTTY;
 
   if (!hasInput) {
-    if (!existing) {
+    if (existingUnusable) {
+      throw new Error(
+        `The master prompt exists but cannot be read (${existingReason}); repair or replace it with --replace.`,
+      );
+    }
+    if (!existingPresent) {
       console.log('No master prompt has been captured for this project.');
       return;
     }
@@ -2280,8 +2295,9 @@ export async function captureMasterPrompt(
   if (automatic && config.privacy.capture_master_prompt === false) {
     return { captured: false, reason: 'disabled' };
   }
-  const existing = await readMasterPrompt(root);
-  if (existing && !force) {
+  const { text: existing, exists: existingPresent } = await readMasterPromptForCapture(root);
+  // Unusable counts as present: refuse the overwrite unless --replace.
+  if (existingPresent && !force) {
     return captureFollowupPrompt(root, prompt, {
       config,
       share,
@@ -2449,7 +2465,8 @@ async function ollamaFromCli(root) {
     path.join(root, '.noosphere', 'journal.md'),
     'utf8',
   ).catch(() => '');
-  const masterPrompt = await readMasterPrompt(root);
+  // Render-only sink: degrade rather than abort if the slot is unusable.
+  const masterPrompt = (await resolveSlotSourceForRead(root, 'master-prompt')).text;
   const followups = formatFollowupPrompts(await readFollowupPrompts(root));
 
   await runOllamaSession({
@@ -2497,8 +2514,33 @@ async function printProtocol(root) {
   process.stdout.write((await resolveSlotSourceForRead(root, 'instructions')).text);
 }
 
+// STRICT on purpose. Every caller of this either writes the slot
+// (captureMasterPrompt, masterPromptFromCli) or ships its content elsewhere
+// (shareMasterPromptFromCli), and those paths must not mistake an unreadable
+// master prompt for an absent one: `existing` falsy sends captureMasterPrompt
+// down its overwrite branch, silently replacing the owner's pinned prompt after
+// a tree writer plants a single invalid byte. Read-only render paths use
+// resolveSlotSourceForRead instead.
 async function readMasterPrompt(root) {
-  return (await resolveSlotSourceForRead(root, 'master-prompt')).text;
+  return (await resolveSlotSource(root, 'master-prompt')).text;
+}
+
+// Capture/write paths need three states, not two: absent, present-and-readable,
+// and present-but-unusable. Collapsing the third into "absent" is what let a
+// planted invalid byte turn `noosphere master-prompt "…"` into a silent
+// overwrite of the owner's pinned prompt. Unusable counts as EXISTING, so the
+// no-force branch refuses; an explicit --replace still overwrites, which is what
+// --replace means.
+async function readMasterPromptForCapture(root) {
+  try {
+    const text = (await resolveSlotSource(root, 'master-prompt')).text;
+    return { text, exists: Boolean(text), unusable: false };
+  } catch (error) {
+    if (UNUSABLE_SOURCE_CODES.has(error.code)) {
+      return { text: '', exists: true, unusable: true, reason: error.code };
+    }
+    throw error;
+  }
 }
 
 function sourceFromRestoredText(text) {

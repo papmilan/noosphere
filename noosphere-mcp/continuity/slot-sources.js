@@ -53,18 +53,40 @@ export async function resolveSlotSource(root, slot) {
   return { bytes: Buffer.from(text, 'utf8'), text };
 }
 
-// Read path. Malformed UTF-8 in a slot file must not take down refresh/watch or
-// the Ollama sink: anything with write access to the working tree can plant one
-// bad byte, and a hard throw there turns that into a denial of service. Such a
-// slot is treated as ABSENT — empty bytes never satisfy isSlotAuthoritative, so
-// this degrades while staying fail-closed on authority. The approval path keeps
-// the strict resolveSlotSource refusal, so an owner is never asked to approve
-// bytes a sink could not have rendered.
+// The failure modes a working-tree writer can force on a slot file: the content
+// is unusable, but the FILE is there. Anything outside this set (EIO, ENOMEM, an
+// unrecognised code) is a real fault and still throws — degrading on unknown
+// errors would hide genuine breakage behind a silently empty slot.
+export const UNUSABLE_SOURCE_CODES = new Set([
+  'slot-invalid-utf8', // decodes to nothing a sink could render
+  'EISDIR', // a directory planted at the slot path
+  'ELOOP', // symlink loop
+  'EACCES', // permissions revoked
+  'EPERM',
+]);
+
+// READ-ONLY render/watch paths only. Malformed or unreadable slot content must
+// not take down refresh/watch or the Ollama sink: anything with write access to
+// the working tree can plant one bad byte, and a hard throw turns that into a
+// denial of service.
+//
+// The result carries `unusable` so callers can tell PRESENT-BUT-UNUSABLE from
+// ABSENT. They are not interchangeable: refreshContext treats an absent slot as
+// grounds to restore remote Walrus content, and a tree writer must not be able
+// to trigger that by corrupting the local file. Authority is unaffected either
+// way — the bytes are empty and isSlotAuthoritative rejects empty outright.
+//
+// Approval, capture, and every other write path keep the strict
+// resolveSlotSource refusal, so an owner is never asked to approve bytes a sink
+// could not have rendered, and no writer ever mistakes a corrupt slot for a
+// missing one.
 export async function resolveSlotSourceForRead(root, slot) {
   try {
-    return await resolveSlotSource(root, slot);
+    return { ...await resolveSlotSource(root, slot), unusable: false };
   } catch (error) {
-    if (error.code === 'slot-invalid-utf8') return { bytes: Buffer.alloc(0), text: '' };
+    if (UNUSABLE_SOURCE_CODES.has(error.code)) {
+      return { bytes: Buffer.alloc(0), text: '', unusable: true, reason: error.code };
+    }
     throw error;
   }
 }

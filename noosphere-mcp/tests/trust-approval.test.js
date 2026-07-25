@@ -17,7 +17,7 @@ import { approveSlot, confirmationPhrase, escapeBytesForTerminal } from '../cont
 import { createFormatV2Store } from '../continuity/internal/trust-format-v2.js';
 import { isSlotAuthoritative } from '../continuity/trust-store.js';
 import { putSlotRecord } from '../continuity/trust-store-internal.js';
-import { resolveSlotBytes, resolveSlotSource, resolveSlotSourceForRead } from '../continuity/slot-sources.js';
+import { UNUSABLE_SOURCE_CODES, resolveSlotBytes, resolveSlotSource, resolveSlotSourceForRead } from '../continuity/slot-sources.js';
 
 const temporary = [];
 after(async () => {
@@ -84,13 +84,66 @@ describe('SEC-05 Phase 4B — owner approval mints authority for exactly the app
     const source = await resolveSlotSourceForRead(project, 'master-prompt');
     assert.equal(source.text, '');
     assert.equal(source.bytes.length, 0);
-    // Absent bytes can never be authoritative, so degrading stays fail-closed.
-    assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: source.bytes, env }), false);
     // The approval path still refuses outright.
     await assert.rejects(
       approveSlot({ projectRoot: project, slot: 'master-prompt', env, confirm: accept }),
       (error) => error.code === 'slot-invalid-utf8',
     );
+  });
+
+  it('degrades on every classified source failure and marks the slot unusable, not absent', async () => {
+    const cases = [
+      ['EISDIR', async (file) => { await fs.mkdir(file); }],
+      ['ELOOP', async (file) => { await fs.symlink(file, file); }],
+    ];
+    for (const [code, plant] of cases) {
+      const { project } = await fresh({ master: null });
+      const file = path.join(project, '.noosphere', 'master-prompt.md');
+      await plant(file);
+      const source = await resolveSlotSourceForRead(project, 'master-prompt');
+      assert.equal(source.bytes.length, 0, code);
+      assert.equal(source.unusable, true, code);
+      assert.equal(source.reason, code);
+      // Strict callers still see the raw failure.
+      await assert.rejects(resolveSlotSource(project, 'master-prompt'), (error) => error.code === code);
+    }
+  });
+
+  it('marks an absent slot absent, not unusable', async () => {
+    const { project } = await fresh({ master: null });
+    const source = await resolveSlotSourceForRead(project, 'master-prompt');
+    assert.equal(source.text, '');
+    assert.equal(source.unusable, false);
+  });
+
+  it('classifies only repository-controlled failures; unknown codes still throw', async () => {
+    // Guards the classification itself: a catch-all here would hide genuine
+    // faults (EIO, ENOMEM) behind a silently empty slot.
+    assert.deepEqual(
+      [...UNUSABLE_SOURCE_CODES].sort(),
+      ['EACCES', 'EISDIR', 'ELOOP', 'EPERM', 'slot-invalid-utf8'].sort(),
+    );
+  });
+
+  it('empty bytes are never authoritative, even with a real format-1 record over them', async () => {
+    const { env, project } = await fresh({ master: null });
+    // NOT a vacuous fixture: mint a genuine Phase-1 record whose rawHash is the
+    // hash of empty content. Without the dispatcher's zero-length guard this
+    // record hashes fine and makes every empty (or degraded-to-empty) read of
+    // the slot authoritative. putSlotRecord is the real format-1 writer.
+    await putSlotRecord({ projectRoot: project, slot: 'master-prompt', rawBytes: '', env });
+    const store = createFormatV2Store({ env });
+    // Confirm the fixture is live: the record exists and format 1 is selected
+    // (no format-2 binding), so the guard is what makes this false.
+    await assert.rejects(fs.lstat(store.bindingPath(project)), (error) => error.code === 'ENOENT');
+
+    assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: Buffer.alloc(0), env }), false);
+    assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: '', env }), false);
+    // And the degraded read path lands on exactly those empty bytes.
+    await fs.writeFile(path.join(project, '.noosphere', 'master-prompt.md'), Buffer.from([0xc3, 0x28]));
+    const degraded = await resolveSlotSourceForRead(project, 'master-prompt');
+    assert.equal(degraded.bytes.length, 0);
+    assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: degraded.bytes, env }), false);
   });
 
   it('retains the exact valid source bytes and shows a terminal-safe byte representation', async () => {

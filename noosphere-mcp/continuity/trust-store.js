@@ -33,6 +33,13 @@ export {
 // Every failure, at any layer, fails closed to false.
 export async function isSlotAuthoritative(request) {
   const { projectRoot, slot, env = process.env, secureFileOptions = {}, rawBytes } = request;
+  // Empty content authorizes nothing. Format 1 has no such check of its own — a
+  // legacy record minted over empty bytes hashes fine and would make EVERY
+  // empty-or-degraded read of that slot authoritative — and callers that map an
+  // unusable slot to empty bytes rely on this being an invariant rather than an
+  // accident. approveSlot refuses to mint one (approval-empty-slot); this is the
+  // matching guard on the decision side, where it applies to both formats.
+  if (Buffer.byteLength(rawBytes ?? '') === 0) return false;
   if (FORMAT2_SLOTS.includes(slot)) {
     const store = createFormatV2Store({ env, secureFileOptions });
     // Only an absent binding can select format 1. Any other binding state —

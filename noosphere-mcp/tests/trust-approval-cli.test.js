@@ -1,14 +1,19 @@
 // SEC-05 Phase 4B — the CLI approval boundary, exercised as real child processes.
 //
-// The point of these tests is what CANNOT happen: a prompt-injected agent with
-// shell access runs the approval command non-interactively and mints authority.
-// Node's spawned stdio is a pipe, never a TTY, so these runs reproduce exactly
-// the conditions such an agent has. A final POSIX-only case allocates genuine
-// PTYs and proves that the same production CLI can approve with an exact owner
-// phrase; there is no production TTY bypass.
+// The point of these tests is what CANNOT happen through ORDINARY
+// non-interactive execution: piped, redirected, and scripted approval, plus
+// every flag and environment bypass, must mint nothing. Node's spawned stdio is
+// a pipe, never a TTY, so these runs reproduce those conditions exactly.
+//
+// The POSIX-only PTY case below is NOT a proof that only humans can approve. It
+// allocates a real PTY from a test process and approves through it, which is
+// precisely what a shell-capable adversary can also do. It is here to prove the
+// production CLI still works for a real owner. The TTY gate is documented as a
+// non-presence-proving control in SECURITY.md.
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
+import http from 'node:http';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -208,7 +213,7 @@ describe('SEC-05 Phase 4B — approval refuses every non-interactive path', () =
   });
 });
 
-describe('SEC-05 Phase 4B — approval succeeds only through a genuine PTY', () => {
+describe('SEC-05 Phase 4B — approval works through a genuine PTY (which an adversary can also allocate)', () => {
   it('approves exact escaped bytes end to end through a genuine PTY', {
     skip: process.platform === 'win32' ? 'requires POSIX script(1)' : false,
   }, async () => {
@@ -255,5 +260,159 @@ describe('SEC-05 Phase 4B — approval succeeds only through a genuine PTY', () 
       }),
       false,
     );
+  });
+});
+
+describe('SEC-05 Phase 4B — an unreadable master prompt still counts as existing', () => {
+  // A tree writer plants one invalid byte. If a capture path mistakes that for
+  // "no master prompt yet", it overwrites the owner's pinned prompt with
+  // agent-chosen bytes — in the very slot `trust approve master-prompt` acts on.
+  const PINNED = Buffer.concat([Buffer.from('OWNER PINNED PROMPT\n'), Buffer.from([0xff])]);
+
+  async function freshMalformed() {
+    const context = await fresh(MASTER);
+    const file = path.join(context.project, '.noosphere', 'master-prompt.md');
+    await fs.writeFile(file, PINNED);
+    // The capture commands run behind loadConfig, so the fixture needs a
+    // project config; nothing here contacts the relayer.
+    await fs.writeFile(
+      path.join(context.project, '.noosphere', 'config.json'),
+      JSON.stringify({
+        project_id: 'phase4b-capture-test',
+        relayer_url: 'http://127.0.0.1:1',
+        privacy: { capture_master_prompt: true },
+      }),
+      'utf8',
+    );
+    return { ...context, file };
+  }
+
+  it('refuses to overwrite it without --replace and leaves the bytes untouched', async () => {
+    const context = await freshMalformed();
+    const result = await run(['master-prompt', '--content', 'AGENT SUPPLIED PROMPT'], context);
+
+    assert.notEqual(result.code, 0);
+    assert.deepEqual(await fs.readFile(context.file), PINNED);
+  });
+
+  it('never reports it as absent', async () => {
+    const context = await freshMalformed();
+    const result = await run(['master-prompt', '--content', 'AGENT SUPPLIED PROMPT'], context);
+
+    // "No master prompt has been captured" is the claim that would justify an
+    // overwrite; an unreadable prompt must never produce it.
+    assert.doesNotMatch(result.stdout, /No master prompt has been captured/i);
+    assert.doesNotMatch(result.stderr, /No master prompt has been captured/i);
+  });
+
+  it('still replaces it when the owner passes --replace', async () => {
+    const context = await freshMalformed();
+    await run(['master-prompt', '--replace', '--content', 'OWNER CHOSEN REPLACEMENT'], context);
+
+    // Exit status is not asserted: this fixture has no reachable relayer, and
+    // the capture command reports that failure after writing. The replacement
+    // itself is the --replace semantic under test.
+    assert.equal(await fs.readFile(context.file, 'utf8'), 'OWNER CHOSEN REPLACEMENT');
+  });
+});
+
+describe('SEC-05 Phase 4B — the TTY gate is documented as non-presence-proving', () => {
+  // The gate stops ordinary non-interactive approval; it does NOT prove a human
+  // is present, because a shell-capable adversary can allocate a PTY and compute
+  // the phrase offline. Owners make trust decisions from this document, so an
+  // overstated claim here is itself a security defect.
+  const SECURITY_MD = fileURLToPath(new URL('../../SECURITY.md', import.meta.url));
+
+  it('states the residual and does not claim shell access is insufficient', async () => {
+    const text = await fs.readFile(SECURITY_MD, 'utf8');
+
+    assert.match(text, /does not prove human presence/i);
+    assert.match(text, /allocate a pseudo-terminal/i);
+    assert.match(text, /does \*\*not\*\* need to observe the terminal\s+output/i);
+    // The exact overstatement this replaced.
+    assert.doesNotMatch(
+      text,
+      /non-interactive shell access cannot approve anything on your behalf/i,
+    );
+  });
+});
+
+describe('SEC-05 Phase 4B — unusable local slots never select remote content', () => {
+  // A slot file that is present but unreadable must not look ABSENT to
+  // refreshContext: absence is what triggers Walrus restoration, so a tree
+  // writer who corrupts the local file could otherwise swap the rendered
+  // baseline/master prompt for whatever sits in the relayer namespace.
+  const REMOTE_BAIT = 'REMOTE CONTENT AN ATTACKER CONTROLS';
+
+  async function withStubRelayer(project, recalled) {
+    const server = http.createServer(async (req, res) => {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      if (req.method === 'POST' && url.pathname.endsWith('/recall')) {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        recalled.push(body.action_type);
+        // Bait ONLY the two slot types under test. Followups legitimately
+        // recall when none exist locally, and that is not what this proves.
+        const baited = ['project-baseline', 'master-prompt'].includes(body.action_type);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ memories: baited ? [{ content: REMOTE_BAIT }] : [] }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('stub context\n');
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    await fs.writeFile(
+      path.join(project, '.noosphere', 'config.json'),
+      JSON.stringify({
+        project_id: 'phase4b-remote-test',
+        relayer_url: `http://127.0.0.1:${port}`,
+        privacy: { capture_master_prompt: true },
+      }),
+      'utf8',
+    );
+    return server;
+  }
+
+  it('does not recall a corrupt slot and never renders the remote bait', async () => {
+    const context = await fresh(MASTER);
+    const recalled = [];
+    const server = await withStubRelayer(context.project, recalled);
+    try {
+      // Present but unusable, via two different classified failures.
+      await fs.writeFile(
+        path.join(context.project, '.noosphere', 'master-prompt.md'),
+        Buffer.concat([Buffer.from('PINNED\n'), Buffer.from([0xff])]),
+      );
+      await fs.mkdir(path.join(context.project, '.noosphere', 'baseline.md'));
+
+      const result = await run(['refresh'], context);
+      assert.equal(result.code, 0, result.stderr);
+      assert.ok(!recalled.includes('master-prompt'), `recalled: ${recalled.join(',')}`);
+      assert.ok(!recalled.includes('project-baseline'), `recalled: ${recalled.join(',')}`);
+
+      const shared = await fs.readFile(path.join(context.project, '.noosphere', 'context.md'), 'utf8');
+      assert.doesNotMatch(shared, new RegExp(REMOTE_BAIT));
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('still recalls a genuinely absent slot', async () => {
+    const context = await fresh(MASTER);
+    const recalled = [];
+    const server = await withStubRelayer(context.project, recalled);
+    try {
+      await fs.rm(path.join(context.project, '.noosphere', 'master-prompt.md'));
+
+      const result = await run(['refresh'], context);
+      assert.equal(result.code, 0, result.stderr);
+      // Absence is the one state that legitimately restores from Walrus.
+      assert.ok(recalled.includes('master-prompt'), `recalled: ${recalled.join(',')}`);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 });

@@ -114,8 +114,9 @@ Authority-capable sources must be valid UTF-8. Invalid UTF-8 is refused before
 confirmation rather than decoded with replacement characters. The command is
 interactive on purpose:
 
-- it refuses unless both stdin and stdout are a TTY, so an agent with
-  non-interactive shell access cannot approve anything on your behalf;
+- it refuses unless both stdin and stdout are a TTY, which blocks ordinary piped,
+  redirected, and scripted approval. Read the residual below before relying on
+  this: a TTY check is **not** proof that a human is present;
 - there is **no** `--yes`, environment variable, or config bypass;
 - confirmation must equal `approve <slot> <first 8 hex of rawHash>` exactly and
   is bounded to 256 input bytes; whitespace changes, suffixes, EOF, and overlong
@@ -136,8 +137,17 @@ authority.
 
 Accepted residuals:
 
-- an attacker who can allocate a pseudo-terminal **and** read its output can
-  satisfy the typed confirmation; your terminal is the trust boundary;
+- **the TTY gate does not prove human presence.** Any adversary who can run
+  commands on your machine can allocate a pseudo-terminal (`script`, `expect`,
+  `openpty`) and drive the approval. It does **not** need to observe the terminal
+  output: the required phrase is `approve <slot> <first 8 hex of rawHash>`, and
+  an adversary that planted or can read the slot file computes that hash offline.
+  So the gate stops accidental and ordinary non-interactive approval, not a
+  determined shell-capable attacker. Your terminal — and anything able to spawn
+  processes as you — is the trust boundary. Closing this needs an OS-mediated
+  presence proof (platform keychain, biometric, or re-authentication) that a
+  child process cannot relay; that is **not** in Phase 4B and is an accepted
+  residual of this phase;
 - someone who can delete format-2 state inside the owner-only trust root and
   retained a legacy record can fall back to older **owner-approved** bytes. This
   never authorizes bytes you did not approve.

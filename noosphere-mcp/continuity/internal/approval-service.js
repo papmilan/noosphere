@@ -7,16 +7,24 @@
 //   - it is not in package.json#exports and no MCP tool or adapter reaches it;
 //   - its production confirm() requires an interactive TTY on stdin AND stdout
 //     and an exactly-typed phrase — there is no --yes, env, or config bypass, so
-//     a prompt-injected agent with non-interactive shell access cannot use it;
+//     ordinary piped/redirected/scripted approval is refused. This is NOT proof
+//     of human presence; see the residual below;
 //   - the bytes displayed to the owner are produced by the SAME renderer the
 //     sinks use (renderSlotBlock), so the owner approves what agents will read;
 //   - the commit itself is the audited, locked, journalled format-2 transaction
 //     from Phase 4A, unchanged.
 //
-// Residual risk, accepted and documented: an adversary that can allocate a PTY
-// and read its output can type the phrase. The owner's terminal is the trust
-// boundary; distinguishing a human keystroke from a PTY writer is not possible
-// in-process.
+// Residual risk, accepted and documented for Phase 4B: the TTY gate does not
+// prove a human is present. Anyone able to run commands as the owner can
+// allocate a PTY (script, expect, openpty) and drive this prompt, and they do
+// NOT need to read the terminal to do it — the phrase is
+// `approve <slot> <first 8 hex of rawHash>`, computable offline by anyone who
+// planted or can read the slot file. So this stops accidental and ordinary
+// non-interactive approval, not a determined shell-capable adversary.
+// Distinguishing a human keystroke from a PTY writer is not possible in-process;
+// closing it needs an OS-mediated presence proof (keychain, biometric,
+// re-authentication) that a child process cannot relay, which Phase 4B does not
+// implement.
 import crypto from 'node:crypto';
 import readline from 'node:readline/promises';
 
