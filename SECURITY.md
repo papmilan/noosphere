@@ -88,6 +88,33 @@ configuration can never silently receive the token.
 `NOOSPHERE_RELAYER_URL`, run `approve-relayer` once for that origin after
 upgrading. No token is transmitted until you do.
 
+## Source approval (which project content is authoritative)
+
+Project content is **data by default**. `.noosphere/master-prompt.md`,
+`.noosphere/instructions.md` and the project baseline are rendered to agents as
+quoted, non-authoritative text — a clone, an archive, a pull request, or an
+injected agent cannot make them instructions. They become authoritative
+instructions only when you approve their exact bytes yourself:
+
+```
+noosphere trust approve master-prompt
+```
+
+The command prints the exact bytes as agents will read them, plus their hashes,
+and requires a typed confirmation at your terminal. It is interactive on purpose:
+
+- it refuses unless both stdin and stdout are a TTY, so an agent with
+  non-interactive shell access cannot approve anything on your behalf;
+- there is **no** `--yes`, environment variable, or config bypass;
+- approval binds the exact bytes — editing the file afterwards drops the slot
+  back to quoted data until you approve it again;
+- approvals are stored owner-only outside the project tree (under
+  `~/.noosphere/trust-v2`), authenticated with a machine-local key, with an
+  append-only audit chain.
+
+Residual: an attacker who can allocate a pseudo-terminal **and** read its output
+can satisfy the typed confirmation. Your terminal is the trust boundary.
+
 ## Known limitations and hardening notes
 
 These residuals are disclosed intentionally; they are not undisclosed defects:
@@ -115,6 +142,12 @@ These residuals are disclosed intentionally; they are not undisclosed defects:
   [docs/security/windows-filesystem-verification.md](docs/security/windows-filesystem-verification.md)
   and
   [docs/security/sec-03-windows-owner-only-boundary.md](docs/security/sec-03-windows-owner-only-boundary.md).
+- **Legacy approval fallback.** A slot you have never approved with
+  `trust approve` still honours a legacy (pre-4B) approval record, so upgrades do
+  not silently lose trust. Someone who can delete inside your owner-only trust
+  directory and kept a superseded legacy record could therefore force a slot back
+  to older **owner-approved** bytes; it never authorizes bytes you did not
+  approve. The legacy format is retired in the next phase.
 
 ## Security model
 

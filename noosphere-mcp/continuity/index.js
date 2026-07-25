@@ -63,6 +63,8 @@ import { approveOrigin, secureRelayerFetch } from './relayer-authority.js';
 import { quoteUntrustedMemory, sanitizeMemoryText } from './memory-safety.js';
 import { renderSlotBlock } from './render.js';
 import { isSlotAuthoritative } from './trust-store.js';
+import { approveSlot } from './internal/approval-service.js';
+import { APPROVABLE_SLOTS, baselineBody, resolveSlotBytes } from './slot-sources.js';
 import {
   cspPaths,
   loadRuntimeState,
@@ -146,6 +148,9 @@ try {
       break;
     case 'approve-relayer':
       await approveRelayerFromCli(process.argv[3]);
+      break;
+    case 'trust':
+      await trustFromCli(projectDir, process.argv[3], process.argv[4]);
       break;
     case 'recall':
       await recallFromCli(projectDir);
@@ -879,13 +884,13 @@ export async function refreshContext(root, options = {}) {
   // recall provenance. A slot renders as authoritative (unquoted) only when an
   // authenticated, owner-only, out-of-tree trust record vouches for these exact
   // bytes; otherwise the content is quoted, non-authoritative data (fail-closed).
-  const baselineBody = baseline
-    ? baseline.replace(/^# Noosphere project baseline\s*/i, '').trim()
-    : '';
   // M-2: gate on the exact bytes that render (the header-stripped body), so the
   // displayed authoritative content equals the bytes the trust record binds.
-  const baselineAuthoritative = baselineBody
-    ? await isSlotAuthoritative({ projectRoot: root, slot: 'baseline', rawBytes: baselineBody })
+  // Phase 4B: the strip itself lives in slot-sources.js, shared with the approval
+  // command, so the owner approves precisely what this sink renders.
+  const renderedBaseline = baseline ? baselineBody(baseline) : '';
+  const baselineAuthoritative = renderedBaseline
+    ? await isSlotAuthoritative({ projectRoot: root, slot: 'baseline', rawBytes: renderedBaseline })
     : false;
   const masterAuthoritative = masterPrompt
     ? await isSlotAuthoritative({ projectRoot: root, slot: 'master-prompt', rawBytes: masterPrompt })
@@ -899,11 +904,11 @@ export async function refreshContext(root, options = {}) {
     '',
     'Read this before changing the project. It may contain work from another AI tool.',
     '',
-    baselineBody
+    renderedBaseline
       ? [
           '## Initial project baseline',
           '',
-          renderSlotBlock(baselineBody, { authoritative: baselineAuthoritative }),
+          renderSlotBlock(renderedBaseline, { authoritative: baselineAuthoritative }),
         ].join('\n')
       : '## Initial project baseline\n\nNo onboarding baseline has been created.',
     '',
@@ -1430,6 +1435,24 @@ async function approveRelayerFromCli(url) {
   const origin = await approveOrigin(url);
   console.log(`Approved relayer origin: ${origin}`);
   console.log('The API token may now be sent to this origin.');
+}
+
+// SEC-05 Phase 4B — the owner-approval boundary.
+//
+// This is the only supported way to make project content authoritative. It is
+// interactive on purpose: the approval service refuses without a TTY on stdin
+// and stdout, and there is deliberately no --yes/env/config bypass, so an agent
+// with non-interactive shell access cannot approve anything on the owner's
+// behalf.
+async function trustFromCli(root, subcommand, slot) {
+  if (subcommand !== 'approve' || !slot) {
+    throw new Error(`Usage: noosphere trust approve <${APPROVABLE_SLOTS.join('|')}> [--path /absolute/repository]`);
+  }
+  const { record, manifest } = await approveSlot({ projectRoot: root, slot });
+  console.log(`Approved ${slot} as generation ${manifest.currentGeneration}.`);
+  console.log(`  record: ${record.recordId}`);
+  console.log(`  audit:  ${record.auditEventId}`);
+  console.log('These exact bytes now render as authoritative project instructions.');
 }
 
 async function recallFromCli(root) {
@@ -2392,10 +2415,9 @@ export function isMasterPromptCandidate(content) {
 async function ollamaFromCli(root) {
   const config = await loadConfig(root);
   const options = parseOllamaArguments(process.argv.slice(3));
-  const instructions = await readFile(
-    path.join(root, '.noosphere', 'instructions.md'),
-    'utf8',
-  ).catch(() => '');
+  // Phase 4B: read the instructions slot through the shared resolver, so the
+  // bytes this sink gates on are the bytes `trust approve instructions` binds.
+  const instructions = await resolveSlotBytes(root, 'instructions');
   let context;
   try {
     context = await refreshContext(root, {
@@ -3071,6 +3093,11 @@ Commands:
   journal     Append a concise public work note
   master-prompt
               Print or explicitly store the exact pinned project prompt
+  trust approve <slot>
+              Approve a source slot (master-prompt, instructions, baseline) so
+              its exact current bytes render as authoritative instructions.
+              Interactive only: it shows the bytes and requires a typed
+              confirmation at your terminal, and has no unattended mode.
   ollama      Run any Ollama model with shared project memory
   protocol    Print the universal agent protocol
   state       Print or transition canonical CSP project state:

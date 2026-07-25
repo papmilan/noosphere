@@ -23,6 +23,10 @@ describe('SEC-05 Phase 4A-R1 — production writer boundary', () => {
     for (const specifier of [
       'noosphere-continuity/continuity/internal/trust-format-v2.js',
       'noosphere-continuity/continuity/internal/strict-schema.js',
+      // Phase 4B: the approval service is the only minter of authority; a package
+      // consumer must not be able to reach it, nor the slot-byte resolver.
+      'noosphere-continuity/continuity/internal/approval-service.js',
+      'noosphere-continuity/continuity/slot-sources.js',
     ]) {
       await assert.rejects(import(specifier), (error) => error?.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED');
     }
@@ -36,7 +40,12 @@ describe('SEC-05 Phase 4A-R1 — production writer boundary', () => {
     assert.equal(names.some((name) => name.includes('trust-test-harness')), false);
     assert.equal(names.some((name) => name.startsWith('tests/')), false);
     // The internal primitives DO ship, so a future trusted in-process service can import them.
-    for (const shipped of ['continuity/internal/trust-format-v2.js', 'continuity/internal/strict-schema.js']) {
+    for (const shipped of [
+      'continuity/internal/trust-format-v2.js',
+      'continuity/internal/strict-schema.js',
+      'continuity/internal/approval-service.js',
+      'continuity/slot-sources.js',
+    ]) {
       assert.equal(names.includes(shipped), true, `${shipped} must ship for Phase 4B`);
     }
     // …and the one supported entry point must ship too, or the export map is a lie.
@@ -74,6 +83,24 @@ describe('SEC-05 Phase 4A-R1 — production writer boundary', () => {
     await assert.rejects(import('noosphere-continuity'), (error) => error?.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED');
     const require = createRequire(path.join(packageRoot, 'noop.cjs'));
     assert.throws(() => require.resolve('noosphere-continuity'), (error) => error?.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED');
+  });
+
+  // SEC-05 Phase 4B: approval is reachable from exactly one place — the
+  // interactive CLI. Anything else that imported it would be a second minting
+  // path with no owner in the loop.
+  it('is imported only by the CLI entry point', async () => {
+    const importers = [];
+    for (const dir of ['continuity', 'continuity/internal', 'continuity/acp', 'continuity/csp', 'lifecycle', 'hooks']) {
+      const abs = path.join(packageRoot, dir);
+      const files = await fs.readdir(abs).catch(() => []);
+      for (const name of files.filter((entry) => entry.endsWith('.js'))) {
+        const source = await fs.readFile(path.join(abs, name), 'utf8');
+        if (/from\s+'[^']*approval-service\.js'|import\('[^']*approval-service\.js'\)/.test(source)) {
+          importers.push(`${dir}/${name}`);
+        }
+      }
+    }
+    assert.deepEqual(importers.sort(), ['continuity/index.js']);
   });
 
   it('has no production import of the Phase 4A test writer', async () => {

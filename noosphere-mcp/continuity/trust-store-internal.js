@@ -55,7 +55,7 @@ export class TrustStoreError extends Error {
   }
 }
 
-function homeDir(env) {
+export function homeDir(env) {
   return env.NOOSPHERE_HOME || path.join(os.homedir(), '.noosphere');
 }
 

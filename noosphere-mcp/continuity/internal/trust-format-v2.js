@@ -27,6 +27,7 @@ import {
   TrustStoreError,
   canonicalize,
   ensureMachineKey,
+  homeDir,
   machineKeyId,
   ownerScope,
 } from '../trust-store-internal.js';
@@ -108,8 +109,11 @@ function verifyMac(key, type, record) {
 }
 
 export function createFormatV2Store({ env = process.env, secureFileOptions = {}, now } = {}) {
-  const home = env.NOOSPHERE_HOME;
-  if (!home) throw new Error('NOOSPHERE_HOME is required for the format-2 store');
+  // Phase 4B: production callers (the approval service and the authority gate)
+  // run without NOOSPHERE_HOME set, so fall back to the same default home the
+  // rest of the trust store uses. This is a default, not a new selector: the
+  // value still comes from homeDir(env), with no added precedence.
+  const home = homeDir(env);
   const root = path.join(home, 'trust-v2');
   const options = { ...secureFileOptions, root: home };
   const key = () => ensureMachineKey(env, options);
