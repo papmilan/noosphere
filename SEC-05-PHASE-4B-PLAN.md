@@ -43,17 +43,25 @@ nothing **but** that sentence can do it.
 | Local process without the machine key | can write into `~/.noosphere/trust-v2` | every artifact is MAC-authenticated under the machine key; forged/edited artifacts fail closed |
 | Rollback attacker | can restore an older approved state | per-slot format-2 manifest is authoritative once present; a stale **format-1** record for the same slot is ignored, so downgrade-by-fallback is not available |
 
-**Documented residual risk (accept, do not paper over):** an adversary that can
-allocate a PTY *and* read the owner's terminal output can satisfy the typed
-confirmation. The owner's terminal is the trust boundary; no in-process check can
-distinguish a human keystroke from a PTY writer. Reducing this needs an
-out-of-band channel (hardware token / OS-level owner prompt) and is out of scope.
+**Documented residual risks (accept, do not paper over):**
+
+1. An adversary that can allocate a PTY *and* read the owner's terminal output
+   can satisfy the typed confirmation. The owner's terminal is the trust
+   boundary; no in-process check can distinguish a human keystroke from a PTY
+   writer. Reducing this needs an out-of-band channel.
+2. Someone who can delete format-2 state inside the owner-only trust root and
+   retained a superseded format-1 record can fall back to older
+   *owner-approved* bytes. It never authorizes attacker-chosen bytes.
+
+Phase 4B deliberately adds no Phase 4C migration, revocation, restore,
+tombstone, identity-switching, or legacy-retirement feature.
 
 ## 3. Design
 
 ### 3.1 `continuity/slot-sources.js` (new, not exported)
 
-Single resolver: `resolveSlotBytes(root, slot) -> { bytes, origin }`.
+Single resolver:
+`resolveSlotSource(root, slot) -> { bytes: Buffer, text: string }`.
 
 | Slot | Bytes |
 |------|-------|
@@ -61,8 +69,12 @@ Single resolver: `resolveSlotBytes(root, slot) -> { bytes, origin }`.
 | `instructions` | `.noosphere/instructions.md` contents, exactly as `ollamaFromCli` reads them |
 | `baseline` | `.noosphere/baseline.md` with the `# Noosphere project baseline` header stripped and trimmed — the exact expression already at `index.js` refreshContext |
 
-Both sinks and the approval command call this one function. A future sink that
-invents its own byte derivation is the defect this module exists to prevent.
+The resolver reads a `Buffer`, decodes with a fatal UTF-8 decoder, and encodes
+the single derived text once. Invalid UTF-8 therefore refuses approval and sink
+consumption instead of collapsing distinct byte strings through U+FFFD.
+Master-prompt and instructions retain exact file bytes; baseline retains the
+established derived-body policy. Both sinks and the approval command call this
+one function. `resolveSlotBytes` remains only as a text compatibility helper.
 
 ### 3.2 `continuity/internal/approval-service.js` (new, internal)
 
@@ -74,19 +86,16 @@ approveSlot({ projectRoot, slot, env, confirm, output, secureFileOptions })
   a non-interactive caller is refused (`approval-requires-tty`) before a binding
   is created or recovery runs, so an agent that cannot approve cannot leave any
   trust state behind either;
-* resolves bytes via `resolveSlotBytes`; empty content is refused
-  (`approval-empty-slot`) — an empty approval would authorize nothing yet mint a
-  generation;
-* opens the format-2 store, `createProjectBinding` (idempotent per realpath),
-  then `recover(binding, slot)` — a held or malformed lock aborts the approval
-  fail-closed, exactly as 4A specifies;
-* renders the bytes for display through `renderSlotBlock(bytes, { authoritative: true })`,
-  i.e. **the identical rendering the sinks will emit** — the owner approves what
-  they will get, and terminal control sequences are already neutralized by the
-  pinned normalizer;
-* calls `confirm({ slot, rawHash, contentHash, byteLength, rendered })`, which
-  must resolve `true`; anything else aborts without writing;
-* commits via `commitTransaction({ binding, slot, rawBytes, sourceOrigin })`.
+* resolves and retains bytes before any store access; invalid UTF-8 and empty
+  content fail before confirmation and before trust-store mutation;
+* shows a complete `\xHH`-escaped byte-faithful source view and, separately,
+  `renderSlotBlock(text, { authoritative: true })`, the normalized view sinks
+  emit. The escaped source path cannot inject terminal controls either;
+* calls `confirm({ slot, rawHash, contentHash, byteLength, escapedBytes,
+  rendered })`, which must resolve `true`; anything else aborts without writing;
+* only after confirmation opens the format-2 store, creates/reads the binding,
+  runs fail-closed recovery, and commits the retained bytes. A first approval
+  initializes the owner-only root and machine key at this point, never earlier.
 
 `confirm` and `output` are constructor parameters with TTY defaults. Tests inject
 a fake `confirm`; **production has no flag that reaches a non-TTY confirm** — the
@@ -98,22 +107,33 @@ default is the only one the CLI can construct.
 * Requires `process.stdin.isTTY && process.stdout.isTTY`; otherwise exits
   non-zero with `approval requires an interactive terminal`.
 * Prints project realpath, slot, byte length, `rawHash`, `contentHash`, then the
-  rendered block, then requires the owner to type exactly:
+  escaped byte view and normalized rendered block, then requires the owner to
+  type exactly:
   `approve <slot> <first 8 hex of rawHash>`.
   A typed phrase, not `y/N`: it cannot be satisfied by a stray newline, a held
   Enter key, or a `yes |` pipe (which is non-TTY anyway).
+* The confirmation is compared without trimming, case folding, normalization,
+  prefixes, or suffixes and is bounded to 256 input bytes. EOF, interruption,
+  overlong input, or any mismatch refuses without creating trust state.
 * On success prints generation, recordId, and the audit event id.
 
 ### 3.4 Read path — `isSlotAuthoritative`
 
+The binding path is tri-state:
+
 ```
-format-2 binding + manifest for (root, slot) exists ?
-  yes -> return isFormat2Authoritative(...)      // sole decision, no fallback
-  no  -> existing format-1 record check          // unchanged Phase-1 semantics
+binding lstat == ENOENT
+  -> format-2 is truly absent; format-1 may govern
+binding is present and securely verifies
+  -> manifest present: format-2 is the sole decision
+  -> this slot's manifest absent: format-1 may govern this never-approved slot
+binding is a symlink/directory/unreadable/malformed object, or lookup/read fails
+  -> false; never downgrade
 ```
 
-Any error anywhere still fails closed to `false`. The no-fallback-when-format-2-
-exists rule is the anti-downgrade property and gets its own negative test.
+Thus only genuinely missing format-2 state permits compatibility fallback.
+Every unsafe or ambiguous state fails closed. Once a valid slot manifest
+exists, format-1 cannot authorize different bytes.
 
 `createFormatV2Store` currently hard-requires `env.NOOSPHERE_HOME`; 4B makes it
 use the same default home as the rest of the trust store
@@ -156,11 +176,16 @@ format-1 and removes it.
 * approval binds the byte-exact rendered body for `baseline` (header-stripped),
   proving the resolver and the sink agree.
 
-`tests/trust-approval-cli.test.js` (new) — real child process, no TTY:
+`tests/trust-approval-cli.test.js` (new) — real child processes:
 * `noosphere trust approve master-prompt` with piped stdin exits non-zero, prints
   the TTY refusal, and mints nothing;
 * the same with `yes |` in front, likewise;
 * `--help`-style misuse exits non-zero without touching the store.
+* a genuine POSIX PTY accepts the exact phrase, shows the safe byte and
+  normalized prompt views, commits a verifying format-2 manifest, authorizes
+  only exact bytes, and rejects a one-byte mutation. Linux uses util-linux
+  `script`; macOS uses the system `expect` driver so BSD `script` itself receives
+  a controlling PTY. Windows explicitly skips only this POSIX harness.
 
 `tests/trust-store.test.js` (extended)
 * format-2 manifest present ⇒ a valid format-1 record for different bytes does

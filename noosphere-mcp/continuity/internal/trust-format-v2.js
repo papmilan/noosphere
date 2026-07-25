@@ -141,9 +141,12 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
   }
 
   async function createProjectBinding(projectRoot) {
+    // The approval path deliberately leaves NOOSPHERE_HOME absent until the
+    // owner confirms. Establish the owner-only root/key before the first secure
+    // binding read so a genuine first approval can initialize format 2.
+    const machineKey = await key();
     const file = bindingPath(projectRoot);
     if (await readOwnerOnlyFile(file, options) !== null) return readProjectBinding(projectRoot);
-    const machineKey = await key();
     const fields = { format: FORMAT, type: 'project-binding', projectIdentity: crypto.randomUUID(), ownerScope: scope(), realpathHash: hash(await fs.realpath(projectRoot)), keyId: machineKeyId(machineKey) };
     const binding = { ...fields, mac: hmac(machineKey, 'project-binding', fields) };
     try { await writeExclusive(file, binding); } catch (error) { if (error.code !== 'state-file-exists') throw error; }
