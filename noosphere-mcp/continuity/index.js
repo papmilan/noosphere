@@ -97,6 +97,12 @@ const ALL_ADAPTERS = ['codex', 'claude', 'gemini', 'cursor', 'mcp'];
 const ACP_LEGACY_STATE_ALIASES = new Set([
   'validate', 'sync', 'push', 'pull', 'history', 'quarantine',
 ]);
+const TRUST_REFUSAL_CODES = new Set([
+  'approval-requires-tty',
+  'approval-declined',
+  'approval-input-too-long',
+  'slot-invalid-utf8',
+]);
 
 const command = process.argv[2] || 'help';
 const explicitProjectPath = readOption('--path');
@@ -150,7 +156,7 @@ try {
       await approveRelayerFromCli(process.argv[3]);
       break;
     case 'trust':
-      await trustFromCli(projectDir, process.argv[3], process.argv[4]);
+      await trustFromCli(projectDir, process.argv.slice(3));
       break;
     case 'recall':
       await recallFromCli(projectDir);
@@ -250,7 +256,7 @@ try {
   }
 } catch (error) {
   console.error(`Noosphere continuity: ${error.message}`);
-  process.exitCode = 1;
+  process.exitCode = error.exitCode ?? (TRUST_REFUSAL_CODES.has(error.code) ? 3 : 1);
 }
 
 export async function initializeProject(root, options = {}) {
@@ -1441,9 +1447,15 @@ async function approveRelayerFromCli(url) {
 // and stdout, and there is deliberately no --yes/env/config bypass, so an agent
 // with non-interactive shell access cannot approve anything on the owner's
 // behalf.
-async function trustFromCli(root, subcommand, slot) {
-  if (subcommand !== 'approve' || !slot) {
-    throw new Error(`Usage: noosphere trust approve <${APPROVABLE_SLOTS.join('|')}> [--path /absolute/repository]`);
+async function trustFromCli(root, args) {
+  const remaining = [...args];
+  const pathIndex = remaining.indexOf('--path');
+  if (pathIndex !== -1) remaining.splice(pathIndex, 2);
+  const [subcommand, slot] = remaining;
+  if (remaining.length !== 2 || subcommand !== 'approve' || !APPROVABLE_SLOTS.includes(slot)) {
+    const error = new Error(`Usage: noosphere trust approve <${APPROVABLE_SLOTS.join('|')}> [--path /absolute/repository]`);
+    error.exitCode = 2;
+    throw error;
   }
   const { record, manifest } = await approveSlot({ projectRoot: root, slot });
   console.log(`Approved ${slot} as generation ${manifest.currentGeneration}.`);

@@ -35,18 +35,17 @@ export async function isSlotAuthoritative(request) {
   const { projectRoot, slot, env = process.env, secureFileOptions = {}, rawBytes } = request;
   if (FORMAT2_SLOTS.includes(slot)) {
     const store = createFormatV2Store({ env, secureFileOptions });
-    // Presence of the binding FILE — not a successful parse — decides which
-    // format governs. Deciding on a successful parse would mean a tampered
-    // binding or manifest silently fell back to Phase-1, which is exactly the
-    // downgrade this switch has to prevent: once a project has format-2 state,
-    // every format-2 failure is fail-closed false, never a fallback.
-    let bound = false;
+    // Only an absent binding can select format 1. Any other binding state —
+    // including a symlink, directory, unreadable file, or lookup failure — is
+    // evidence of format-2 state and must fail closed rather than downgrade.
+    let bindingAbsent = false;
     try {
-      bound = (await fs.lstat(store.bindingPath(projectRoot))).isFile();
-    } catch {
-      bound = false; // no binding (or an unresolvable root): Phase-1 project
+      await fs.lstat(store.bindingPath(projectRoot));
+    } catch (error) {
+      if (error.code === 'ENOENT') bindingAbsent = true;
+      else return false;
     }
-    if (bound) {
+    if (!bindingAbsent) {
       try {
         const binding = await store.readProjectBinding(projectRoot);
         const manifest = await store.readManifest(binding, slot);

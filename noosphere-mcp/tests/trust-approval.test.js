@@ -339,6 +339,44 @@ describe('SEC-05 Phase 4B — format-2 governs a bound slot; format-1 survives e
     assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env }), false);
   });
 
+  it('a symlinked format-2 binding cannot resurrect stale format-1 authority', async () => {
+    const { env, project } = await fresh();
+    await approveSlot({ projectRoot: project, slot: 'master-prompt', env, confirm: accept });
+    await putSlotRecord({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env });
+
+    const bindingFile = createFormatV2Store({ env }).bindingPath(project);
+    await fs.rm(bindingFile);
+    await fs.symlink('/dev/null', bindingFile);
+
+    assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env }), false);
+  });
+
+  it('a directory in place of a format-2 binding cannot resurrect stale format-1 authority', async () => {
+    const { env, project } = await fresh();
+    await approveSlot({ projectRoot: project, slot: 'master-prompt', env, confirm: accept });
+    await putSlotRecord({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env });
+
+    const bindingFile = createFormatV2Store({ env }).bindingPath(project);
+    await fs.rm(bindingFile);
+    await fs.mkdir(bindingFile);
+
+    assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env }), false);
+  });
+
+  it('a non-ENOENT binding lookup error cannot resurrect stale format-1 authority', async () => {
+    const { env, project } = await fresh();
+    await approveSlot({ projectRoot: project, slot: 'master-prompt', env, confirm: accept });
+    await putSlotRecord({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env });
+
+    const bindingDirectory = path.dirname(createFormatV2Store({ env }).bindingPath(project));
+    await fs.chmod(bindingDirectory, 0o000);
+    try {
+      assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env }), false);
+    } finally {
+      await fs.chmod(bindingDirectory, 0o700);
+    }
+  });
+
   it('a removed format-2 binding does not silently resurrect a foreign project', async () => {
     const { env, project } = await fresh();
     await approveSlot({ projectRoot: project, slot: 'master-prompt', env, confirm: accept });

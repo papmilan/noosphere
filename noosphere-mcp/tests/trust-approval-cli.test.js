@@ -73,7 +73,7 @@ describe('SEC-05 Phase 4B — approval refuses every non-interactive path', () =
     it(`refuses with ${name} and mints nothing`, async () => {
       const context = await fresh();
       const result = await run(['trust', 'approve', 'master-prompt'], { ...context, stdin });
-      assert.notEqual(result.code, 0, 'a piped approval must not succeed');
+      assert.equal(result.code, 3, 'a piped approval is an owner/TTY refusal');
       assert.match(result.stderr, /interactive terminal/i);
       assert.equal(await mintedAnything(context), false);
       assert.equal(await touchedTrustStore(context), false, 'a refused approval must not create trust state');
@@ -107,7 +107,27 @@ describe('SEC-05 Phase 4B — approval refuses every non-interactive path', () =
     const context = await fresh();
     for (const args of [['trust'], ['trust', 'approve'], ['trust', 'revoke', 'master-prompt'], ['trust', 'approve', 'followups']]) {
       const result = await run(args, { ...context, stdin: '' });
-      assert.notEqual(result.code, 0, `${args.join(' ')} must fail`);
+      assert.equal(result.code, 2, `${args.join(' ')} must be a usage or slot error`);
+    }
+    assert.equal(await mintedAnything(context), false);
+    await assert.rejects(fs.lstat(context.home), (error) => error.code === 'ENOENT');
+  });
+
+  it('accepts only the exact trust approval grammar before attempting TTY handling', async () => {
+    const context = await fresh();
+    const malformed = [
+      ['trust', 'approve'],
+      ['trust', 'approve', 'master-prompt', 'extra'],
+      ['trust', 'approve', '--yes', 'master-prompt'],
+      ['trust', 'approve', 'master-prompt', '--yes'],
+      ['trust', 'approve', '--', 'master-prompt'],
+      ['trust', 'approve', 'MASTER-PROMPT'],
+    ];
+
+    for (const args of malformed) {
+      const result = await run(args, { ...context, stdin: 'approve master-prompt deadbeef\n' });
+      assert.equal(result.code, 2, `${args.join(' ')} must be a usage or slot error`);
+      assert.doesNotMatch(result.stderr, /interactive terminal/i, `${args.join(' ')} must fail before TTY handling`);
     }
     assert.equal(await mintedAnything(context), false);
     await assert.rejects(fs.lstat(context.home), (error) => error.code === 'ENOENT');
