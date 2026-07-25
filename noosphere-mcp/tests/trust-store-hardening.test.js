@@ -65,3 +65,90 @@ describe('SEC-05 Phase 4A-R1 — strict machine-key and bounded authenticated in
     await assert.rejects(harness.readManifest(binding, 'master-prompt'), (error) => error.code === 'record-too-large');
   });
 });
+
+// SEC-05 Phase 4A-R3 (remediation §16). The `+1` rejection above proves the cap
+// fires; these pin the other three properties of the boundary: it is inclusive at
+// exactly MAX, it counts bytes rather than characters, and it runs before any
+// decode or parse of attacker-controlled input.
+describe('SEC-05 Phase 4A-R3 — exact record-size boundary', () => {
+  async function seededRecordPath() {
+    const { env, project } = await fresh();
+    const harness = createTrustTestHarness({ env });
+    const binding = await harness.createProjectBinding(project);
+    const file = harness.pathFor(binding, 'records/master-prompt/1-11111111-1111-4111-8111-111111111111.json');
+    await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+    return { harness, file };
+  }
+
+  it('admits exactly MAX bytes to the parser instead of rejecting on size', async () => {
+    const { harness, file } = await seededRecordPath();
+    await fs.writeFile(file, 'x'.repeat(MAX_TRUST_RECORD_BYTES), { mode: 0o600 });
+    // Still invalid — but it must fail as unparseable content, NOT as oversized:
+    // that is what proves the comparison is `> MAX`, not `>= MAX`.
+    await assert.rejects(harness.readImmutableRecord(file), (error) => error.code === 'record-corrupt');
+  });
+
+  it('measures the cap in bytes, not characters', async () => {
+    const { harness, file } = await seededRecordPath();
+    // 32769 characters — comfortably under MAX by a character count — but 65538
+    // bytes once encoded, so a character-based cap would let this straight through.
+    const payload = 'é'.repeat(MAX_TRUST_RECORD_BYTES / 2 + 1);
+    assert.ok(payload.length < MAX_TRUST_RECORD_BYTES);
+    assert.ok(Buffer.byteLength(payload, 'utf8') > MAX_TRUST_RECORD_BYTES);
+    await fs.writeFile(file, payload, { mode: 0o600 });
+    await assert.rejects(harness.readImmutableRecord(file), (error) => error.code === 'record-too-large');
+  });
+
+  it('enforces the cap before the fatal-UTF8 decode and the parse', async () => {
+    const { harness, file } = await seededRecordPath();
+    // Oversized AND invalid UTF-8. Both faults are fatal under the current
+    // TextDecoder({ fatal: true }), so the reported code tells us which ran first;
+    // it must be the cheap size check.
+    //
+    // Scope, deliberately: this proves the cap precedes the *fatal* decode and the
+    // parse. It cannot detect a regression that decodes with a LENIENT decoder
+    // (Buffer#toString substitutes U+FFFD rather than throwing) and checks the
+    // byte length afterwards — that would still report record-too-large. The
+    // fatal-decode guarantee itself is covered separately in trust-schema.test.js.
+    const oversized = Buffer.concat([Buffer.alloc(MAX_TRUST_RECORD_BYTES + 1, 0x78), Buffer.from([0xff, 0xfe])]);
+    await fs.writeFile(file, oversized, { mode: 0o600 });
+    await assert.rejects(harness.readImmutableRecord(file), (error) => error.code === 'record-too-large');
+  });
+});
+
+// SEC-05 Phase 4A-R3 (remediation §16) — the inverse of the Phase 3 M-2 fix.
+// M-2 proved the renderer gates on the bytes it displays. This proves the other
+// direction at the format-2 layer: a committed record authorizes exactly one byte
+// string and nothing adjacent to it, so a sink that gates on the wrong variant
+// fails closed rather than inheriting authority.
+describe('SEC-05 Phase 4A-R3 — authority binds exactly one byte string', () => {
+  const BODY = 'Baseline: the project ships a fail-closed trust store.';
+  const FULL_FILE = `# Noosphere project baseline\n\n${BODY}`;
+
+  async function committed(rawBytes) {
+    const { env, project } = await fresh();
+    const harness = createTrustTestHarness({ env });
+    const binding = await harness.createProjectBinding(project);
+    await harness.commitTestTransaction({ binding, slot: 'baseline', rawBytes });
+    return (candidate) => harness.isFormat2Authoritative({ binding, slot: 'baseline', rawBytes: candidate });
+  }
+
+  it('authorizes the approved body and not the file that wraps it', async () => {
+    const authorizes = await committed(BODY);
+    assert.equal(await authorizes(BODY), true);
+    assert.equal(await authorizes(FULL_FILE), false);
+  });
+
+  it('authorizes the approved full file and not the body inside it', async () => {
+    const authorizes = await committed(FULL_FILE);
+    assert.equal(await authorizes(FULL_FILE), true);
+    assert.equal(await authorizes(BODY), false);
+  });
+
+  it('rejects byte-level neighbours of the approved content', async () => {
+    const authorizes = await committed(BODY);
+    for (const near of [`${BODY}\n`, ` ${BODY}`, BODY.replace('fail-closed', 'fail-open'), BODY.toUpperCase(), '']) {
+      assert.equal(await authorizes(near), false, `must not authorize: ${JSON.stringify(near)}`);
+    }
+  });
+});
