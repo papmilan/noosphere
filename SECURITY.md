@@ -96,7 +96,7 @@ quoted, non-authoritative text — a clone, an archive, a pull request, or an
 injected agent cannot make them instructions. They become authoritative
 instructions only when you approve their exact bytes yourself:
 
-```
+```sh
 noosphere trust approve master-prompt
 ```
 

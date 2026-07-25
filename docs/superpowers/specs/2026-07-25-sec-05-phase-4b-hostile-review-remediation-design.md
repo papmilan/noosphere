@@ -121,10 +121,11 @@ Regressions will be written and observed failing before production changes:
 - existing crash, recovery, project-binding, sink, format-1 compatibility,
   package-boundary, continuity, Ollama, and distribution suites remain green.
 
-The PTY success test will run on Linux and macOS using the host `script`
-facility. Windows will continue to exercise the service, CLI refusal, secure
-filesystem, and crash paths; the POSIX-only PTY harness will be explicitly
-skipped there.
+The PTY success test will run on Linux and macOS, but not through the same
+facility: Linux drives util-linux `script` directly, while macOS needs system
+`expect` to give BSD `script` a controlling PTY. Windows will continue to
+exercise the service, CLI refusal, secure filesystem, and crash paths; the
+POSIX-only PTY harness will be explicitly skipped there.
 
 ## Accepted residuals
 

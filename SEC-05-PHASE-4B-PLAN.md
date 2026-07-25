@@ -78,7 +78,7 @@ one function. `resolveSlotBytes` remains only as a text compatibility helper.
 
 ### 3.2 `continuity/internal/approval-service.js` (new, internal)
 
-```
+```js
 approveSlot({ projectRoot, slot, env, confirm, output, secureFileOptions })
 ```
 
@@ -121,7 +121,7 @@ default is the only one the CLI can construct.
 
 The binding path is tri-state:
 
-```
+```text
 binding lstat == ENOENT
   -> format-2 is truly absent; format-1 may govern
 binding is present and securely verifies
