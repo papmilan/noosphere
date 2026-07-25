@@ -105,15 +105,15 @@ const TRUST_REFUSAL_CODES = new Set([
 ]);
 
 const command = process.argv[2] || 'help';
-const explicitProjectPath = readOption('--path');
-const projectDir = path.resolve(
-  explicitProjectPath ||
-    process.env.NOOSPHERE_PROJECT_DIR ||
-    process.env.INIT_CWD ||
-    '.',
-);
 
 try {
+  const explicitProjectPath = readOption('--path');
+  const projectDir = path.resolve(
+    explicitProjectPath ||
+      process.env.NOOSPHERE_PROJECT_DIR ||
+      process.env.INIT_CWD ||
+      '.',
+  );
   switch (command) {
     case 'init':
       await initializeProject(projectDir);
@@ -256,7 +256,9 @@ try {
   }
 } catch (error) {
   console.error(`Noosphere continuity: ${error.message}`);
-  process.exitCode = error.exitCode ?? (TRUST_REFUSAL_CODES.has(error.code) ? 3 : 1);
+  process.exitCode = error.exitCode
+    ?? (command === 'trust' && error.message === '--path requires a value.' ? 2 : null)
+    ?? (TRUST_REFUSAL_CODES.has(error.code) ? 3 : 1);
 }
 
 export async function initializeProject(root, options = {}) {

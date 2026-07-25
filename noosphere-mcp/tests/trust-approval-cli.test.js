@@ -132,4 +132,18 @@ describe('SEC-05 Phase 4B — approval refuses every non-interactive path', () =
     assert.equal(await mintedAnything(context), false);
     await assert.rejects(fs.lstat(context.home), (error) => error.code === 'ENOENT');
   });
+
+  it('classifies malformed global --path usage as a trust usage error without touching trust state', async () => {
+    const context = await fresh();
+    for (const args of [
+      ['trust', 'approve', 'master-prompt', '--path'],
+      ['trust', 'approve', 'master-prompt', '--path', '--yes'],
+    ]) {
+      const result = await run(args, { ...context, stdin: 'approve master-prompt deadbeef\n' });
+      assert.equal(result.code, 2, `${args.join(' ')} must be a usage error`);
+      assert.doesNotMatch(result.stderr, /interactive terminal/i, `${args.join(' ')} must fail before TTY handling`);
+    }
+    assert.equal(await mintedAnything(context), false);
+    await assert.rejects(fs.lstat(context.home), (error) => error.code === 'ENOENT');
+  });
 });
