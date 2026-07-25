@@ -26,6 +26,8 @@ import { TrustStoreError } from '../trust-store-internal.js';
 import { APPROVABLE_SLOTS, resolveSlotSource, slotSourcePath } from '../slot-sources.js';
 import { FORMAT2_SLOTS, createFormatV2Store } from './trust-format-v2.js';
 
+const MAX_CONFIRMATION_BYTES = 256;
+
 function sha256Hex(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
@@ -85,10 +87,56 @@ async function ttyConfirm({ slot, rawHash, contentHash, byteLength, escapedBytes
     '',
   ].join('\n'));
   const terminal = readline.createInterface({ input, output });
+  const abort = new AbortController();
+  let receivedBytes = 0;
+  let inputTooLong = false;
+  let lastInputByte;
+  const abortOnEnd = () => abort.abort();
+  const trackInputBytes = (chunk) => {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8');
+    for (const byte of bytes) {
+      if (byte === 0x0a) {
+        // readline removes CRLF from its answer, so neither delimiter byte is
+        // confirmation input.
+        if (lastInputByte === 0x0d) receivedBytes -= 1;
+        return;
+      }
+      receivedBytes += 1;
+      lastInputByte = byte;
+      // Delay only for a possible CRLF delimiter at the exact boundary.
+      if (receivedBytes > MAX_CONFIRMATION_BYTES
+        && !(receivedBytes === MAX_CONFIRMATION_BYTES + 1 && byte === 0x0d)) {
+        inputTooLong = true;
+        abort.abort();
+        return;
+      }
+    }
+  };
+  input.on('data', trackInputBytes);
+  input.once('end', abortOnEnd);
   try {
-    const answer = await terminal.question('> ');
-    return answer.trim() === phrase;
+    const answer = await terminal.question('> ', { signal: abort.signal });
+    if (Buffer.byteLength(answer, 'utf8') > MAX_CONFIRMATION_BYTES) {
+      throw new TrustStoreError(
+        'approval-input-too-long',
+        `approval confirmation exceeds the ${MAX_CONFIRMATION_BYTES}-byte limit`,
+      );
+    }
+    return answer === phrase;
+  } catch (error) {
+    if (inputTooLong) {
+      throw new TrustStoreError(
+        'approval-input-too-long',
+        `approval confirmation exceeds the ${MAX_CONFIRMATION_BYTES}-byte limit`,
+      );
+    }
+    if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || error?.code === 'ERR_USE_AFTER_CLOSE') {
+      return false;
+    }
+    throw error;
   } finally {
+    input.off('data', trackInputBytes);
+    input.off('end', abortOnEnd);
     terminal.close();
   }
 }
@@ -119,27 +167,29 @@ export async function approveSlot({
     // event; refuse it rather than record a meaningless authority transition.
     throw new TrustStoreError('approval-empty-slot', `${slot} is empty; there is nothing to approve`);
   }
-  const store = createFormatV2Store({ env, secureFileOptions, now });
-  const binding = await store.createProjectBinding(projectRoot);
-  // Fail closed on a held/foreign/malformed lock or an uncorroborated committed
-  // journal BEFORE showing the owner anything to approve.
-  await store.recover(binding, slot);
+  const bytes = source.bytes;
+  const text = source.text;
 
   const approved = await (confirm ?? ((details) => ttyConfirm(details, { input, output })))({
     slot,
     projectRoot,
     sourcePath: escapeBytesForTerminal(slotSourcePath(projectRoot, slot)),
-    byteLength: source.bytes.length,
-    rawHash: sha256Hex(source.bytes),
-    escapedBytes: escapeBytesForTerminal(source.bytes),
-    text: source.text,
+    byteLength: bytes.length,
+    rawHash: sha256Hex(bytes),
+    escapedBytes: escapeBytesForTerminal(bytes),
+    text,
     // Derived exactly as trust-format-v2 derives the record's contentHash, so the
     // hash shown to the owner is the hash that lands in the record.
-    contentHash: sha256Hex(Buffer.from(normalizeUntrusted(source.text), 'utf8')),
+    contentHash: sha256Hex(Buffer.from(normalizeUntrusted(text), 'utf8')),
     // The owner sees the sink's own rendering of these bytes, not a paraphrase.
-    rendered: renderSlotBlock(source.text, { authoritative: true }),
+    rendered: renderSlotBlock(text, { authoritative: true }),
   });
   if (approved !== true) throw new TrustStoreError('approval-declined', 'approval was not confirmed; nothing was changed');
 
-  return store.commitTransaction({ binding, slot, rawBytes: source.bytes, sourceOrigin: `cli:trust-approve:${slot}` });
+  const store = createFormatV2Store({ env, secureFileOptions, now });
+  const binding = await store.createProjectBinding(projectRoot);
+  // A confirmed approval still fails closed on held/foreign/malformed locks and
+  // uncorroborated committed journals before starting the transaction.
+  await store.recover(binding, slot);
+  return store.commitTransaction({ binding, slot, rawBytes: bytes, sourceOrigin: `cli:trust-approve:${slot}` });
 }

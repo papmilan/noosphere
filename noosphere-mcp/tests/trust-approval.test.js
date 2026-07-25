@@ -25,11 +25,14 @@ after(async () => {
 });
 
 const MASTER = 'Phase 4B: preserve every unfinished phase and constraint.\n';
+const MAX_CONFIRMATION_BYTES = 256;
 
-async function fresh({ master = MASTER, instructions, baseline } = {}) {
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'noosphere-4b-home-'));
+async function fresh({ master = MASTER, instructions, baseline, createHome = true } = {}) {
+  const homeParent = await fs.mkdtemp(path.join(os.tmpdir(), 'noosphere-4b-home-parent-'));
+  const home = path.join(homeParent, 'home');
   const project = await fs.mkdtemp(path.join(os.tmpdir(), 'noosphere-4b-project-'));
-  temporary.push(home, project);
+  temporary.push(homeParent, project);
+  if (createHome) await fs.mkdir(home, { mode: 0o700 });
   await fs.mkdir(path.join(project, '.noosphere'), { recursive: true, mode: 0o700 });
   const write = (file, value) => fs.writeFile(path.join(project, '.noosphere', file), value, 'utf8');
   if (master !== null) await write('master-prompt.md', master);
@@ -123,21 +126,12 @@ describe('SEC-05 Phase 4B — owner approval mints authority for exactly the app
   });
 
   it('a declined confirmation writes nothing at all', async () => {
-    const { env, project, home } = await fresh();
+    const { env, project, home } = await fresh({ createHome: false });
     await assert.rejects(
       approveSlot({ projectRoot: project, slot: 'master-prompt', env, confirm: decline }),
       (error) => error.code === 'approval-declined',
     );
-    assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env }), false);
-    // The binding is created before the prompt (it names the project, it is not
-    // authority); nothing downstream of it may exist.
-    const store = createFormatV2Store({ env });
-    const binding = await store.readProjectBinding(project);
-    for (const relative of ['manifests', 'records', 'audit', 'transactions']) {
-      const entries = await fs.readdir(store.pathFor(binding, relative), { recursive: true }).catch(() => []);
-      assert.deepEqual(entries.filter((entry) => entry.endsWith('.json')), [], `${relative} must be empty after a decline`);
-    }
-    assert.ok(home);
+    await assert.rejects(fs.lstat(home), (error) => error.code === 'ENOENT');
   });
 
   it('refuses an empty slot rather than minting an empty generation', async () => {
@@ -239,7 +233,10 @@ describe('SEC-05 Phase 4B — the production TTY confirmation itself', () => {
     output.isTTY = isTTY;
     const shown = [];
     output.on('data', (chunk) => shown.push(chunk.toString('utf8')));
-    if (typed !== null) setImmediate(() => input.write(`${typed}\n`));
+    setImmediate(() => {
+      if (typed === null) input.end();
+      else input.end(`${typed}\n`);
+    });
     return { input, output, screen: () => shown.join('') };
   }
 
@@ -256,28 +253,43 @@ describe('SEC-05 Phase 4B — the production TTY confirmation itself', () => {
     assert.match(io.screen(), /preserve every unfinished phase/);
   });
 
-  for (const [name, typed] of Object.entries({
-    'a bare yes': 'yes',
-    'a bare y': 'y',
-    'an empty line': '',
-    'the phrase for another slot': 'approve baseline 00000000',
-    'the phrase with a wrong hash prefix': 'approve master-prompt deadbeef',
-    'the phrase in different case': 'APPROVE MASTER-PROMPT',
-  })) {
+  const invalidAnswers = [
+    ['a bare yes', () => 'yes', 'approval-declined'],
+    ['a bare y', () => 'y', 'approval-declined'],
+    ['an empty line', () => '', 'approval-declined'],
+    ['EOF', () => null, 'approval-declined'],
+    ['the phrase for another slot', () => 'approve baseline 00000000', 'approval-declined'],
+    ['the phrase with a wrong hash prefix', () => 'approve master-prompt deadbeef', 'approval-declined'],
+    ['the phrase with a leading space', (phrase) => ` ${phrase}`, 'approval-declined'],
+    ['the phrase with a trailing space', (phrase) => `${phrase} `, 'approval-declined'],
+    ['the phrase with a leading tab', (phrase) => `\t${phrase}`, 'approval-declined'],
+    ['the phrase with a trailing tab', (phrase) => `${phrase}\t`, 'approval-declined'],
+    ['the phrase in uppercase', (phrase) => phrase.toUpperCase(), 'approval-declined'],
+    ['the phrase with a suffix', (phrase) => `${phrase} now`, 'approval-declined'],
+    [
+      'UTF-8 input larger than the fixed byte bound',
+      () => '\u00e9'.repeat((MAX_CONFIRMATION_BYTES / 2) + 1),
+      'approval-input-too-long',
+    ],
+  ];
+
+  for (const [name, answer, errorCode] of invalidAnswers) {
     it(`declines ${name} and mints nothing`, async () => {
-      const { env, project } = await fresh();
-      const io = terminal({ typed });
+      const { env, project, home } = await fresh({ createHome: false });
+      const rawHash = crypto.createHash('sha256').update(MASTER).digest('hex');
+      const phrase = confirmationPhrase('master-prompt', rawHash);
+      const io = terminal({ typed: answer(phrase) });
       await assert.rejects(
         approveSlot({ projectRoot: project, slot: 'master-prompt', env, input: io.input, output: io.output }),
-        (error) => error.code === 'approval-declined',
+        (error) => error.code === errorCode,
       );
-      assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env }), false);
+      await assert.rejects(fs.lstat(home), (error) => error.code === 'ENOENT');
     });
   }
 
   it('refuses when either stream is not a terminal, before showing anything', async () => {
     for (const [inputTTY, outputTTY] of [[false, false], [true, false], [false, true]]) {
-      const { env, project } = await fresh();
+      const { env, project, home } = await fresh({ createHome: false });
       const io = terminal({ typed: 'approve master-prompt 00000000' });
       io.input.isTTY = inputTTY;
       io.output.isTTY = outputTTY;
@@ -286,7 +298,7 @@ describe('SEC-05 Phase 4B — the production TTY confirmation itself', () => {
         (error) => error.code === 'approval-requires-tty',
       );
       assert.equal(io.screen(), '', 'nothing is displayed to a non-terminal');
-      assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env }), false);
+      await assert.rejects(fs.lstat(home), (error) => error.code === 'ENOENT');
     }
   });
 });

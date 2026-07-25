@@ -26,9 +26,10 @@ after(async () => {
 });
 
 async function fresh() {
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'noosphere-4b-cli-home-'));
+  const homeParent = await fs.mkdtemp(path.join(os.tmpdir(), 'noosphere-4b-cli-home-parent-'));
+  const home = path.join(homeParent, 'home');
   const project = await fs.mkdtemp(path.join(os.tmpdir(), 'noosphere-4b-cli-project-'));
-  temporary.push(home, project);
+  temporary.push(homeParent, project);
   await fs.mkdir(path.join(project, '.noosphere'), { recursive: true, mode: 0o700 });
   await fs.writeFile(path.join(project, '.noosphere', 'master-prompt.md'), MASTER, 'utf8');
   return { home, project, env: { NOOSPHERE_HOME: home, NOOSPHERE_OWNER_SCOPE: 'phase4b-cli-owner' } };
@@ -76,6 +77,7 @@ describe('SEC-05 Phase 4B — approval refuses every non-interactive path', () =
       assert.match(result.stderr, /interactive terminal/i);
       assert.equal(await mintedAnything(context), false);
       assert.equal(await touchedTrustStore(context), false, 'a refused approval must not create trust state');
+      await assert.rejects(fs.lstat(context.home), (error) => error.code === 'ENOENT');
       assert.equal(
         await isSlotAuthoritative({ projectRoot: context.project, slot: 'master-prompt', rawBytes: MASTER, env: context.env }),
         false,
@@ -98,6 +100,7 @@ describe('SEC-05 Phase 4B — approval refuses every non-interactive path', () =
       assert.notEqual(result.code, 0, `${variable} must not approve anything`);
     }
     assert.equal(await mintedAnything(context), false);
+    await assert.rejects(fs.lstat(context.home), (error) => error.code === 'ENOENT');
   });
 
   it('rejects malformed invocations without touching the trust store', async () => {
@@ -107,5 +110,6 @@ describe('SEC-05 Phase 4B — approval refuses every non-interactive path', () =
       assert.notEqual(result.code, 0, `${args.join(' ')} must fail`);
     }
     assert.equal(await mintedAnything(context), false);
+    await assert.rejects(fs.lstat(context.home), (error) => error.code === 'ENOENT');
   });
 });
