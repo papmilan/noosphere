@@ -37,18 +37,28 @@ function trySymlink(target, file) {
   }
 }
 
-// A hole, not a payload. Returns the bytes the filesystem actually allocated so
-// a test can prove the fixture is sparse instead of assuming it.
-function sparse(file, size) {
+// An oversized fixture, sparse wherever the filesystem supports it. APFS and
+// ext4 give a real hole for the cost of one ftruncate; NTFS allocates instead
+// and a multi-GiB request returns ENOSPC on a CI runner, so there the fixture
+// falls back to `bound + 1` real bytes. Returns { size, sparse }.
+function oversized(file, bound) {
+  const hole = bound * 4096;
   const fd = fs.openSync(file, 'w');
   try {
-    fs.ftruncateSync(fd, size);
+    try {
+      fs.ftruncateSync(fd, hole);
+      const stats = fs.statSync(file);
+      const allocated = typeof stats.blocks === 'number' ? stats.blocks * 512 : 0;
+      if (stats.size === hole && allocated < hole / 1000) return { size: hole, sparse: true };
+    } catch (error) {
+      if (error.code !== 'ENOSPC') throw error;
+    }
+    fs.ftruncateSync(fd, 0);
+    fs.writeSync(fd, Buffer.alloc(bound + 1, 0x41), 0, bound + 1, 0);
+    return { size: bound + 1, sparse: false };
   } finally {
     fs.closeSync(fd);
   }
-  const stats = fs.statSync(file);
-  assert.equal(stats.size, size);
-  return typeof stats.blocks === 'number' ? stats.blocks * 512 : null;
 }
 
 describe('readBoundedRegularFile', () => {
@@ -85,20 +95,22 @@ describe('readBoundedRegularFile', () => {
   test('refuses a sparse oversized file without allocating it', async () => {
     const dir = temporaryDirectory();
     const file = path.join(dir, 'sparse.bin');
-    const size = 8 * 1024 * 1024 * 1024;
-    const allocated = sparse(file, size);
-    if (allocated !== null) {
-      assert.ok(allocated < size / 1000, `fixture is not sparse: ${allocated} bytes allocated`);
+    const bound = 1024 * 1024;
+    const fixture = oversized(file, bound);
+    // POSIX must produce a real hole; if it stopped, this test would still pass
+    // while proving far less.
+    if (process.platform !== 'win32') {
+      assert.equal(fixture.sparse, true, 'the POSIX fixture was not sparse');
     }
 
     const started = process.hrtime.bigint();
     await assert.rejects(
-      readBoundedRegularFile(file, { maxBytes: 1024 * 1024 }),
+      readBoundedRegularFile(file, { maxBytes: bound }),
       (error) => error.code === 'state-file-too-large',
     );
-    // Not a performance assertion — a refusal that had to read 8 GiB could not
-    // finish in this window on any real machine, so this fails if the size check
-    // ever moves after the read.
+    // Not a performance assertion — a refusal that had to materialise a 4 GiB
+    // hole could not finish in this window, so this fails if the size check ever
+    // moves after the read.
     const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
     assert.ok(elapsedMs < 5_000, `the refusal took ${elapsedMs}ms, which implies the file was read`);
   });

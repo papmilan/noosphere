@@ -130,20 +130,33 @@ async function trySymlink(target, file) {
   }
 }
 
-// A hole, not a payload: truncate reserves the logical length without writing
-// blocks, so an oversized fixture costs milliseconds and no disk. Returns the
-// number of bytes actually allocated so a test can prove the file really is
-// sparse rather than assume it.
-async function sparseFile(file, size) {
+// An oversized fixture, sparse wherever the filesystem supports it.
+//
+// On APFS and ext4 `truncate` reserves the logical length without writing
+// blocks, so the fixture costs milliseconds and no disk — and a refusal that had
+// to read the file would have had to materialise gigabytes, which is the failure
+// mode under test. NTFS allocates on `ftruncate` instead (a 64 GiB request
+// returns ENOSPC on a CI runner), so there the fixture falls back to
+// `bound + 1` real bytes: the bound is still exceeded, only the low-disk
+// evidence is weaker. Returns { size, sparse } so a test can assert which it got.
+async function oversizedFile(file, bound) {
+  const hole = bound * 4096;
   const handle = await fs.open(file, 'w');
   try {
-    await handle.truncate(size);
+    try {
+      await handle.truncate(hole);
+      const stats = await fs.stat(file);
+      const allocated = typeof stats.blocks === 'number' ? stats.blocks * 512 : 0;
+      if (stats.size === hole && allocated < hole / 1000) return { size: hole, sparse: true };
+    } catch (error) {
+      if (error.code !== 'ENOSPC') throw error;
+    }
+    await handle.truncate(0);
+    await handle.writeFile(Buffer.alloc(bound + 1, 0x61));
+    return { size: bound + 1, sparse: false };
   } finally {
     await handle.close();
   }
-  const stats = await fs.stat(file);
-  assert.equal(stats.size, size, 'the fixture did not reach its logical size');
-  return typeof stats.blocks === 'number' ? stats.blocks * 512 : null;
 }
 
 async function withTimeout(promise, ms, message) {
@@ -296,12 +309,11 @@ describe('SEC-05 Phase 4B-R4 — the source-size bound', () => {
   it('refuses an oversized sparse slot before allocating it', async () => {
     const { project } = await fresh({ master: null });
     const file = path.join(project, '.noosphere', 'master-prompt.md');
-    const oversize = MAX_SLOT_SOURCE_BYTES * 4096; // 4 GiB of hole.
-    const allocated = await sparseFile(file, oversize);
-    if (allocated !== null) {
-      // Proves the fixture is a hole, so a refusal that had to read the file
-      // would have had to materialise 4 GiB — the failure mode under test.
-      assert.ok(allocated < oversize / 1000, `fixture is not sparse: ${allocated} bytes allocated`);
+    const fixture = await oversizedFile(file, MAX_SLOT_SOURCE_BYTES);
+    // POSIX must produce a real hole. If it ever silently stopped doing so this
+    // test would still pass while proving far less, so demand it there.
+    if (process.platform !== 'win32') {
+      assert.equal(fixture.sparse, true, 'the POSIX fixture was not sparse');
     }
 
     await withTimeout(
@@ -333,7 +345,7 @@ describe('SEC-05 Phase 4B-R4 — the source-size bound', () => {
   it('refuses an oversized slot BEFORE the owner is asked to confirm and before any trust state exists', async () => {
     const { env, project } = await fresh({ master: null });
     const file = path.join(project, '.noosphere', 'master-prompt.md');
-    await sparseFile(file, MAX_SLOT_SOURCE_BYTES * 4096);
+    await oversizedFile(file, MAX_SLOT_SOURCE_BYTES);
 
     const { approveSlot } = await import('../continuity/internal/approval-service.js');
     let asked = false;
@@ -357,13 +369,13 @@ describe('SEC-05 Phase 4B-R4 — the source-size bound', () => {
     const server = await stubRelayer(project, recalled);
     try {
       const file = path.join(project, '.noosphere', 'master-prompt.md');
-      await sparseFile(file, MAX_SLOT_SOURCE_BYTES * 4096);
+      const fixture = await oversizedFile(file, MAX_SLOT_SOURCE_BYTES);
 
       // Without --replace the oversized file counts as EXISTING, so the capture
       // is refused rather than silently overwriting the owner's pinned prompt.
       const refused = await run(['master-prompt', '--content', 'REPAIRED PROMPT'], { env, project });
       assert.equal(refused.code, 0, refused.stderr);
-      assert.equal((await fs.stat(file)).size, MAX_SLOT_SOURCE_BYTES * 4096, 'the oversized file was overwritten without --replace');
+      assert.equal((await fs.stat(file)).size, fixture.size, 'the oversized file was overwritten without --replace');
 
       const repaired = await withTimeout(
         run(['master-prompt', '--replace', '--content', 'REPAIRED PROMPT'], { env, project }),
@@ -380,7 +392,7 @@ describe('SEC-05 Phase 4B-R4 — the source-size bound', () => {
   it('bounds sibling repository inputs too, and keeps unknown I/O errors visible', async () => {
     const { project } = await fresh();
     const journal = path.join(project, '.noosphere', 'journal.md');
-    await sparseFile(journal, 64 * 1024 * 1024 * 1024);
+    await oversizedFile(journal, 8 * 1024 * 1024);
     const recalled = [];
     const server = await stubRelayer(project, recalled);
     try {
@@ -420,7 +432,7 @@ describe('SEC-05 Phase 4B-R4 — printProtocol keeps one strict output contract'
     const shapes = [
       ['malformed', async (file) => { await fs.writeFile(file, Buffer.from([0xc3, 0x28])); return true; }],
       ['directory', async (file) => { await fs.mkdir(file); return true; }],
-      ['oversized', async (file) => { await sparseFile(file, MAX_SLOT_SOURCE_BYTES * 4096); return true; }],
+      ['oversized', async (file) => { await oversizedFile(file, MAX_SLOT_SOURCE_BYTES); return true; }],
       ['fifo', async (file) => mkfifo(file)],
       ['symlink', async (file) => trySymlink(os.devNull, file)],
     ];
@@ -463,7 +475,7 @@ describe('SEC-05 Phase 4B-R4 — printProtocol keeps one strict output contract'
 describe('SEC-05 Phase 4B-R4 — present-but-unusable survives rendering', () => {
   const corruptions = [
     ['slot-invalid-utf8', async (file) => { await fs.writeFile(file, Buffer.concat([Buffer.from('PINNED\n'), Buffer.from([0xff])])); return true; }],
-    ['slot-too-large', async (file) => { await sparseFile(file, MAX_SLOT_SOURCE_BYTES * 4096); return true; }],
+    ['slot-too-large', async (file) => { await oversizedFile(file, MAX_SLOT_SOURCE_BYTES); return true; }],
     ['EISDIR', async (file) => { await fs.mkdir(file); return true; }],
     ['slot-not-regular-file', async (file) => mkfifo(file)],
   ];
