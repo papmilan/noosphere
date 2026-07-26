@@ -200,12 +200,18 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
         env: { ...process.env, NOOSPHERE_TEST_ACL_FILE: file },
       }).trim();
       const before = powershell(
-        '$p=$env:NOOSPHERE_TEST_ACL_FILE; $a=Get-Acl -LiteralPath $p; ' +
-        '$a.SetAccessRuleProtection($true,$true); Set-Acl -LiteralPath $p -AclObject $a; ' +
-        '(Get-Acl -LiteralPath $p).Sddl',
+        '$p=$env:NOOSPHERE_TEST_ACL_FILE; ' +
+        '$s=[System.Security.AccessControl.AccessControlSections]::Access; ' +
+        '$a=[System.IO.File]::GetAccessControl($p,$s); ' +
+        '$a.SetAccessRuleProtection($true,$true); [System.IO.File]::SetAccessControl($p,$a); ' +
+        '$a.GetSecurityDescriptorSddlForm($s)',
       );
       await atomicRepositoryWrite(file, 'replacement\n');
-      const after = powershell('$p=$env:NOOSPHERE_TEST_ACL_FILE; (Get-Acl -LiteralPath $p).Sddl');
+      const after = powershell(
+        '$p=$env:NOOSPHERE_TEST_ACL_FILE; ' +
+        '$s=[System.Security.AccessControl.AccessControlSections]::Access; ' +
+        '[System.IO.File]::GetAccessControl($p,$s).GetSecurityDescriptorSddlForm($s)',
+      );
       assert.equal(after, before);
     });
 
@@ -379,6 +385,30 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
     assert.equal(results.filter(({ status }) => status === 'fulfilled').length, 1);
     assert.equal(results.filter(({ status }) => status === 'rejected').length, 1);
     assert.equal((await fsp.readFile(file)).length, 8);
+  });
+
+  it('retries a verified Windows lock when open reports sharing contention', async () => {
+    const root = await fresh();
+    const file = path.join(root, 'journal.md');
+    const lock = `${file}.append.lock`;
+    await fsp.writeFile(lock, 'held');
+    let calls = 0;
+    await appendRepositoryFile(file, 'entry\n', {
+      root,
+      platform: 'win32',
+      maxBytes: 1024,
+      lockBackoffMs: 1,
+      open: async (...args) => {
+        calls += 1;
+        if (calls === 1) {
+          throw Object.assign(new Error('sharing violation'), { code: 'EPERM' });
+        }
+        await fsp.rm(lock);
+        return fsp.open(...args);
+      },
+    });
+    assert.equal(await fsp.readFile(file, 'utf8'), 'entry\n');
+    assert.equal(calls, 2);
   });
 
   it('removes only regular files and real empty directories under the repository root', async () => {
