@@ -1400,7 +1400,21 @@ async function ensureLocalExcludes(root) {
 
 async function upsertManagedBlock(file, block) {
   // Create the adapter when the tool-specific file is absent.
-  const current = await readRepositoryText(file);
+  //
+  // Present-but-unusable must abort, exactly as it does in ensureLocalExcludes
+  // and removeManagedBlock: this is a read-modify-write, so degrading an
+  // unreadable adapter to '' would write the managed block back as the WHOLE
+  // file and destroy everything the user wrote around it. The reachable case is
+  // an adapter file that is a symlink (`CLAUDE.md -> AGENTS.md` is an ordinary
+  // setup, and pre-Phase-4B readFile followed it); an oversized, non-regular, or
+  // permission-revoked adapter reaches the same branch.
+  const existing = await readRepositoryFile(file);
+  if (existing.unusable) {
+    throw new Error(
+      `${file} exists but could not be read (${existing.reason}); refusing to replace it. Replace a symlinked adapter file with a regular file, or repair it, then re-run.`,
+    );
+  }
+  const current = existing.text;
   const pattern = new RegExp(
     `${escapeRegExp(MANAGED_START)}[\\s\\S]*?${escapeRegExp(MANAGED_END)}`,
   );

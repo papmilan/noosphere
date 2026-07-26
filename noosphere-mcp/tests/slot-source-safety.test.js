@@ -23,7 +23,7 @@ import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { refreshContext, watchProject } from '../continuity/index.js';
+import { configureProjectAdapters, refreshContext, watchProject } from '../continuity/index.js';
 import {
   MAX_SLOT_SOURCE_BYTES,
   UNUSABLE_SOURCE_CODES,
@@ -660,5 +660,65 @@ describe('SEC-05 Phase 4B-R4 — ordinary files are untouched by all of this', (
     const bytes = await readBoundedRegularFile(file, { maxBytes: MAX_SLOT_SOURCE_BYTES });
     assert.deepEqual(bytes, Buffer.from(MASTER, 'utf8'));
     assert.equal(await readBoundedRegularFile(path.join(project, 'nope.md'), { maxBytes: 16 }), null);
+  });
+});
+
+// SEC-05 Phase 4B-R4 — the read-modify-write callers.
+//
+// The bounded read collapses "present but unreadable" to empty text for the many
+// callers whose only correct answer is empty. A caller that WRITES what it read
+// back cannot use that convention: for it, empty means "the file had nothing in
+// it", and acting on that destroys whatever the user actually wrote. The adapter
+// files are the reachable case — `CLAUDE.md -> AGENTS.md` is an ordinary setup
+// and pre-Phase-4B `readFile` followed it — so the whole of the user's AGENTS.md
+// would be replaced by the managed block alone.
+describe('SEC-05 Phase 4B-R4 — a read-modify-write never rewrites a file it could not read', () => {
+  const USER_CONTENT = '# My AGENTS file\n\nIMPORTANT user instructions that must not be lost.\n';
+
+  async function adapterProject() {
+    const { project } = await fresh();
+    await fs.writeFile(
+      path.join(project, '.noosphere', 'config.json'),
+      JSON.stringify({ project_id: 'r4-adapters', relayer_url: 'http://127.0.0.1:1' }),
+      'utf8',
+    );
+    return project;
+  }
+
+  it('preserves user content around the managed block (the guard is falsifiable)', async () => {
+    const project = await adapterProject();
+    const agents = path.join(project, 'AGENTS.md');
+    await fs.writeFile(agents, USER_CONTENT, 'utf8');
+    await configureProjectAdapters(project, ['codex']);
+    const written = await fs.readFile(agents, 'utf8');
+    assert.match(written, /IMPORTANT user instructions that must not be lost/);
+    assert.match(written, /noosphere:continuity:start/);
+  });
+
+  it('refuses a symlinked adapter file instead of overwriting its target', async () => {
+    const project = await adapterProject();
+    const agents = path.join(project, 'AGENTS.md');
+    await fs.writeFile(agents, USER_CONTENT, 'utf8');
+    if (!await trySymlink('AGENTS.md', path.join(project, 'CLAUDE.md'))) return;
+
+    await assert.rejects(
+      configureProjectAdapters(project, ['claude']),
+      /CLAUDE\.md exists but could not be read \(state-file-symlink\); refusing to replace it/,
+    );
+    // The symlink target keeps every byte the user wrote, and the link is intact.
+    assert.equal(await fs.readFile(agents, 'utf8'), USER_CONTENT);
+    assert.equal((await fs.lstat(path.join(project, 'CLAUDE.md'))).isSymbolicLink(), true);
+  });
+
+  it('refuses a non-regular adapter file instead of replacing it', async () => {
+    const project = await adapterProject();
+    const gemini = path.join(project, 'GEMINI.md');
+    if (!await mkfifo(gemini)) return;
+
+    await assert.rejects(
+      configureProjectAdapters(project, ['gemini']),
+      /GEMINI\.md exists but could not be read \(state-file-not-regular\); refusing to replace it/,
+    );
+    assert.equal((await fs.lstat(gemini)).isFIFO(), true);
   });
 });
