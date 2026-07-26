@@ -194,6 +194,25 @@ through a separate interactive transition.
 If you were relying on a symlinked slot file, replace it with a real file (or
 symlink the containing directory instead).
 
+**How project files are written.** Every project file Noosphere rewrites —
+`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.mcp.json`, `.gitignore`,
+`.git/info/exclude`, and the files under `.noosphere/` — is written to a
+temporary file beside it and then renamed over the target, never truncated in
+place.
+
+This matters because Noosphere reads the same files it rewrites, and
+`noosphere watch` means a reader is usually running. A plain write truncates
+first and fills afterwards, so it publishes an empty file for a moment; a reader
+landing in that window reads zero bytes with no error, and the callers that read
+a file, edit it, and write it back would then persist that emptiness — losing
+whatever you had written. Renaming is atomic: a reader sees either the whole old
+file or the whole new one.
+
+The same rule as the slot files applies to the target: if it is a symlink or not
+a regular file, the write is **refused** rather than redirected, because renaming
+over a symlink would silently replace the link itself. Replace a symlinked
+project file with a real file if you were relying on one.
+
 **Present is not absent.** A slot that exists but cannot be read — corrupt UTF-8,
 oversized, a directory, a FIFO, permissions revoked — is reported as
 *present-but-unusable*, never as absent. It is non-authoritative, it does not

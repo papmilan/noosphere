@@ -7,7 +7,6 @@ import {
   access,
   appendFile,
   mkdir,
-  rename,
   rm,
   rmdir,
   stat,
@@ -61,7 +60,7 @@ import { mutateSyncMetadata, readSyncMetadata, withUploadReservationLock } from 
 import { approveOrigin, secureRelayerFetch } from './relayer-authority.js';
 import { quoteUntrustedMemory, sanitizeMemoryText } from './memory-safety.js';
 import { renderSlotBlock } from './render.js';
-import { readBoundedRegularFile } from './secure-fs.js';
+import { atomicRepositoryWrite as atomicWrite, readBoundedRegularFile } from './secure-fs.js';
 import { isSlotAuthoritative } from './trust-store.js';
 import { approveSlot } from './internal/approval-service.js';
 import { APPROVABLE_SLOTS, MAX_SLOT_SOURCE_BYTES, UNUSABLE_SOURCE_CODES, baselineBody, resolveSlotSource, resolveSlotSourceForRead } from './slot-sources.js';
@@ -700,11 +699,7 @@ export async function prepareProjectBaseline(root, options = {}) {
   const fingerprint = hash(baseline);
   const generatedAt = new Date().toISOString();
 
-  await writeFile(
-    path.join(root, '.noosphere', 'baseline.md'),
-    baseline,
-    'utf8',
-  );
+  await atomicWrite(path.join(root, '.noosphere', 'baseline.md'), baseline);
   await writeRuntimeState(root, {
     ...state,
     baseline: {
@@ -1393,8 +1388,7 @@ async function ensureLocalExcludes(root) {
   }
   const next = `${lines.join('\n')}\n`;
   if (next !== current) {
-    await mkdir(path.dirname(exclude), { recursive: true });
-    await writeFile(exclude, next, 'utf8');
+    await atomicWrite(exclude, next);
   }
 }
 
@@ -1421,7 +1415,7 @@ async function upsertManagedBlock(file, block) {
   const next = pattern.test(current)
     ? current.replace(pattern, block)
     : `${current.trimEnd()}${current.trim() ? '\n\n' : ''}${block}\n`;
-  await writeFile(file, next, 'utf8');
+  await atomicWrite(file, next);
 }
 
 async function removeManagedBlock(file) {
@@ -1434,7 +1428,7 @@ async function removeManagedBlock(file) {
   if (!pattern.test(current)) return;
   const next = current.replace(pattern, '').trim();
   if (next) {
-    await writeFile(file, `${next}\n`, 'utf8');
+    await atomicWrite(file, `${next}\n`);
   } else {
     await rm(file, { force: true });
   }
@@ -2919,11 +2913,7 @@ next recommended action.
 - HTTP recall: \`POST /v1/projects/${slug}/recall\`
 - MCP namespace: \`noosphere-${slug}\`
 `;
-  await writeFile(
-    path.join(root, '.noosphere', 'instructions.md'),
-    content,
-    'utf8',
-  );
+  await atomicWrite(path.join(root, '.noosphere', 'instructions.md'), content);
   await writeJson(path.join(root, '.noosphere', 'protocol.json'), {
     protocol: 'noosphere-continuity',
     version: '1.0',
@@ -2982,7 +2972,7 @@ async function removeLegacyProjectFiles(root) {
     .join('\n')
     .replace(/^\n+|\n+$/g, '');
   if (remaining) {
-    await writeFile(gitignore, `${remaining}\n`, 'utf8');
+    await atomicWrite(gitignore, `${remaining}\n`);
   } else {
     await rm(gitignore, { force: true });
   }
@@ -3152,8 +3142,7 @@ async function exists(file) {
 }
 
 async function writeJson(file, value) {
-  await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  await atomicWrite(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 async function writeTextIfMissing(file, value) {
@@ -3162,13 +3151,6 @@ async function writeTextIfMissing(file, value) {
   } catch {
     await writeFile(file, value, 'utf8');
   }
-}
-
-async function atomicWrite(file, value) {
-  await mkdir(path.dirname(file), { recursive: true });
-  const temporary = `${file}.${randomUUID()}.tmp`;
-  await writeFile(temporary, value, 'utf8');
-  await rename(temporary, file);
 }
 
 function emptyContext(projectId) {

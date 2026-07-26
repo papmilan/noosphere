@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
-import { lstat, mkdir, open, readFile, realpath, rename, rm } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -646,6 +646,50 @@ async function readWithinBound(info, handle, file, limit) {
     read += chunk;
   } while (chunk > 0 && read < bytes.length);
   return finishBoundedRead(bytes, read, info, file, limit);
+}
+
+// THE write that pairs with readBoundedRegularFile: for a repository-controlled
+// file this product both reads and rewrites.
+//
+// `fs.writeFile` truncates and then writes, so it publishes an empty file and
+// then fills it. A concurrent reader — and `noosphere watch` means there is
+// usually one — whose fstat lands inside that window sees size 0 and reads zero
+// bytes with NO error, which is indistinguishable from a file the user emptied.
+// The read-modify-write callers then write that emptiness back. Measured before
+// this existed: one writer looping writeFile against one reader looping
+// readBoundedRegularFile returned a silent empty read 5.6% of the time, plus
+// 0.9% spurious `state-file-changed` refusals when the fstat and the read
+// straddled the window instead.
+//
+// Writing a sibling temp file and rename(2)ing it over the target closes both:
+// rename is atomic, so a reader sees either the whole old file or the whole new
+// one and never the gap between them. This is deliberately NOT
+// atomicOwnerOnlyWrite — these are ordinary project files (AGENTS.md,
+// .git/info/exclude, .noosphere/*.md) that must keep normal permissions and must
+// not drag a 0700 mode onto the directories that hold them.
+//
+// The target is refused if it is a symlink or a non-regular file, before and
+// after the temp write: rename would replace the LINK rather than follow it, so
+// silently redirecting a symlinked adapter file into a fresh regular file is a
+// behaviour change the caller has to opt out of by fixing the path first.
+export async function atomicRepositoryWrite(file, data, options = {}) {
+  const absolute = path.resolve(file);
+  const directory = path.dirname(absolute);
+  await mkdir(directory, { recursive: true });
+  await assertFinalNotReparse(absolute);
+  const temporary = path.join(directory, `.${path.basename(absolute)}.${randomUUID()}.tmp`);
+  try {
+    // 'wx' so a temp path that somehow already exists is refused rather than
+    // written through; the UUID makes that a fault, not an attack surface.
+    await writeFile(temporary, buffer(data), { flag: 'wx' });
+    await assertFinalNotReparse(absolute);
+    await (options.rename ?? rename)(temporary, absolute);
+    if ((options.platform ?? process.platform) !== 'win32') await fsyncDir(directory);
+  } catch (error) {
+    // Never leave a stray .tmp in someone's working tree.
+    await safeCleanup(temporary);
+    throw normalizeSecurityError(error);
+  }
 }
 
 export function secureOwnerOnlyWindows(file, options = {}) {

@@ -8,7 +8,6 @@ import {
   readdir,
   rename,
   rm,
-  writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -17,6 +16,7 @@ import { syncDirectoryPath } from '../acp/durability.js';
 import {
   ensureContainedDir,
   PathBoundaryError,
+  atomicRepositoryWrite,
   readBoundedRegularFile,
   readOwnerOnlyFile,
   writeOwnerOnlyFileExclusive,
@@ -410,7 +410,9 @@ async function updateLocalExclude(root, { trackState }) {
   const next = `${lines.join('\n')}\n`;
   if (next === current) return;
   await mkdir(path.dirname(exclude), { recursive: true });
-  await writeFile(exclude, next, 'utf8');
+  // Atomic: continuity/index.js reads this same file, and writeFile's
+  // truncate-then-write window publishes it empty first.
+  await atomicRepositoryWrite(exclude, next);
 }
 
 async function gitExcludePath(root) {
