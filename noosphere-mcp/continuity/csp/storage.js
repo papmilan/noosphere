@@ -6,7 +6,6 @@ import {
   mkdir,
   open,
   readdir,
-  readFile,
   rename,
   rm,
   writeFile,
@@ -18,12 +17,33 @@ import { syncDirectoryPath } from '../acp/durability.js';
 import {
   ensureContainedDir,
   PathBoundaryError,
+  readBoundedRegularFile,
   readOwnerOnlyFile,
   writeOwnerOnlyFileExclusive,
 } from '../secure-fs.js';
 import { validateState } from './validate.js';
 
 const execFileAsync = promisify(execFile);
+
+// SEC-05 Phase 4B-R4 — bounded, non-blocking lock read.
+//
+// A lock path lives inside the working tree, so anything that can write there
+// can plant a FIFO at it. A bare readFile then blocks forever with no error
+// code, which strands the release and stale-check paths this helper serves.
+// Locks are small JSON; the shared primitive refuses anything non-regular,
+// symlinked, or larger, and never blocks on the open.
+const MAX_LOCK_BYTES = 4096;
+const MAX_EXCLUDE_BYTES = 1024 * 1024;
+
+async function readLockJson(lockPath) {
+  try {
+    const raw = await readBoundedRegularFile(lockPath, { maxBytes: MAX_LOCK_BYTES });
+    return raw === null ? null : JSON.parse(raw.toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
 const LOCAL_RUNTIME_EXCLUDES = [
   '.noosphere/runtime-state.json',
   '.noosphere/*.tmp',
@@ -266,7 +286,7 @@ export async function withCspLock(root, operation, options = {}) {
   } catch (error) {
     cleanupError = error;
   } finally {
-    const current = await readFile(paths.lock, 'utf8').then(JSON.parse).catch(() => null);
+    const current = await readLockJson(paths.lock);
     if (current?.token === token) {
       await rm(paths.lock, { force: true }).catch((error) => { cleanupError ??= error; });
     }
@@ -373,10 +393,9 @@ async function detachFileIfIdentity(paths, file, expectedBytes, label) {
 async function updateLocalExclude(root, { trackState }) {
   const exclude = await gitExcludePath(root);
   if (exclude === null) return;
-  const current = await readFile(exclude, 'utf8').catch((error) => {
-    if (error.code === 'ENOENT') return '';
-    throw error;
-  });
+  // Bounded and non-blocking: .git/info/exclude is repository-controlled.
+  const excludeBytes = await readBoundedRegularFile(exclude, { maxBytes: MAX_EXCLUDE_BYTES });
+  const current = excludeBytes === null ? '' : excludeBytes.toString('utf8');
   let lines = current.split(/\r?\n/u);
   if (lines.at(-1) === '') lines.pop();
   if (trackState) lines = lines.filter((line) => line !== '.noosphere/state.json');
@@ -409,7 +428,7 @@ function isPlainObject(value) {
 }
 
 async function staleLock(lockPath) {
-  const lock = await readFile(lockPath, 'utf8').then(JSON.parse).catch(() => null);
+  const lock = await readLockJson(lockPath);
   if (!lock || !Number.isInteger(lock.pid)) {
     const details = await lstat(lockPath).catch(() => null);
     return details !== null && Date.now() - details.mtimeMs > 60_000;

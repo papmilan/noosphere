@@ -1,5 +1,7 @@
-import { lstat, readFile } from 'node:fs/promises';
+import { lstat } from 'node:fs/promises';
 import path from 'node:path';
+
+import { readBoundedRegularFile } from './secure-fs.js';
 
 // SEC-05 Phase 4B — the single derivation of the bytes an authority-capable slot
 // is made of.
@@ -23,6 +25,62 @@ const SLOT_FILES = Object.freeze({
 
 const UTF8 = new TextDecoder('utf-8', { fatal: true });
 
+// SEC-05 Phase 4B-R4 — the source-size bound for an authority-capable slot.
+//
+// 1 MiB. These three files are hand-written (or, for the baseline, generated
+// from at most 200 commit subjects) markdown that an owner reads in a terminal
+// before approving and that every agent then carries in its context window; a
+// megabyte is already an order of magnitude past anything usable there, so the
+// bound refuses only inputs that were never legitimate. It exists for
+// availability, not policy: without it `mkfile -n 8g .noosphere/master-prompt.md`
+// — one sparse file any working-tree writer can create in milliseconds — makes
+// every refresh, watch tick, and approval allocate 8 GiB. Deliberately a
+// constant and not configurable: an env-tunable security bound is a downgrade
+// switch, and nothing legitimate needs to raise it.
+export const MAX_SLOT_SOURCE_BYTES = 1024 * 1024;
+
+// SEC-05 Phase 4B-R4 — the symlink policy for slot files, chosen deliberately.
+//
+// POLICY: a slot file that IS a symlink is REJECTED (never followed, never
+// opened). A slot file reached THROUGH a symlinked parent directory is
+// SUPPORTED and read normally.
+//
+// Why reject the file: the slot path is the one thing an owner is told they are
+// approving. Following a symlink there means `.noosphere/master-prompt.md` can
+// name bytes anywhere the process can read — /etc, another checkout, a device —
+// and the displayed source path would still say `.noosphere/master-prompt.md`.
+// Refusing keeps "the slot file" and "the bytes" the same object. This is
+// enforced twice: lstat classifies it below, and O_NOFOLLOW in
+// readBoundedRegularFile refuses it at the kernel even if the path is swapped
+// after that classification.
+//
+// Why support symlinked parents: a symlinked parent redirects the whole project
+// tree, not one authority-capable file, and it is ordinary infrastructure —
+// macOS /tmp is a symlink to /private/tmp, and git worktrees, container mounts,
+// and home-directory relocations all produce them. Rejecting them would break
+// real installs to prevent an attack that a symlinked parent does not enable:
+// anyone who can repoint the parent directory can equally rewrite the file in
+// place, and neither makes bytes authoritative — approval binds exact bytes
+// through a separate interactive transition.
+//
+// COMPATIBILITY: this is a behaviour change from pre-Phase-4B, which followed a
+// symlinked slot file. See SECURITY.md.
+
+// The primitive's vocabulary is filesystem-level; slots have their own. Mapped
+// here so exactly one place knows both.
+const SOURCE_ERROR_CODES = Object.freeze({
+  'state-file-symlink': 'slot-not-regular-file',
+  'state-file-not-regular': 'slot-not-regular-file',
+  'state-file-too-large': 'slot-too-large',
+  'state-file-changed': 'slot-changed-during-read',
+});
+
+function slotError(slot, code, detail) {
+  const error = new Error(`${slot} ${detail}`);
+  error.code = code;
+  return error;
+}
+
 // The baseline file carries a generated header that is NOT part of the rendered
 // block; refreshContext strips it before rendering, so trust must bind the
 // stripped body. Exported so the sink and the approval service share this exact
@@ -31,47 +89,57 @@ export function baselineBody(text) {
   return String(text ?? '').replace(/^# Noosphere project baseline\s*/i, '').trim();
 }
 
-// Reads the on-disk bytes for a slot exactly as its sink will use them. Absence
-// is an empty source; malformed input is refused instead of being silently
-// replaced with U+FFFD before the approval and sink paths can disagree.
+// Reads the on-disk bytes for a slot exactly as its sink will use them.
+//
+// `present` distinguishes ABSENT from PRESENT-BUT-EMPTY; a thrown
+// UNUSABLE_SOURCE_CODES error is the third state, PRESENT-BUT-UNUSABLE. Callers
+// that collapse those three lose real information — see refreshContext (which
+// must not restore remote content over a corrupt local file) and printProtocol
+// (which must not answer an absent protocol with zero bytes and exit 0).
 export async function resolveSlotSource(root, slot) {
   const segments = SLOT_FILES[slot];
-  if (!segments) return { bytes: Buffer.alloc(0), text: '' };
+  if (!segments) return { bytes: Buffer.alloc(0), text: '', present: false };
   const file = path.join(root, ...segments);
 
-  // Decide WHAT the path is before opening it. Opening blindly lets a
-  // working-tree writer hand us something that never returns: `mkfifo
-  // .noosphere/instructions.md` makes readFile block forever — no error code is
-  // ever produced, so no amount of error classification helps, and refresh/watch
-  // hang instead of failing. lstat (not stat) so a symlink is judged as a
-  // symlink rather than as its target.
+  // Classification only. lstat (not stat) so a symlink is judged as a symlink
+  // rather than as its target, and so a directory keeps its familiar EISDIR
+  // while every other non-regular object reports as one class. The SECURITY
+  // guarantee is not here — this stat can be stale by the time the file is
+  // opened — it is in readBoundedRegularFile, which judges the descriptor it
+  // actually opened. This exists so the refusal names the shape the owner
+  // planted instead of a generic errno.
   const stats = await lstat(file).catch((error) => {
     if (error.code === 'ENOENT') return null;
     throw error;
   });
-  if (stats === null) return { bytes: Buffer.alloc(0), text: '' };
+  if (stats === null) return { bytes: Buffer.alloc(0), text: '', present: false };
   if (!stats.isFile()) {
-    const error = new Error(`${slot} is not a regular file`);
-    // A directory keeps its familiar code; every other non-regular object
-    // (FIFO, socket, block/char device, symlink) reports as one class.
-    error.code = stats.isDirectory() ? 'EISDIR' : 'slot-not-regular-file';
-    throw error;
+    throw slotError(slot, stats.isDirectory() ? 'EISDIR' : 'slot-not-regular-file', 'is not a regular file');
   }
 
-  const fileBytes = await readFile(file).catch((error) => {
-    if (error.code === 'ENOENT') return Buffer.alloc(0);
-    throw error;
-  });
+  // O_NOFOLLOW + O_NONBLOCK + fstat-after-open + size-bound + bounded read. A
+  // FIFO swapped in after the lstat above opens instead of blocking and is then
+  // refused by type; an oversized (including sparse) file is refused before a
+  // byte is allocated.
+  let fileBytes;
+  try {
+    fileBytes = await readBoundedRegularFile(file, { maxBytes: MAX_SLOT_SOURCE_BYTES });
+  } catch (error) {
+    const mapped = SOURCE_ERROR_CODES[error.code];
+    if (!mapped) throw error;
+    throw slotError(slot, mapped, error.message);
+  }
+  // Raced with a delete between the lstat and the open: genuinely absent now.
+  if (fileBytes === null) return { bytes: Buffer.alloc(0), text: '', present: false };
+
   let fileText;
   try {
     fileText = UTF8.decode(fileBytes);
   } catch {
-    const error = new Error(`${slot} is not valid UTF-8`);
-    error.code = 'slot-invalid-utf8';
-    throw error;
+    throw slotError(slot, 'slot-invalid-utf8', 'is not valid UTF-8');
   }
   const text = slot === 'baseline' ? baselineBody(fileText) : fileText;
-  return { bytes: Buffer.from(text, 'utf8'), text };
+  return { bytes: Buffer.from(text, 'utf8'), text, present: true };
 }
 
 // The failure modes a working-tree writer can force on a slot file: the content
@@ -81,6 +149,8 @@ export async function resolveSlotSource(root, slot) {
 export const UNUSABLE_SOURCE_CODES = new Set([
   'slot-invalid-utf8', // decodes to nothing a sink could render
   'slot-not-regular-file', // FIFO, socket, device, symlink — never opened
+  'slot-too-large', // past MAX_SLOT_SOURCE_BYTES — refused before allocation
+  'slot-changed-during-read', // grew past its own fstat mid-read
   'EISDIR', // a directory planted at the slot path
   'ENOTDIR', // a file planted where a path component must be a directory
   'ELOOP', // symlink loop
@@ -108,7 +178,10 @@ export async function resolveSlotSourceForRead(root, slot) {
     return { ...await resolveSlotSource(root, slot), unusable: false };
   } catch (error) {
     if (UNUSABLE_SOURCE_CODES.has(error.code)) {
-      return { bytes: Buffer.alloc(0), text: '', unusable: true, reason: error.code };
+      // PRESENT, and it stays present: `present: true` is what stops a renderer
+      // reporting "nothing was recorded" and what stops refreshContext pulling
+      // remote content over local owner content that merely became unreadable.
+      return { bytes: Buffer.alloc(0), text: '', present: true, unusable: true, reason: error.code };
     }
     throw error;
   }

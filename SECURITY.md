@@ -135,6 +135,63 @@ verified binding has no manifest for that slot. A symlink, directory, unreadable
 or malformed binding, lookup error, or invalid manifest cannot select legacy
 authority.
 
+### How project files are read
+
+Everything Noosphere reads out of your working tree — the three source slots,
+`.noosphere/journal.md`, `.noosphere/followups.jsonl`, `.noosphere/config.json`,
+`.noosphere/context.md`, adapter files, and the git exclude file — goes through
+one bounded read. That read opens with `O_NOFOLLOW` and `O_NONBLOCK`, checks the
+opened file descriptor (not the path) with `fstat`, refuses anything that is not
+a regular file, refuses anything over its size bound before allocating a byte,
+and never reads more than that bound.
+
+Consequences you can rely on:
+
+- a FIFO, socket, or device at any of those paths fails immediately instead of
+  blocking a refresh, a `watch`, or an approval forever;
+- a huge file — including a sparse one, which costs an attacker nothing to
+  create — is refused on its declared size, so it cannot exhaust memory;
+- a file swapped for a different kind of object between the check and the open
+  cannot change what is read, because the type and size are taken from the
+  descriptor that was actually opened.
+
+**Size bounds.** Source slots (`master-prompt`, `instructions`, `baseline`) are
+bounded at **1 MiB**: they are human-authored markdown that you read in a
+terminal before approving and that every agent then carries in its context, so a
+megabyte is already far past anything usable. Other project files are bounded at
+**8 MiB**, because `journal.md` and `followups.jsonl` grow legitimately over the
+life of a project. Neither bound is configurable — a tunable security bound is a
+downgrade switch.
+
+**Symlink policy (compatibility change).** A slot file that **is** a symlink is
+**rejected**: it is never followed and never opened, and the slot reports as
+present-but-unusable. Before Phase 4B such a symlink was followed. The reason is
+that the slot path is the one thing you are told you are approving; following a
+symlink there would let `.noosphere/master-prompt.md` name bytes anywhere the
+process can read while the displayed source path still said
+`.noosphere/master-prompt.md`.
+
+A slot file reached **through a symlinked parent directory** is **supported** and
+read normally. That case redirects the whole project tree rather than one
+authority-capable file, and it is ordinary infrastructure — macOS `/tmp` is a
+symlink, as are many git worktrees, container mounts, and relocated home
+directories. Anyone able to repoint a parent directory can equally rewrite the
+file in place, and neither makes bytes authoritative: approval binds exact bytes
+through a separate interactive transition.
+
+If you were relying on a symlinked slot file, replace it with a real file (or
+symlink the containing directory instead).
+
+**Present is not absent.** A slot that exists but cannot be read — corrupt UTF-8,
+oversized, a directory, a FIFO, permissions revoked — is reported as
+*present-but-unusable*, never as absent. It is non-authoritative, it does not
+trigger restoration of remote content over your local file, and the shared
+context renders an explicit fail-closed notice (naming the failure class, never
+the file's bytes) instead of claiming you recorded nothing. `noosphere protocol`
+applies the same rule in the other direction: absent, malformed, non-regular, and
+unreadable instructions all exit nonzero with a diagnostic rather than printing
+zero bytes and succeeding.
+
 Accepted residuals:
 
 - **the TTY gate does not prove human presence.** Any adversary who can run

@@ -205,6 +205,76 @@ format-1 and removes it.
 * `approval-service.js` and `slot-sources.js` are not exported and not
   deep-importable; both ship in `npm pack`.
 
+## 5a. Round 4 — the repository-controlled read boundary
+
+Rounds 1–3 hardened the approval boundary and the three authority-capable slot
+paths. Round 4 closes the class those rounds only sampled: **every** file read
+out of a working tree, and the three-state model that has to survive rendering.
+
+**One primitive.** `readBoundedRegularFile` in `@noosphere/secure-fs` is now the
+only read used for repository-controlled paths, in both packages:
+
+| Guarantee | Mechanism |
+|-----------|-----------|
+| cannot block | `O_NONBLOCK` — a FIFO/socket/device opens immediately instead of waiting forever in `open(2)` with no error code |
+| cannot be redirected | `O_NOFOLLOW` — a symlinked final component is refused by the kernel |
+| cannot lie about what it is | `fstat` on the **opened descriptor**, not `lstat` on the path, so the object judged is the object read |
+| cannot exhaust memory | apparent size checked before a byte is allocated, so a sparse file is refused for the cost of one `fstat` |
+| cannot outgrow its bound | at most `maxBytes + 1` bytes are read; growth after the `fstat` is detected (`state-file-changed`), never silently truncated |
+
+Call sites converted: `readFollowupPrompts`, `formatLocalJournal`,
+`fileHasJournalEntries`, `buildWorkspaceSnapshot`'s journal read, `readJson`
+(project config), `printContext`, `storePreparedBaseline`, `ensureLocalExcludes`,
+`upsertManagedBlock`, `removeManagedBlock`, `removeLegacyProjectFiles`,
+`readHandoffSource`, `execImportPlan`, the Ollama session's context and journal
+reads, and the lock/exclude reads in `continuity/csp/storage.js`,
+`continuity/acp/store.js` and `continuity/acp/sync-metadata.js`. No bare
+`readFile` on a repository path remains in `continuity/index.js`.
+
+**Bounds.** Authority-capable slots: 1 MiB (`MAX_SLOT_SOURCE_BYTES`). Other
+repository inputs: 8 MiB (`MAX_REPOSITORY_INPUT_BYTES`), because `journal.md` and
+`followups.jsonl` grow legitimately. Locks: 4 KiB. Neither slot nor repository
+bound is configurable — a tunable security bound is a downgrade switch.
+
+**Degradation policy, explicit.** A classified failure (`slot-invalid-utf8`,
+`slot-not-regular-file`, `slot-too-large`, `slot-changed-during-read`, `EISDIR`,
+`ENOTDIR`, `ELOOP`, `EACCES`, `EPERM`) degrades read-only render paths to *present
+but unusable*. Everything else — `EIO`, `ENOMEM`, any unrecognised code —
+propagates, so a genuine fault never hides behind a silently empty render.
+Write, capture, and approval paths keep the strict refusal.
+
+**Three states, not two.** `resolveSlotSource` now reports `present`, so ABSENT,
+PRESENT-AND-USABLE, and PRESENT-BUT-UNUSABLE stay distinct end to end:
+
+* present-but-unusable is non-authoritative (empty bytes; `isSlotAuthoritative`
+  rejects empty outright);
+* it does **not** select Walrus restoration — otherwise a tree writer could swap
+  the rendered baseline or master prompt for relayer content by corrupting the
+  local file;
+* the shared context renders a fail-closed notice naming the failure class and
+  never a byte of the file, instead of "No master prompt has been recorded";
+* `noosphere protocol` applies the same model in the other direction: absent,
+  malformed, non-regular, and unreadable instructions share one strict contract
+  — nonzero exit plus a diagnostic. (Absence had regressed to zero bytes and exit
+  0 when Phase 4B routed it through the slot resolver; present-but-empty keeps
+  the pre-4B zero-bytes/exit-0 behaviour, because an empty file is a readable
+  file.)
+
+**Symlink policy — Option B, deliberately.** A slot file that *is* a symlink is
+rejected; a slot file reached *through* a symlinked parent directory is
+supported. Rationale, compatibility note, and the migration instruction are in
+SECURITY.md.
+
+**Residual.** On Windows `O_NOFOLLOW`/`O_NONBLOCK` do not exist, so the no-follow
+guarantee degrades to a pre-open `lstat` with a small TOCTOU window. Maximum
+impact: reading content the tree writer redirected to. It cannot make that
+content authoritative (approval binds exact bytes through a separate interactive
+transition) and it cannot exceed the size bound, which is enforced on the opened
+descriptor. POSIX has no such window.
+
+`tests/slot-source-safety.test.js` and
+`noosphere-secure-fs/tests/bounded-read.test.js` (both new) pin all of the above.
+
 ## 6. Verification gates before PR
 
 1. Focused SEC-05 + secure-fs suites green on macOS locally, then Linux + macOS +

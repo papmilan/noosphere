@@ -7,6 +7,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
+// O_NONBLOCK is what makes opening an unknown filesystem object safe. O_NOFOLLOW
+// only refuses a symlinked final component; a FIFO opened O_RDONLY blocks in
+// open(2) until a writer appears, which is indefinite and produces no error code
+// — no amount of error classification recovers from it. With O_NONBLOCK the open
+// returns immediately and fstat then decides what was actually opened.
+const NONBLOCK = fs.constants.O_NONBLOCK || 0;
 const WINDOWS_SCRIPT = fileURLToPath(new URL('./windows-owner-only.ps1', import.meta.url));
 
 export class PathBoundaryError extends Error {
@@ -435,6 +441,137 @@ function readNoFollowSync(file) {
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
+}
+
+// THE safe read for a file whose content, type, and size are controlled by
+// something other than this process — a working tree, a git checkout, another
+// tool. Every such read in the product funnels through here so the guarantees
+// are one implementation rather than one-per-call-site:
+//
+//   O_NOFOLLOW   the final component is never followed; a symlinked target is
+//                refused at the kernel, not after a racy lstat.
+//   O_NONBLOCK   a FIFO, socket, or slow device opens immediately instead of
+//                blocking forever with no error code to classify.
+//   fstat(fd)    the object is judged AFTER it is opened, so a path swapped
+//                between the decision and the open cannot change what is read.
+//   size check   an oversized file is refused before a byte is allocated, so a
+//                sparse 8 GiB file costs one fstat, not 8 GiB of memory.
+//   bounded read at most maxBytes + 1 bytes are ever read, so growth after the
+//                fstat is detected rather than silently truncated.
+//
+// Returns a Buffer, or null when the file does not exist. Callers map the
+// PathBoundaryError codes onto their own vocabulary.
+//
+// Residual, Windows only: O_NOFOLLOW and O_NONBLOCK do not exist there, so the
+// no-follow guarantee degrades to a pre-open lstat and keeps a small TOCTOU
+// window between that lstat and the open. Maximum impact is reading the content
+// of a file the tree writer redirected to — it cannot make that content
+// authoritative (authority is bound to exact approved bytes, and approval is a
+// separate interactive transition), and it cannot exceed the size bound, which
+// is enforced on the opened descriptor. POSIX has no such window.
+export async function readBoundedRegularFile(file, { maxBytes } = {}) {
+  const limit = boundedReadLimit(maxBytes);
+  const absolute = path.resolve(file);
+  if (process.platform === 'win32' && (await assertFinalNotReparse(absolute)) === null) return null;
+  let handle;
+  try {
+    handle = await open(absolute, fs.constants.O_RDONLY | NOFOLLOW | NONBLOCK);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw boundedOpenError(error, absolute);
+  }
+  try {
+    return await readWithinBound(await handle.stat(), handle, absolute, limit);
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+export function readBoundedRegularFileSync(file, { maxBytes } = {}) {
+  const limit = boundedReadLimit(maxBytes);
+  const absolute = path.resolve(file);
+  if (process.platform === 'win32' && assertFinalNotReparseSync(absolute) === null) return null;
+  let fd;
+  try {
+    fd = fs.openSync(absolute, fs.constants.O_RDONLY | NOFOLLOW | NONBLOCK);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw boundedOpenError(error, absolute);
+  }
+  try {
+    const info = fs.fstatSync(fd);
+    assertBoundedRegular(info, absolute, limit);
+    const bytes = Buffer.allocUnsafe(Math.min(info.size, limit) + 1);
+    let read = 0;
+    let chunk = 0;
+    do {
+      chunk = fs.readSync(fd, bytes, read, bytes.length - read, read);
+      read += chunk;
+    } while (chunk > 0 && read < bytes.length);
+    return finishBoundedRead(bytes, read, info, absolute, limit);
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
+function boundedReadLimit(maxBytes) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new PathBoundaryError('state-read-bound-invalid', 'a bounded read requires a non-negative integer maxBytes');
+  }
+  return maxBytes;
+}
+
+// ELOOP is what O_NOFOLLOW reports for a symlinked final component (and what the
+// kernel reports for a symlink loop in a path component). ENXIO is a FIFO opened
+// O_NONBLOCK with nothing on the other end — a non-regular object either way.
+// Everything else propagates unchanged: an unrecognised errno is a real fault and
+// must stay visible rather than be folded into a friendly refusal.
+function boundedOpenError(error, file) {
+  if (error.code === 'ELOOP') return new PathBoundaryError('state-file-symlink', `refusing symlinked file: ${file}`, error);
+  if (error.code === 'ENXIO') return new PathBoundaryError('state-file-not-regular', `refusing non-regular file: ${file}`, error);
+  return error;
+}
+
+function assertBoundedRegular(info, file, limit) {
+  if (info.isDirectory()) {
+    const error = new Error(`EISDIR: illegal operation on a directory, read ${file}`);
+    error.code = 'EISDIR';
+    throw error;
+  }
+  if (!info.isFile()) {
+    throw new PathBoundaryError('state-file-not-regular', `refusing non-regular file: ${file}`);
+  }
+  // Apparent size, checked before a single byte is allocated: a sparse file
+  // reports its full logical length here, so an 8 GiB hole is refused for the
+  // cost of one fstat.
+  if (info.size > limit) {
+    throw new PathBoundaryError('state-file-too-large', `file exceeds the ${limit}-byte read bound: ${file}`);
+  }
+}
+
+function finishBoundedRead(bytes, read, info, file, limit) {
+  const cap = Math.min(info.size, limit);
+  if (read > cap) {
+    throw new PathBoundaryError(
+      cap >= limit ? 'state-file-too-large' : 'state-file-changed',
+      cap >= limit
+        ? `file exceeds the ${limit}-byte read bound: ${file}`
+        : `file grew while it was being read: ${file}`,
+    );
+  }
+  return bytes.subarray(0, read);
+}
+
+async function readWithinBound(info, handle, file, limit) {
+  assertBoundedRegular(info, file, limit);
+  const bytes = Buffer.allocUnsafe(Math.min(info.size, limit) + 1);
+  let read = 0;
+  let chunk = 0;
+  do {
+    ({ bytesRead: chunk } = await handle.read(bytes, read, bytes.length - read, read));
+    read += chunk;
+  } while (chunk > 0 && read < bytes.length);
+  return finishBoundedRead(bytes, read, info, file, limit);
 }
 
 export function secureOwnerOnlyWindows(file, options = {}) {
