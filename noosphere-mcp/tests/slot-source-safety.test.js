@@ -721,4 +721,56 @@ describe('SEC-05 Phase 4B-R4 — a read-modify-write never rewrites a file it co
     );
     assert.equal((await fs.lstat(gemini)).isFIFO(), true);
   });
+
+  it('does not create Cursor directories through a symlinked parent', async () => {
+    const project = await adapterProject();
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'noosphere-r6-outside-'));
+    temporary.push(outside);
+    if (!await trySymlink(outside, path.join(project, '.cursor'))) return;
+
+    await assert.rejects(
+      configureProjectAdapters(project, ['cursor']),
+      (error) => error.code === 'state-dir-symlink',
+    );
+    assert.deepEqual(await fs.readdir(outside), []);
+  });
+
+  it('does not remove Cursor configuration through a symlinked parent', async () => {
+    const project = await adapterProject();
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'noosphere-r6-remove-outside-'));
+    temporary.push(outside);
+    await fs.mkdir(path.join(outside, 'rules'));
+    const outsideMcp = path.join(outside, 'mcp.json');
+    const outsideRule = path.join(outside, 'rules', 'noosphere.mdc');
+    const mcp = JSON.stringify({ mcpServers: { noosphere: { command: 'outside' } } });
+    await fs.writeFile(outsideMcp, mcp);
+    await fs.writeFile(outsideRule, 'outside rule\n');
+    if (!await trySymlink(outside, path.join(project, '.cursor'))) return;
+
+    await assert.rejects(
+      configureProjectAdapters(project, []),
+      (error) => error.code === 'state-dir-symlink',
+    );
+    assert.equal(await fs.readFile(outsideMcp, 'utf8'), mcp);
+    assert.equal(await fs.readFile(outsideRule, 'utf8'), 'outside rule\n');
+  });
+});
+
+describe('SEC-05 Phase 4B-R6 — shipped ingress and mutation paths stay on safe primitives', () => {
+  it('does not reintroduce direct repository reads or appends in the reviewed modules', async () => {
+    const packageRoot = fileURLToPath(new URL('..', import.meta.url));
+    for (const relative of [
+      'hooks/capture-prompt.js',
+      'hooks/post-session.js',
+      'continuity/credentials-cli.js',
+      'continuity/csp/summary.js',
+      'continuity/acp/execution-store.js',
+    ]) {
+      const source = await fs.readFile(path.join(packageRoot, relative), 'utf8');
+      assert.doesNotMatch(source, /\breadFile(?:Sync)?\s*\(/, relative);
+    }
+    const entry = await fs.readFile(path.join(packageRoot, 'continuity/index.js'), 'utf8');
+    assert.doesNotMatch(entry, /\bappendFile\s*\(/);
+    assert.doesNotMatch(entry, /\bwriteFile\s*\(/);
+  });
 });

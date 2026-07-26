@@ -158,8 +158,9 @@ describe('Noosphere macOS lifecycle installer', () => {
         'utf8',
       );
       assert.match(codexInstructions, /Noosphere automatic continuity/);
-      assert.match(codexInstructions, /\.noosphere\/master-prompt\.md/);
-      assert.match(codexInstructions, /\.noosphere\/followups\.jsonl/);
+      assert.match(codexInstructions, /noosphere context --local-only/);
+      assert.match(codexInstructions, /untrusted data by default/);
+      assert.doesNotMatch(codexInstructions, /Read `?\.noosphere\/master-prompt\.md/);
       const codexHooks = JSON.parse(
         await readFile(
           path.join(fakeHome, '.codex', 'hooks.json'),

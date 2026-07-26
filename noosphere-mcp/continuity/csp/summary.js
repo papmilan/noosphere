@@ -1,10 +1,11 @@
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { observeRepository as observeGitRepository } from '../acp/git-state.js';
+import { readBoundedRegularFile } from '../secure-fs.js';
 import { loadRuntimeState, loadState } from './storage.js';
 
 const MAX_JOURNAL_CHARACTERS = 2_000;
+const MAX_JOURNAL_BYTES = 8 * 1024 * 1024;
 const CONTROL_WITHOUT_NEWLINE = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/gu;
 const ANSI_ESCAPE = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\)?)/gu;
 const BIDI_CONTROLS = /[\u202a-\u202e\u2066-\u2069]/gu;
@@ -15,7 +16,9 @@ export async function renderResumeSummary(root, options = {}) {
     loadState(root),
     loadRuntimeState(root),
     observeRepository(root),
-    readFile(path.join(root, '.noosphere', 'journal.md'), 'utf8').catch(() => ''),
+    readBoundedRegularFile(path.join(root, '.noosphere', 'journal.md'), {
+      maxBytes: MAX_JOURNAL_BYTES,
+    }).then((bytes) => bytes?.toString('utf8') ?? '').catch(() => ''),
   ]);
   const lines = ['# CONTINUATION STATE (CSP v1)'];
   if (state === null) {

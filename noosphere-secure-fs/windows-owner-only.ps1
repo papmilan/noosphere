@@ -1,10 +1,13 @@
 param(
   [Parameter(Mandatory = $true, Position = 0)]
-  [ValidateSet('write', 'read', 'repair', 'verify', 'sid')]
+  [ValidateSet('write', 'read', 'repair', 'verify', 'sid', 'copy-acl')]
   [string]$Action,
 
   [Parameter(Mandatory = $false, Position = 1)]
-  [string]$LiteralPath
+  [string]$LiteralPath,
+
+  [Parameter(Mandatory = $false, Position = 2)]
+  [string]$SourcePath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -110,6 +113,22 @@ if ([string]::IsNullOrWhiteSpace($LiteralPath)) {
 
 $stream = $null
 try {
+  if ($Action -eq 'copy-acl') {
+    if ([string]::IsNullOrWhiteSpace($SourcePath)) {
+      Fail 'state-acl-copy-failed' 'a source file path is required'
+    }
+    try {
+      $security = [System.IO.File]::GetAccessControl(
+        $SourcePath,
+        [System.Security.AccessControl.AccessControlSections]::Access
+      )
+      [System.IO.File]::SetAccessControl($LiteralPath, $security)
+      exit 0
+    } catch {
+      Fail 'state-acl-copy-failed' $_.Exception.Message
+    }
+  }
+
   if ($Action -eq 'write') {
     try {
       $stream = [System.IO.FileStream]::new(
