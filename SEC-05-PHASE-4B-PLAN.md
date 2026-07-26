@@ -269,12 +269,21 @@ rejected; a slot file reached *through* a symlinked parent directory is
 supported. Rationale, compatibility note, and the migration instruction are in
 SECURITY.md.
 
-**Residual.** On Windows `O_NOFOLLOW`/`O_NONBLOCK` do not exist, so the no-follow
-guarantee degrades to a pre-open `lstat` with a small TOCTOU window. Maximum
-impact: reading content the tree writer redirected to. It cannot make that
-content authoritative (approval binds exact bytes through a separate interactive
-transition) and it cannot exceed the size bound, which is enforced on the opened
-descriptor. POSIX has no such window.
+**Residual, stated precisely.** On Windows `O_NOFOLLOW`/`O_NONBLOCK` do not
+exist, so the no-follow decision is made by a pre-open `lstat` and then narrowed
+by a post-open re-check: the path is `lstat`ed again and its identity (`dev`,
+`ino`) compared with the opened descriptor's, so a symlink swapped in after the
+first check is still detected. Winning therefore requires two correctly timed
+operations — swap in, swap back out — inside one microsecond-scale window.
+
+Maximum impact if that race is won: this process reads the bytes at the
+symlink's target instead of the file's. It cannot make those bytes authoritative
+(approval binds exact bytes through a separate interactive transition, and
+unapproved bytes render as quoted data), it cannot exceed the size bound (taken
+from the descriptor), and it grants no read the attacker lacks — the same
+identity that plants the symlink can write the target's bytes into the file
+directly, with no race at all. POSIX has no window: `O_NOFOLLOW` refuses inside
+`open(2)`.
 
 `tests/slot-source-safety.test.js` and
 `noosphere-secure-fs/tests/bounded-read.test.js` (both new) pin all of the above.

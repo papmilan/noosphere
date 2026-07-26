@@ -155,6 +155,18 @@ Consequences you can rely on:
   cannot change what is read, because the type and size are taken from the
   descriptor that was actually opened.
 
+On Windows neither `O_NOFOLLOW` nor `O_NONBLOCK` exists, so the no-follow
+decision is made by an `lstat` before the open and re-checked against the opened
+descriptor's identity afterwards. A residual race remains there, and its maximum
+impact is this: an attacker who can already write into your project tree, and who
+swaps a symlink in and back out inside one microsecond-scale window, makes this
+process read the bytes at the symlink's target instead of the file's. It cannot
+make those bytes authoritative (approval binds exact bytes through a separate
+interactive transition, and unapproved bytes render as quoted data), it cannot
+exceed the size bound, and it grants no read that attacker did not already have —
+the same identity could write those bytes into the file directly, with no race.
+POSIX has no such window.
+
 **Size bounds.** Source slots (`master-prompt`, `instructions`, `baseline`) are
 bounded at **1 MiB**: they are human-authored markdown that you read in a
 terminal before approving and that every agent then carries in its context, so a

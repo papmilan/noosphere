@@ -488,7 +488,12 @@ export async function readBoundedRegularFile(file, { maxBytes } = {}) {
     throw boundedOpenError(error, absolute);
   }
   try {
-    return await readWithinBound(await handle.stat(), handle, absolute, limit);
+    const info = await handle.stat();
+    if (process.platform === 'win32') {
+      const after = await lstat(absolute).catch(() => null);
+      assertWindowsIdentityUnchanged(info, after, absolute);
+    }
+    return await readWithinBound(info, handle, absolute, limit);
   } finally {
     await handle.close().catch(() => undefined);
   }
@@ -516,6 +521,11 @@ export function readBoundedRegularFileSync(file, { maxBytes } = {}) {
   }
   try {
     const info = fs.fstatSync(fd);
+    if (process.platform === 'win32') {
+      let after = null;
+      try { after = fs.lstatSync(absolute); } catch { after = null; }
+      assertWindowsIdentityUnchanged(info, after, absolute);
+    }
     assertBoundedRegular(info, absolute, limit);
     const bytes = Buffer.allocUnsafe(Math.min(info.size, limit) + 1);
     let read = 0;
@@ -561,6 +571,39 @@ function windowsPreOpen(info, file, limit) {
   }
   assertBoundedRegular(info, file, limit);
   return info;
+}
+
+// Windows-only, and a narrowing rather than a fix.
+//
+// Without O_NOFOLLOW the no-follow decision has to be made by the pre-open
+// lstat, which leaves a window: swap a symlink in after that lstat and the open
+// follows it, and the post-open fstat then describes the TARGET, so it cannot
+// notice. Re-examining the path after the open closes most of that window — the
+// symlink is still there, so lstat reports it, and its identity does not match
+// the descriptor's.
+//
+// Maximum residual, stated precisely: an attacker who can write into the project
+// tree, and who swaps a symlink in after the pre-open lstat AND removes it again
+// before this post-open lstat — two correctly timed operations inside one
+// microsecond-scale window — causes this process to read the bytes at the
+// symlink's target instead of the file's. That is the whole of the impact:
+//   - it cannot make those bytes authoritative. Authority is bound to exact
+//     approved bytes through a separate interactive transition, and bytes that
+//     were not approved hash differently and render as quoted data;
+//   - it cannot exceed the size bound, which is taken from the descriptor;
+//   - it grants no read the attacker does not already have. The same identity
+//     that plants the symlink can write the target's bytes straight into the
+//     file, which needs no race at all.
+// POSIX has no window: O_NOFOLLOW refuses inside open(2).
+function assertWindowsIdentityUnchanged(info, after, file) {
+  if (after === null || after.isSymbolicLink()) {
+    throw new PathBoundaryError('state-file-symlink', `refusing symlinked file: ${file}`);
+  }
+  // NTFS supplies a file index and volume id; some filesystems report 0, in
+  // which case the symlink check above is the only available signal.
+  if (info.ino && after.ino && (info.ino !== after.ino || info.dev !== after.dev)) {
+    throw new PathBoundaryError('state-file-changed', `file identity changed while it was being opened: ${file}`);
+  }
 }
 
 function assertBoundedRegular(info, file, limit) {
