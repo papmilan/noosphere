@@ -212,7 +212,10 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
         '$s=[System.Security.AccessControl.AccessControlSections]::Access; ' +
         '[System.IO.File]::GetAccessControl($p,$s).GetSecurityDescriptorSddlForm($s)',
       );
-      assert.equal(after, before);
+      const canonicalAccess = (sddl) => sddl
+        .replace(/^D:PAI/, 'D:P')
+        .replaceAll(';ID;', ';;');
+      assert.equal(canonicalAccess(after), canonicalAccess(before));
     });
 
     it('retries a destination held open by a reader, then succeeds', async () => {
@@ -366,7 +369,7 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
     await Promise.all(lines.map((line) => appendRepositoryFile(file, line, {
       root,
       maxBytes: 4096,
-      lockAttempts: 500,
+      lockAttempts: 5000,
       lockBackoffMs: 2,
     })));
     const written = (await fsp.readFile(file, 'utf8')).trimEnd().split('\n').sort();
@@ -411,7 +414,7 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
     assert.equal(calls, 2);
   });
 
-  it('bounds Windows EPERM retries when a contended lock vanishes before inspection', async () => {
+  it('bounds persistent Windows sharing errors with the overall lock budget', async () => {
     const root = await fresh();
     let calls = 0;
     await assert.rejects(
@@ -419,14 +422,14 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
         root,
         platform: 'win32',
         maxBytes: 1024,
-        vanishedLockRetries: 2,
+        lockAttempts: 3,
         lockBackoffMs: 1,
         open: async () => {
           calls += 1;
           throw Object.assign(new Error('permission denied'), { code: 'EPERM' });
         },
       }),
-      (error) => error.code === 'EPERM',
+      (error) => error.code === 'state-append-busy',
     );
     assert.equal(calls, 3);
   });

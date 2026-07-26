@@ -723,7 +723,6 @@ export async function appendRepositoryFile(file, data, options = {}) {
   let lockHandle;
   let ownsLock = false;
   const maxAttempts = options.lockAttempts ?? 100;
-  const vanishedLockRetries = Math.min(options.vanishedLockRetries ?? 5, maxAttempts);
   try {
     for (let attempt = 1; ; attempt += 1) {
       try {
@@ -738,7 +737,7 @@ export async function appendRepositoryFile(file, data, options = {}) {
         let contention = error.code === 'EEXIST';
         if (platform === 'win32' && ['EPERM', 'EACCES'].includes(error.code)) {
           const lockInfo = await assertFinalNotReparse(lock);
-          contention = lockInfo !== null || attempt <= vanishedLockRetries;
+          contention = lockInfo === null || lockInfo.isFile();
         }
         if (!contention || attempt >= maxAttempts) {
           if (contention) {
