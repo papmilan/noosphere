@@ -537,16 +537,31 @@ describe('SEC-05 Phase 4B — the TTY gate is documented as non-presence-proving
   // Discovered, not hard-coded: a new document repeating the claim must be
   // corrected too, and pinning one filename is how the plan doc kept the
   // retracted wording after SECURITY.md was fixed.
+  //
+  // The scan starts at the REPOSITORY ROOT, because the assertion below is
+  // repository-wide. Visiting a fixed list of roots would let a stale claim
+  // survive in any package this list did not happen to name — which is the same
+  // failure the discovery was introduced to prevent, one level up. `tty` is
+  // matched case-insensitively for the same reason: prose writes it lowercase.
+  // This file is the checker, not a claim. It necessarily contains every
+  // retracted pattern as a regex literal, so scanning it would make the
+  // assertion self-defeating the moment the scan reached the whole repository.
+  const SELF = path.relative(REPO_ROOT, fileURLToPath(import.meta.url));
+
   async function documentsMentioningTheGate() {
-    const roots = ['SECURITY.md', 'README.md', 'SEC-05-PHASE-4B-PLAN.md', 'docs', 'noosphere-mcp/continuity'];
     const found = [];
     async function walk(relative) {
+      if (path.normalize(relative) === path.normalize(SELF)) return;
       const absolute = path.join(REPO_ROOT, relative);
       const stats = await fs.lstat(absolute).catch(() => null);
       if (!stats) return;
       if (stats.isDirectory()) {
         for (const entry of await fs.readdir(absolute)) {
-          if (entry === 'node_modules' || entry.startsWith('.')) continue;
+          // Dependencies and build output are not ours to make claims in;
+          // dotted entries skip .git and any sibling worktree checkout, whose
+          // copies would otherwise be scanned as if they were this tree.
+          if (['node_modules', 'dist', 'build', 'coverage'].includes(entry)) continue;
+          if (entry.startsWith('.')) continue;
           await walk(path.join(relative, entry));
         }
         return;
@@ -554,9 +569,9 @@ describe('SEC-05 Phase 4B — the TTY gate is documented as non-presence-proving
       if (!/\.(md|js)$/.test(relative)) return;
       const text = await fs.readFile(absolute, 'utf8');
       // Only files that actually make a claim about the TTY gate.
-      if (/TTY/.test(text) && /(approve|approval)/i.test(text)) found.push({ relative, text });
+      if (/tty/i.test(text) && /(approve|approval)/i.test(text)) found.push({ relative, text });
     }
-    for (const root of roots) await walk(root);
+    await walk('.');
     return found;
   }
 
