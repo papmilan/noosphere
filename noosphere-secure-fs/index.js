@@ -472,7 +472,14 @@ function readNoFollowSync(file) {
 export async function readBoundedRegularFile(file, { maxBytes } = {}) {
   const limit = boundedReadLimit(maxBytes);
   const absolute = path.resolve(file);
-  if (process.platform === 'win32' && (await assertFinalNotReparse(absolute)) === null) return null;
+  if (process.platform === 'win32') {
+    const info = await lstat(absolute).catch((error) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (info === null) return null;
+    if (windowsPreOpen(info, absolute, limit) === null) return null;
+  }
   let handle;
   try {
     handle = await open(absolute, fs.constants.O_RDONLY | NOFOLLOW | NONBLOCK);
@@ -490,7 +497,16 @@ export async function readBoundedRegularFile(file, { maxBytes } = {}) {
 export function readBoundedRegularFileSync(file, { maxBytes } = {}) {
   const limit = boundedReadLimit(maxBytes);
   const absolute = path.resolve(file);
-  if (process.platform === 'win32' && assertFinalNotReparseSync(absolute) === null) return null;
+  if (process.platform === 'win32') {
+    let info = null;
+    try {
+      info = fs.lstatSync(absolute);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    if (info === null) return null;
+    windowsPreOpen(info, absolute, limit);
+  }
   let fd;
   try {
     fd = fs.openSync(absolute, fs.constants.O_RDONLY | NOFOLLOW | NONBLOCK);
@@ -530,6 +546,21 @@ function boundedOpenError(error, file) {
   if (error.code === 'ELOOP') return new PathBoundaryError('state-file-symlink', `refusing symlinked file: ${file}`, error);
   if (error.code === 'ENXIO') return new PathBoundaryError('state-file-not-regular', `refusing non-regular file: ${file}`, error);
   return error;
+}
+
+// Windows has no O_NOFOLLOW and no O_NONBLOCK (`fs.constants` reports both as
+// 0), so the no-follow decision has to be made before the open, from an lstat.
+// It classifies with the SAME vocabulary the POSIX path produces from fstat —
+// state-file-symlink, EISDIR, state-file-not-regular, state-file-too-large — so
+// a caller's error handling does not have to branch on platform. The size and
+// type are re-checked on the opened descriptor afterwards; only the symlink
+// decision is left with a TOCTOU window here, which is the documented residual.
+function windowsPreOpen(info, file, limit) {
+  if (info.isSymbolicLink()) {
+    throw new PathBoundaryError('state-file-symlink', `refusing symlinked file: ${file}`);
+  }
+  assertBoundedRegular(info, file, limit);
+  return info;
 }
 
 function assertBoundedRegular(info, file, limit) {
