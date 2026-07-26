@@ -741,7 +741,7 @@ export async function appendRepositoryFile(file, data, options = {}) {
         }
         if (!contention || attempt >= maxAttempts) {
           if (contention) {
-            throw new PathBoundaryError('state-append-busy', `append lock remained busy: ${resolved.file}`, error);
+            throw new PathBoundaryError('state-append-busy', `append lock remained busy: ${lock}`, error);
           }
           throw error;
         }
@@ -776,7 +776,12 @@ export async function removeRepositoryFile(file, options = {}) {
   if (parent === null) return false;
   const current = await assertFinalNotReparse(resolved.file);
   if (current === null) return false;
-  await rm(resolved.file, { force: false });
+  try {
+    await (options.rm ?? rm)(resolved.file, { force: false });
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
   return true;
 }
 

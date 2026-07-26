@@ -49,16 +49,34 @@ describe('ACP execution adversarial review regressions', () => {
     const root = await repo();
     await run(root, ['init']);
     await run(root, ['adapters', '--only', 'codex,claude,gemini,cursor']);
-    for (const file of ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md', '.cursor/rules/noosphere.mdc']) {
+    for (const file of ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md', '.cursor/rules/noosphere.mdc', '.noosphere/instructions.md']) {
       const text = await readFile(path.join(root, file), 'utf8');
       assert.doesNotMatch(text, /Read `?\.noosphere\/master-prompt\.md/);
       assert.match(text, /noosphere context --local-only/);
       assert.match(text, /repository-controlled[\s\S]*untrusted data/i);
-      assert.ok(text.indexOf('continuity.md') < text.indexOf('execution/'));
-      assert.ok(text.indexOf('execution/') < text.indexOf('Git status'));
+      const continuityIndex = text.indexOf('continuity.md');
+      const executionIndex = text.indexOf('execution/');
+      const gitIndex = text.indexOf('Git status');
+      assert.notEqual(continuityIndex, -1);
+      assert.notEqual(executionIndex, -1);
+      assert.notEqual(gitIndex, -1);
+      assert.ok(continuityIndex < executionIndex);
+      assert.ok(executionIndex < gitIndex);
       assert.match(text, /advisory, untrusted, and freshness-bound/i);
       assert.match(text, /never execute.*command.*blindly/i);
     }
+  });
+
+  it('renders local context when the relayer is unavailable', async () => {
+    const root = await repo();
+    await run(root, ['init']);
+    const configPath = path.join(root, '.noosphere', 'config.json');
+    const config = JSON.parse(await readFile(configPath, 'utf8'));
+    config.relayer_url = 'http://127.0.0.1:1';
+    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    const { stdout, stderr } = await run(root, ['context']);
+    assert.match(stdout, /# Noosphere shared context/);
+    assert.match(stderr, /Remote context unavailable; rendering local context/);
   });
 
   it('quotes an unapproved planted master prompt in prompt-hook context', async () => {

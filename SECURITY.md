@@ -218,10 +218,11 @@ a file, edit it, and write it back would then persist that emptiness — losing
 whatever you had written. Renaming is atomic: a reader sees either the whole old
 file or the whole new one.
 
-The same rule as the slot files applies to the target: if it is a symlink or not
-a regular file, the write is **refused** rather than redirected, because renaming
-over a symlink would silently replace the link itself. Replace a symlinked
-project file with a real file if you were relying on one.
+If a write target is a symlink or not a regular file, the write is **refused**
+rather than redirected, because renaming over a symlink would silently replace
+the link itself. Unlike bounded reads, repository-managed writes and removals
+also refuse symlinked parent directories. Replace a symlinked project file or
+parent directory with a real path if you were relying on one for mutation.
 
 When the caller supplies a project root, every descendant directory is checked
 and a symlinked parent is refused before creating the temporary file. Existing

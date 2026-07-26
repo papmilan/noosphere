@@ -429,9 +429,23 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
           throw Object.assign(new Error('permission denied'), { code: 'EPERM' });
         },
       }),
-      (error) => error.code === 'state-append-busy',
+      (error) => error.code === 'state-append-busy'
+        && error.message.includes(`${path.join(root, 'journal.md')}.append.lock`),
     );
     assert.equal(calls, 3);
+  });
+
+  it('treats disappearance during repository-file removal as already removed', async () => {
+    const root = await fresh();
+    const file = path.join(root, 'adapter.md');
+    await fsp.writeFile(file, 'managed\n');
+    assert.equal(await removeRepositoryFile(file, {
+      root,
+      rm: async () => {
+        await fsp.rm(file);
+        throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+      },
+    }), false);
   });
 
   it('removes only regular files and real empty directories under the repository root', async () => {

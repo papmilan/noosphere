@@ -222,10 +222,14 @@ describe('Noosphere continuity CLI', () => {
 
     assert.deepEqual(config.adapters, []);
     assert.match(protocol, /universal agent protocol/i);
+    assert.match(protocol, /noosphere context --local-only/);
+    assert.doesNotMatch(protocol, /Read `?\.noosphere\/master-prompt\.md/);
     assert.match(protocol, /\.noosphere\/state\.json/);
-    assert.ok(
-      protocol.indexOf('.noosphere/state.json') < protocol.indexOf('Inspect the current working tree'),
-    );
+    const stateIndex = protocol.indexOf('.noosphere/state.json');
+    const workingTreeIndex = protocol.indexOf('Observe Git status');
+    assert.notEqual(stateIndex, -1);
+    assert.notEqual(workingTreeIndex, -1);
+    assert.ok(stateIndex < workingTreeIndex);
     assert.match(protocol, /Do not reveal or request hidden chain-of-thought/);
     assert.match(protocolJson, /"filesystem"/);
     assert.match(protocolJson, /"http"/);
