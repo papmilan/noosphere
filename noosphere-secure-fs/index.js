@@ -733,14 +733,13 @@ export async function appendRepositoryFile(file, data, options = {}) {
         ownsLock = true;
         break;
       } catch (error) {
-        const possibleContention = error.code === 'EEXIST'
-          || (platform === 'win32' && ['EPERM', 'EACCES'].includes(error.code));
-        if (possibleContention) {
+        let contention = error.code === 'EEXIST';
+        if (platform === 'win32' && ['EPERM', 'EACCES'].includes(error.code)) {
           const lockInfo = await assertFinalNotReparse(lock);
-          if (lockInfo === null) continue;
+          contention = lockInfo !== null;
         }
-        if (!possibleContention || attempt >= (options.lockAttempts ?? 100)) {
-          if (possibleContention) {
+        if (!contention || attempt >= (options.lockAttempts ?? 100)) {
+          if (contention) {
             throw new PathBoundaryError('state-append-busy', `append lock remained busy: ${resolved.file}`, error);
           }
           throw error;
