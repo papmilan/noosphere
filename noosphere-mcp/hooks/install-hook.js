@@ -12,7 +12,7 @@ import {
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -42,8 +42,8 @@ const promptEntry = {
 
 async function main() {
   await mkdir(hookDir, { recursive: true, mode: 0o700 });
-  await copyFile(path.join(here, 'post-session.js'), sessionHookPath);
-  await copyFile(path.join(here, 'capture-prompt.js'), promptHookPath);
+  await writeHookLauncher(sessionHookPath, path.join(here, 'post-session.js'));
+  await writeHookLauncher(promptHookPath, path.join(here, 'capture-prompt.js'));
   await chmod(sessionHookPath, 0o700);
   await chmod(promptHookPath, 0o700);
 
@@ -97,6 +97,14 @@ async function main() {
   }
   process.stdout.write(
     'Run noosphere activate inside each project you want to track.\n',
+  );
+}
+
+async function writeHookLauncher(destination, source) {
+  await writeFile(
+    destination,
+    `#!/usr/bin/env node\nimport ${JSON.stringify(pathToFileURL(source).href)};\n`,
+    { mode: 0o700 },
   );
 }
 

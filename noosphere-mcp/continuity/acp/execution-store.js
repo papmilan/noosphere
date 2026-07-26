@@ -2,13 +2,19 @@
 // layer never chooses an agent from a pathname, and a short exclusive lock
 // prevents two writers from silently replacing one another's checkpoint.
 
-import { createHash, randomUUID } from 'node:crypto';
-import { open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { open, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalize } from '@noosphere/acp-protocol';
 import { createExecutionState } from './execution-state.js';
 import { renderExecutionKernel } from './execution-render.js';
-import { ensureContainedDir, readOwnerOnlyFile, writeOwnerOnlyFileExclusive } from '../secure-fs.js';
+import {
+  ensureContainedDir,
+  atomicOwnerOnlyWrite,
+  readBoundedRegularFile,
+  readOwnerOnlyFile,
+  removeRepositoryFile,
+} from '../secure-fs.js';
 
 const DEFAULT_AGENT_ID = 'default';
 const AGENT_ID = /^[a-z0-9](?:[a-z0-9-]{0,62})?$/;
@@ -89,18 +95,16 @@ export async function writeExecutionState(root, envelope, options = {}) {
     const kernel = renderExecutionKernel({ envelope: sealed }, {
       verdict, now: options.now ?? new Date().toISOString(), contention: options.contention ?? [],
     });
-    const token = randomUUID();
-    const jsonTmp = `${paths.json}.${token}.tmp`;
-    const mdTmp = `${paths.markdown}.${token}.tmp`;
-    try {
-      await writeOwnerOnlyFileExclusive(jsonTmp, `${JSON.stringify(sealed, null, 2)}\n`, secureOptions(root, options));
-      await writeOwnerOnlyFileExclusive(mdTmp, `${kernel}\n`, secureOptions(root, options));
-      await (options.rename ?? rename)(jsonTmp, paths.json);
-      await (options.rename ?? rename)(mdTmp, paths.markdown);
-    } finally {
-      await rm(jsonTmp, { force: true }).catch(() => {});
-      await rm(mdTmp, { force: true }).catch(() => {});
-    }
+    await atomicOwnerOnlyWrite(
+      paths.json,
+      `${JSON.stringify(sealed, null, 2)}\n`,
+      { ...secureOptions(root, options), rename: options.rename },
+    );
+    await atomicOwnerOnlyWrite(
+      paths.markdown,
+      `${kernel}\n`,
+      { ...secureOptions(root, options), rename: options.rename },
+    );
     return { envelope: sealed, kernel, verdict, agentId, generation };
   });
 }
@@ -109,9 +113,9 @@ export async function clearExecutionState(root, agentId = DEFAULT_AGENT_ID) {
   const paths = executionPaths(root, agentId);
   return withAgentLock(root, paths, async () => {
     const nextGeneration = (await readGeneration(paths.generation)) + 1;
-    await writeFile(paths.generation, `${nextGeneration}\n`, { mode: 0o600 });
-    await rm(paths.json, { force: true });
-    await rm(paths.markdown, { force: true });
+    await atomicOwnerOnlyWrite(paths.generation, `${nextGeneration}\n`, { root });
+    await removeRepositoryFile(paths.json, { root });
+    await removeRepositoryFile(paths.markdown, { root });
     return { agentId: paths.agent, generation: nextGeneration };
   });
 }
@@ -127,7 +131,9 @@ async function withAgentLock(root, paths, action) {
 
 async function readGeneration(file) {
   try {
-    const value = Number((await readFile(file, 'utf8')).trim());
+    const bytes = await readBoundedRegularFile(file, { maxBytes: 64 });
+    if (bytes === null) return 0;
+    const value = Number(bytes.toString('utf8').trim());
     return Number.isSafeInteger(value) && value >= 0 ? value : 0;
   } catch (error) { if (error.code === 'ENOENT') return 0; throw error; }
 }

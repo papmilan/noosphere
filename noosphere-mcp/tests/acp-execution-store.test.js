@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -178,6 +178,32 @@ describe('ACP execution store', () => {
       /checkpoint-cleared/,
     );
     assert.equal(await readExecutionState(fresh, { agentId: 'agent-a' }), null);
+  });
+
+  it('refuses planted execution symlinks instead of mutating their targets', async (t) => {
+    if (process.platform === 'win32') {
+      t.skip('creating file symlinks requires optional Windows privileges');
+      return;
+    }
+    const fresh = await makeRepo();
+    const paths = executionPaths(fresh, 'agent-a');
+    await mkdir(paths.dir, { recursive: true });
+    const outside = path.join(fresh, 'outside.txt');
+    await writeFile(outside, 'outside\n');
+    await symlink(outside, paths.generation);
+    await assert.rejects(clearExecutionState(fresh, 'agent-a'), (error) => error.code === 'state-file-symlink');
+    assert.equal(await readFile(outside, 'utf8'), 'outside\n');
+
+    await rm(paths.generation);
+    await symlink(outside, paths.json);
+    await assert.rejects(
+      writeExecutionState(fresh, envelope(), {
+        agentId: 'agent-a',
+        now: '2026-07-13T10:00:00.000Z',
+      }),
+      (error) => error.code === 'state-file-symlink',
+    );
+    assert.equal(await readFile(outside, 'utf8'), 'outside\n');
   });
 
   it('rejects a concurrent writer for the same canonical agent instead of silently replacing state', async () => {

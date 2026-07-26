@@ -11,6 +11,7 @@ import { noosphereHome } from '../lifecycle/registry.js';
 import { resolveRelayerPath } from '../lifecycle/relayer-source.js';
 import {
   atomicOwnerOnlyWrite,
+  readBoundedRegularFile,
   readOwnerOnlyFile,
   writeOwnerOnlyFileExclusive,
 } from './secure-fs.js';
@@ -517,8 +518,9 @@ async function findEnvironmentFile() {
   ];
   for (const candidate of candidates) {
     try {
-      await readFile(candidate, 'utf8');
-      return candidate;
+      if (await readBoundedRegularFile(candidate, { maxBytes: 1024 * 1024 }) !== null) {
+        return candidate;
+      }
     } catch {
       // Continue to the next conventional location.
     }

@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
-import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -677,20 +677,136 @@ async function readWithinBound(info, handle, file, limit) {
 export async function atomicRepositoryWrite(file, data, options = {}) {
   const absolute = path.resolve(file);
   const directory = path.dirname(absolute);
-  await mkdir(directory, { recursive: true });
+  const platform = options.platform ?? process.platform;
+  if (options.root) {
+    await ensureContainedDir(path.resolve(options.root), directory, {
+      mode: options.directoryMode ?? 0o755,
+    });
+  } else {
+    await mkdir(directory, { recursive: true });
+  }
   await assertFinalNotReparse(absolute);
   const temporary = path.join(directory, `.${path.basename(absolute)}.${randomUUID()}.tmp`);
   try {
     // 'wx' so a temp path that somehow already exists is refused rather than
     // written through; the UUID makes that a fault, not an attack surface.
     await writeFile(temporary, buffer(data), { flag: 'wx' });
-    await assertFinalNotReparse(absolute);
+    // A rename replaces the inode, so without carrying the destination's mode
+    // forward a private 0600/0640 file silently becomes the process default
+    // (commonly 0644). New files keep the ordinary umask-derived mode.
+    const current = await assertFinalNotReparse(absolute);
+    if (current && platform !== 'win32') await chmod(temporary, current.mode & 0o777);
+    if (current && platform === 'win32') {
+      await Promise.resolve((options.copyWindowsAcl ?? defaultCopyWindowsAcl)(absolute, temporary));
+    }
     await replaceWithRetry(options.rename ?? rename, temporary, absolute, options);
-    if ((options.platform ?? process.platform) !== 'win32') await fsyncDir(directory);
+    if (platform !== 'win32') await fsyncDir(directory);
   } catch (error) {
     // Never leave a stray .tmp in someone's working tree.
     await safeCleanup(temporary);
     throw normalizeSecurityError(error);
+  }
+}
+
+export async function appendRepositoryFile(file, data, options = {}) {
+  const resolved = rootAndDirectory(file, options.root);
+  const limit = boundedReadLimit(options.maxBytes);
+  const bytes = buffer(data);
+  if (bytes.length > limit) {
+    throw new PathBoundaryError('state-file-too-large', `append exceeds the ${limit}-byte bound: ${resolved.file}`);
+  }
+  await ensureContainedDir(resolved.root, resolved.directory, {
+    mode: options.directoryMode ?? 0o755,
+  });
+  const lock = `${resolved.file}.append.lock`;
+  const platform = options.platform ?? process.platform;
+  let lockHandle;
+  let ownsLock = false;
+  const maxAttempts = options.lockAttempts ?? 100;
+  try {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        lockHandle = await (options.open ?? open)(
+          lock,
+          fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | NOFOLLOW,
+          0o600,
+        );
+        ownsLock = true;
+        break;
+      } catch (error) {
+        let contention = error.code === 'EEXIST';
+        if (platform === 'win32' && ['EPERM', 'EACCES'].includes(error.code)) {
+          const lockInfo = await assertFinalNotReparse(lock);
+          contention = lockInfo === null || lockInfo.isFile();
+        }
+        if (!contention || attempt >= maxAttempts) {
+          if (contention) {
+            throw new PathBoundaryError('state-append-busy', `append lock remained busy: ${lock}`, error);
+          }
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, options.lockBackoffMs ?? 10));
+      }
+    }
+    await lockHandle.close();
+    lockHandle = null;
+    const current = await readBoundedRegularFile(resolved.file, {
+      maxBytes: limit,
+      platform: options.platform,
+    });
+    const existing = current ?? Buffer.alloc(0);
+    if (existing.length + bytes.length > limit) {
+      throw new PathBoundaryError('state-file-too-large', `append exceeds the ${limit}-byte bound: ${resolved.file}`);
+    }
+    await atomicRepositoryWrite(resolved.file, Buffer.concat([existing, bytes]), {
+      ...options,
+      root: resolved.root,
+    });
+  } catch (error) {
+    throw normalizeSecurityError(error);
+  } finally {
+    await lockHandle?.close().catch(() => undefined);
+    if (ownsLock) await rm(lock, { force: true }).catch(() => undefined);
+  }
+}
+
+export async function removeRepositoryFile(file, options = {}) {
+  const resolved = rootAndDirectory(file, options.root);
+  const parent = await assertContainedChain(resolved.root, resolved.directory);
+  if (parent === null) return false;
+  const current = await assertFinalNotReparse(resolved.file);
+  if (current === null) return false;
+  try {
+    await (options.rm ?? rm)(resolved.file, { force: false });
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+  return true;
+}
+
+export async function removeRepositoryDirectoryIfEmpty(directory, options = {}) {
+  const absolute = path.resolve(directory);
+  const root = options.root ? path.resolve(options.root) : trustedRootFor(path.dirname(absolute)).root;
+  const parent = await assertContainedChain(root, path.dirname(absolute));
+  if (parent === null) return false;
+  const info = await lstat(absolute).catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (info === null) return false;
+  if (info.isSymbolicLink()) {
+    throw new PathBoundaryError('state-dir-symlink', `refusing symlinked directory: ${absolute}`);
+  }
+  if (!info.isDirectory()) {
+    throw new PathBoundaryError('state-dir-not-directory', `not a directory: ${absolute}`);
+  }
+  try {
+    await rmdir(absolute);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOTEMPTY') return false;
+    throw error;
   }
 }
 
@@ -797,6 +913,24 @@ function defaultWindowsAction({ action, file, input }) {
     const code = match?.[1] ?? 'state-acl-failed';
     const message = match?.[2] || error.message;
     throw new PathBoundaryError(code, message, error);
+  }
+}
+
+function defaultCopyWindowsAcl(source, destination) {
+  try {
+    return execFileSync('powershell.exe', [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-File', WINDOWS_SCRIPT, 'copy-acl', destination, source,
+    ], {
+      encoding: 'buffer',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } catch (error) {
+    const stderr = Buffer.isBuffer(error.stderr) ? error.stderr.toString('utf8') : String(error.stderr ?? '');
+    const match = stderr.match(/NOOSPHERE_ACL_ERROR:([a-z0-9-]+):([^\r\n]*)/i);
+    throw new PathBoundaryError(match?.[1] ?? 'state-acl-copy-failed', match?.[2] || error.message, error);
   }
 }
 

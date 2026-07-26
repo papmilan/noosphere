@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 
-import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { existsSync, readdirSync, statSync } from 'node:fs';
+import { readBoundedRegularFile } from '../continuity/secure-fs.js';
+
+const MAX_HOOK_INPUT_BYTES = 8 * 1024 * 1024;
 
 const HOOK_TIMEOUT_SECONDS = Number(
   process.env.NOOSPHERE_HOOK_TIMEOUT_SECONDS || 130,
@@ -30,7 +32,7 @@ function safeParseJson(text) {
 
 async function readJsonLines(file) {
   try {
-    const raw = await readFile(file, 'utf8');
+    const raw = await readBoundedText(file);
     return raw
       .split(/\r?\n/)
       .map((line) => line.trim())
@@ -85,7 +87,7 @@ async function summaryFromLatestSession() {
   }
   for (const candidate of candidates) {
     if (!existsSync(candidate)) continue;
-    const parsed = safeParseJson(await readFile(candidate, 'utf8').catch(() => ''));
+    const parsed = safeParseJson(await readBoundedText(candidate).catch(() => ''));
     const summary = parsed?.summary || parsed?.session_summary || parsed?.last_assistant_message;
     if (typeof summary === 'string' && summary.trim()) return summary;
   }
@@ -99,10 +101,15 @@ async function resolveProjectConfig(projectDir) {
   ];
   for (const candidate of candidates) {
     if (!existsSync(candidate)) continue;
-    const parsed = safeParseJson(await readFile(candidate, 'utf8').catch(() => ''));
+    const parsed = safeParseJson(await readBoundedText(candidate).catch(() => ''));
     if (parsed) return parsed;
   }
   return null;
+}
+
+async function readBoundedText(file) {
+  const bytes = await readBoundedRegularFile(file, { maxBytes: MAX_HOOK_INPUT_BYTES });
+  return bytes?.toString('utf8') ?? '';
 }
 
 function nowSessionId() {

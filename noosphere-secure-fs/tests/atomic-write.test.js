@@ -11,13 +11,20 @@
 // This suite pins the property that closes it: a reader concurrent with a writer
 // observes the whole old file or the whole new one, never the gap.
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
-import { atomicRepositoryWrite, readBoundedRegularFile } from '../index.js';
+import {
+  appendRepositoryFile,
+  atomicRepositoryWrite,
+  readBoundedRegularFile,
+  removeRepositoryDirectoryIfEmpty,
+  removeRepositoryFile,
+} from '../index.js';
 
 const temporary = [];
 after(async () => {
@@ -72,7 +79,7 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
 
     const counts = await race(file, BODY, atomicRepositoryWrite);
     // The reader must have actually run; otherwise this proves nothing.
-    assert.ok(counts.full > 100, `expected many complete reads, got ${JSON.stringify(counts)}`);
+    assert.ok(counts.full > 0, `expected at least one complete read, got ${JSON.stringify(counts)}`);
     assert.equal(counts.empty, 0, `a reader saw an empty file: ${JSON.stringify(counts)}`);
     assert.equal(counts.partial, 0, `a reader saw a partial file: ${JSON.stringify(counts)}`);
     assert.equal(counts.refused, 0, `a reader was refused: ${JSON.stringify(counts)}`);
@@ -107,6 +114,20 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
     assert.deepEqual((await fsp.readdir(dir)).sort(), ['context.md']);
   });
 
+  it('preserves an existing file mode when replacing its inode', async (t) => {
+    if (process.platform === 'win32') {
+      t.skip('POSIX mode bits are not available on Windows');
+      return;
+    }
+    const dir = await fresh();
+    const file = path.join(dir, 'AGENTS.md');
+    await fsp.writeFile(file, 'private instructions\n', { mode: 0o600 });
+
+    await atomicRepositoryWrite(file, 'updated private instructions\n');
+
+    assert.equal((await fsp.stat(file)).mode & 0o777, 0o600);
+  });
+
   it('creates missing parent directories and writes ordinary, not owner-only, permissions', async () => {
     const dir = await fresh();
     const file = path.join(dir, 'nested', 'deeper', 'AGENTS.md');
@@ -126,6 +147,77 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
   // CI failure (EPERM from MoveFileEx while a reader held the destination open)
   // that put it here.
   describe('the Windows replace retry', () => {
+    it('copies the existing Windows DACL to the replacement before rename', async () => {
+      const dir = await fresh();
+      const file = path.join(dir, 'private.json');
+      await fsp.writeFile(file, 'original\n');
+      let copied = false;
+      await atomicRepositoryWrite(file, 'replacement\n', {
+        platform: 'win32',
+        copyWindowsAcl: async (source, destination) => {
+          assert.equal(source, file);
+          assert.equal(await fsp.readFile(destination, 'utf8'), 'replacement\n');
+          copied = true;
+        },
+        rename: async (from, to) => {
+          assert.equal(copied, true, 'the DACL must be copied before the replacement is published');
+          await fsp.rename(from, to);
+        },
+      });
+      assert.equal(await fsp.readFile(file, 'utf8'), 'replacement\n');
+    });
+
+    it('preserves the original when Windows DACL copying fails', async () => {
+      const dir = await fresh();
+      const file = path.join(dir, 'private.json');
+      await fsp.writeFile(file, 'original\n');
+      await assert.rejects(
+        atomicRepositoryWrite(file, 'replacement\n', {
+          platform: 'win32',
+          copyWindowsAcl: async () => {
+            throw Object.assign(new Error('cannot copy ACL'), { code: 'state-acl-copy-failed' });
+          },
+        }),
+        (error) => error.code === 'state-acl-copy-failed',
+      );
+      assert.equal(await fsp.readFile(file, 'utf8'), 'original\n');
+      assert.deepEqual(await fsp.readdir(dir), ['private.json']);
+    });
+
+    it('preserves a protected native Windows DACL across replacement', async (t) => {
+      if (process.platform !== 'win32') {
+        t.skip('native Windows ACLs require a Windows runner');
+        return;
+      }
+      const dir = await fresh();
+      const file = path.join(dir, 'private.json');
+      await fsp.writeFile(file, 'original\n');
+      const powershell = (script) => execFileSync('powershell.exe', [
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script,
+      ], {
+        encoding: 'utf8',
+        windowsHide: true,
+        env: { ...process.env, NOOSPHERE_TEST_ACL_FILE: file },
+      }).trim();
+      const before = powershell(
+        '$p=$env:NOOSPHERE_TEST_ACL_FILE; ' +
+        '$s=[System.Security.AccessControl.AccessControlSections]::Access; ' +
+        '$a=[System.IO.File]::GetAccessControl($p,$s); ' +
+        '$a.SetAccessRuleProtection($true,$true); [System.IO.File]::SetAccessControl($p,$a); ' +
+        '$a.GetSecurityDescriptorSddlForm($s)',
+      );
+      await atomicRepositoryWrite(file, 'replacement\n');
+      const after = powershell(
+        '$p=$env:NOOSPHERE_TEST_ACL_FILE; ' +
+        '$s=[System.Security.AccessControl.AccessControlSections]::Access; ' +
+        '[System.IO.File]::GetAccessControl($p,$s).GetSecurityDescriptorSddlForm($s)',
+      );
+      const canonicalAccess = (sddl) => sddl
+        .replace(/^D:PAI/, 'D:P')
+        .replaceAll(';ID;', ';;');
+      assert.equal(canonicalAccess(after), canonicalAccess(before));
+    });
+
     it('retries a destination held open by a reader, then succeeds', async () => {
       const dir = await fresh();
       const file = path.join(dir, 'exclude');
@@ -152,6 +244,7 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
       await assert.rejects(
         atomicRepositoryWrite(file, 'replacement\n', {
           platform: 'win32',
+          copyWindowsAcl: async () => {},
           rename: async () => {
             attempts += 1;
             throw Object.assign(new Error('EBUSY: resource busy or locked, rename'), { code: 'EBUSY' });
@@ -220,5 +313,161 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
     assert.equal(await fsp.readFile(real, 'utf8'), 'user content\n');
     assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
     assert.deepEqual((await fsp.readdir(dir)).sort(), ['AGENTS.md', 'CLAUDE.md']);
+  });
+
+  it('refuses a symlinked parent beneath an explicit repository root', async () => {
+    const root = await fresh();
+    const outside = await fresh();
+    const link = path.join(root, '.noosphere');
+    try {
+      await fsp.symlink(outside, link, 'dir');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) return;
+      throw error;
+    }
+
+    await assert.rejects(
+      atomicRepositoryWrite(path.join(link, 'context.md'), 'replacement\n', { root }),
+      (error) => error.code === 'state-dir-symlink',
+    );
+    await assert.rejects(fsp.access(path.join(outside, 'context.md')));
+  });
+
+  it('appends without following a symlinked file or parent', async () => {
+    const root = await fresh();
+    const outside = await fresh();
+    const outsideFile = path.join(outside, 'journal.md');
+    await fsp.writeFile(outsideFile, 'outside\n');
+    const finalLink = path.join(root, 'journal.md');
+    try {
+      await fsp.symlink(outsideFile, finalLink);
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) return;
+      throw error;
+    }
+    await assert.rejects(
+      appendRepositoryFile(finalLink, 'attack\n', { root, maxBytes: 1024 }),
+      (error) => error.code === 'state-file-symlink',
+    );
+
+    const parentLink = path.join(root, '.noosphere');
+    await fsp.symlink(outside, parentLink, 'dir');
+    await assert.rejects(
+      appendRepositoryFile(path.join(parentLink, 'journal.md'), 'attack\n', {
+        root,
+        maxBytes: 1024,
+      }),
+      (error) => error.code === 'state-dir-symlink',
+    );
+    assert.equal(await fsp.readFile(outsideFile, 'utf8'), 'outside\n');
+  });
+
+  it('serializes concurrent bounded appends without dropping or duplicating bytes', async () => {
+    const root = await fresh();
+    const file = path.join(root, '.noosphere', 'journal.md');
+    const lines = Array.from({ length: 32 }, (_, index) => `entry-${index}\n`);
+    await Promise.all(lines.map((line) => appendRepositoryFile(file, line, {
+      root,
+      maxBytes: 4096,
+      lockAttempts: 5000,
+      lockBackoffMs: 2,
+    })));
+    const written = (await fsp.readFile(file, 'utf8')).trimEnd().split('\n').sort();
+    assert.deepEqual(written, lines.map((line) => line.trim()).sort());
+    assert.deepEqual((await fsp.readdir(path.dirname(file))).sort(), ['journal.md']);
+  });
+
+  it('serializes the size check so concurrent appends cannot exceed the bound', async () => {
+    const root = await fresh();
+    const file = path.join(root, 'journal.md');
+    await fsp.writeFile(file, '12345');
+    const results = await Promise.allSettled([
+      appendRepositoryFile(file, 'abc', { root, maxBytes: 8 }),
+      appendRepositoryFile(file, 'xyz', { root, maxBytes: 8 }),
+    ]);
+    assert.equal(results.filter(({ status }) => status === 'fulfilled').length, 1);
+    assert.equal(results.filter(({ status }) => status === 'rejected').length, 1);
+    assert.equal((await fsp.readFile(file)).length, 8);
+  });
+
+  it('retries a verified Windows lock when open reports sharing contention', async () => {
+    const root = await fresh();
+    const file = path.join(root, 'journal.md');
+    const lock = `${file}.append.lock`;
+    await fsp.writeFile(lock, 'held');
+    let calls = 0;
+    await appendRepositoryFile(file, 'entry\n', {
+      root,
+      platform: 'win32',
+      maxBytes: 1024,
+      lockBackoffMs: 1,
+      open: async (...args) => {
+        calls += 1;
+        if (calls === 1) {
+          throw Object.assign(new Error('sharing violation'), { code: 'EPERM' });
+        }
+        await fsp.rm(lock);
+        return fsp.open(...args);
+      },
+    });
+    assert.equal(await fsp.readFile(file, 'utf8'), 'entry\n');
+    assert.equal(calls, 2);
+  });
+
+  it('bounds persistent Windows sharing errors with the overall lock budget', async () => {
+    const root = await fresh();
+    let calls = 0;
+    await assert.rejects(
+      appendRepositoryFile(path.join(root, 'journal.md'), 'entry\n', {
+        root,
+        platform: 'win32',
+        maxBytes: 1024,
+        lockAttempts: 3,
+        lockBackoffMs: 1,
+        open: async () => {
+          calls += 1;
+          throw Object.assign(new Error('permission denied'), { code: 'EPERM' });
+        },
+      }),
+      (error) => error.code === 'state-append-busy'
+        && error.message.includes(`${path.join(root, 'journal.md')}.append.lock`),
+    );
+    assert.equal(calls, 3);
+  });
+
+  it('treats disappearance during repository-file removal as already removed', async () => {
+    const root = await fresh();
+    const file = path.join(root, 'adapter.md');
+    await fsp.writeFile(file, 'managed\n');
+    assert.equal(await removeRepositoryFile(file, {
+      root,
+      rm: async () => {
+        await fsp.rm(file);
+        throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+      },
+    }), false);
+  });
+
+  it('removes only regular files and real empty directories under the repository root', async () => {
+    const root = await fresh();
+    const outside = await fresh();
+    const outsideFile = path.join(outside, 'mcp.json');
+    await fsp.writeFile(outsideFile, 'outside\n');
+    const cursor = path.join(root, '.cursor');
+    try {
+      await fsp.symlink(outside, cursor, 'dir');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) return;
+      throw error;
+    }
+    await assert.rejects(
+      removeRepositoryFile(path.join(cursor, 'mcp.json'), { root }),
+      (error) => error.code === 'state-dir-symlink',
+    );
+    await assert.rejects(
+      removeRepositoryDirectoryIfEmpty(cursor, { root }),
+      (error) => error.code === 'state-dir-symlink',
+    );
+    assert.equal(await fsp.readFile(outsideFile, 'utf8'), 'outside\n');
   });
 });

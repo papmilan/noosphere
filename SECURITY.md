@@ -135,6 +135,16 @@ verified binding has no manifest for that slot. A symlink, directory, unreadable
 or malformed binding, lookup error, or invalid manifest cannot select legacy
 authority.
 
+### Agent-facing ingress
+
+Generated Claude, Codex, Gemini, and Cursor adapters do not tell agents to read
+raw slot files as instructions. They run `noosphere context --local-only`, whose
+output applies the same exact-byte format-2 authority decision as interactive
+approval. The installed prompt hook uses that command too. Unapproved slot text
+and all follow-ups are quoted as data; only an owner-authenticated exact slot is
+emitted as authoritative. The command re-renders from bounded source reads
+instead of trusting the repository-writable cached `context.md`.
+
 ### How project files are read
 
 Everything Noosphere reads out of your working tree — the three source slots,
@@ -208,10 +218,27 @@ a file, edit it, and write it back would then persist that emptiness — losing
 whatever you had written. Renaming is atomic: a reader sees either the whole old
 file or the whole new one.
 
-The same rule as the slot files applies to the target: if it is a symlink or not
-a regular file, the write is **refused** rather than redirected, because renaming
-over a symlink would silently replace the link itself. Replace a symlinked
-project file with a real file if you were relying on one.
+If a write target is a symlink or not a regular file, the write is **refused**
+rather than redirected, because renaming over a symlink would silently replace
+the link itself. Unlike bounded reads, repository-managed writes and removals
+also refuse symlinked parent directories. Replace a symlinked project file or
+parent directory with a real path if you were relying on one for mutation.
+
+When the caller supplies a project root, every descendant directory is checked
+and a symlinked parent is refused before creating the temporary file. Existing
+POSIX permission bits are copied to the replacement inode; new files use the
+ordinary process umask. On Windows, an existing target's DACL is copied to the
+temporary file before rename; if that copy fails, the original remains in place.
+Journal and follow-up appends serialize a bounded read-modify-replace operation
+with an exclusive sibling lock, so concurrent writers cannot lose entries or
+jointly exceed the size bound. The 8 MiB journal ceiling is an intentional
+security boundary and is not rotated automatically; archive or truncate the
+journal explicitly before further appends. If a crashed writer leaves a lock,
+the busy error names the exact `.append.lock` file; after confirming no writer
+is active, remove that file manually. Repository-managed file and empty-directory
+removal uses the same contained-parent and no-symlink policy instead of following
+a redirected parent. Other file-specific metadata (for example, extended
+attributes) is not promised to survive an ordinary project-file replacement.
 
 **Present is not absent.** A slot that exists but cannot be read — corrupt UTF-8,
 oversized, a directory, a FIFO, permissions revoked — is reported as
