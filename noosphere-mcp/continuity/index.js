@@ -66,6 +66,7 @@ import { isSlotAuthoritative } from './trust-store.js';
 import { approveSlot } from './internal/approval-service.js';
 import { APPROVABLE_SLOTS, MAX_SLOT_SOURCE_BYTES, UNUSABLE_SOURCE_CODES, baselineBody, resolveSlotSource, resolveSlotSourceForRead } from './slot-sources.js';
 import {
+  MAX_EXCLUDE_BYTES,
   cspPaths,
   loadRuntimeState,
   loadState as loadCspState,
@@ -1361,8 +1362,16 @@ verifiable findings and handoffs to the journal. Do not write hidden chain-of-th
 
 async function ensureLocalExcludes(root) {
   const exclude = path.join(root, '.git', 'info', 'exclude');
-  // git init normally creates this file, but creating it is harmless.
-  const current = await readRepositoryText(exclude);
+  // git init normally creates this file, but creating it is harmless. Same bound
+  // and same strictness as csp/storage.js, which reads and rewrites this exact
+  // file: this function writes `current` back with our entries appended, so
+  // degrading an unreadable file to '' would silently replace the user's
+  // excludes instead of refusing.
+  const existing = await readRepositoryFile(exclude, { maxBytes: MAX_EXCLUDE_BYTES });
+  if (existing.unusable) {
+    throw new Error(`${exclude} exists but could not be read (${existing.reason}).`);
+  }
+  const current = existing.text;
   const entries = [
     '.noosphere/baseline.md',
     '.noosphere/context.md',

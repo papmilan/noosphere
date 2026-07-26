@@ -173,6 +173,9 @@ describe('SEC-05 Phase 4B — owner approval mints authority for exactly the app
       asserted += 1;
       const source = await resolveSlotSourceForRead(project, 'master-prompt');
       assert.equal(source.bytes.length, 0, code);
+      // present, not absent: the whole fail-closed refresh/restoration contract
+      // rests on those two being distinguishable, so assert it here too.
+      assert.equal(source.present, true, code);
       assert.equal(source.unusable, true, code);
       assert.equal(source.reason, code, `expected ${code}, got ${source.reason}`);
       // Strict callers still see the raw failure.

@@ -33,7 +33,12 @@ const execFileAsync = promisify(execFile);
 // Locks are small JSON; the shared primitive refuses anything non-regular,
 // symlinked, or larger, and never blocks on the open.
 const MAX_LOCK_BYTES = 4096;
-const MAX_EXCLUDE_BYTES = 1024 * 1024;
+// One bound and one failure contract for `.git/info/exclude`, shared with
+// ensureLocalExcludes in continuity/index.js. Both callers READ the file and
+// then write it back, so a present-but-unusable exclude file must abort rather
+// than degrade to an empty string — degrading would rewrite the user's excludes
+// with only our own entries.
+export const MAX_EXCLUDE_BYTES = 1024 * 1024;
 
 async function readLockJson(lockPath) {
   try {

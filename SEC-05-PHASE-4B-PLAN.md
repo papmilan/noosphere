@@ -214,13 +214,17 @@ out of a working tree, and the three-state model that has to survive rendering.
 **One primitive.** `readBoundedRegularFile` in `@noosphere/secure-fs` is now the
 only read used for repository-controlled paths, in both packages:
 
-| Guarantee | Mechanism |
-|-----------|-----------|
-| cannot block | `O_NONBLOCK` — a FIFO/socket/device opens immediately instead of waiting forever in `open(2)` with no error code |
-| cannot be redirected | `O_NOFOLLOW` — a symlinked final component is refused by the kernel |
-| cannot lie about what it is | `fstat` on the **opened descriptor**, not `lstat` on the path, so the object judged is the object read |
-| cannot exhaust memory | apparent size checked before a byte is allocated, so a sparse file is refused for the cost of one `fstat` |
-| cannot outgrow its bound | at most `maxBytes + 1` bytes are read; growth after the `fstat` is detected (`state-file-changed`), never silently truncated |
+| Guarantee | Mechanism | Platform |
+|-----------|-----------|----------|
+| cannot block | `O_NONBLOCK` — a FIFO/socket/device opens immediately instead of waiting forever in `open(2)` with no error code | POSIX; Windows has no FIFO semantics on these paths |
+| cannot be redirected | `O_NOFOLLOW` — a symlinked final component is refused by the kernel | POSIX; on Windows this degrades to a pre-open `lstat` (see the residual below) |
+| cannot lie about what it is | `fstat` on the **opened descriptor**, not `lstat` on the path, so the object judged is the object read | all |
+| cannot exhaust memory | apparent size checked before a byte is allocated, so a sparse file is refused for the cost of one `fstat` | all |
+| cannot outgrow its bound | at most `maxBytes + 1` bytes are read; growth after the `fstat` is detected (`state-file-changed`), never silently truncated | all |
+
+`O_NOFOLLOW` and `O_NONBLOCK` do not exist on Windows, where `fs.constants`
+reports them as `0`. The two guarantees that depend on them are POSIX-only; the
+three enforced on the opened descriptor hold everywhere.
 
 Call sites converted: `readFollowupPrompts`, `formatLocalJournal`,
 `fileHasJournalEntries`, `buildWorkspaceSnapshot`'s journal read, `readJson`
