@@ -40,6 +40,12 @@ async function race(file, body, write, { ms = 1200 } = {}) {
   })();
   const reader = (async () => {
     while (Date.now() < stop) {
+      // Yield a tick between reads. A reader that re-opens the file the instant
+      // it closes it holds the target open almost continuously, which on Windows
+      // starves the replace rather than exercising its atomicity — that would be
+      // a starvation test wearing an atomicity test's name. This still performs
+      // hundreds of reads inside the window.
+      await new Promise((resolve) => setTimeout(resolve, 1));
       try {
         const bytes = await readBoundedRegularFile(file, { maxBytes: 4 * 1024 * 1024 });
         if (bytes === null || bytes.length === 0) counts.empty += 1;
@@ -112,6 +118,87 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
       assert.notEqual((await fsp.stat(file)).mode & 0o777, 0o600);
       assert.notEqual((await fsp.stat(path.dirname(file))).mode & 0o777, 0o700);
     }
+  });
+
+  // The Windows replace path, driven on every platform through the injectable
+  // rename. Relying on a Windows runner to cover this would mean the behaviour
+  // is only ever exercised where it is slowest to observe — and it was a real
+  // CI failure (EPERM from MoveFileEx while a reader held the destination open)
+  // that put it here.
+  describe('the Windows replace retry', () => {
+    it('retries a destination held open by a reader, then succeeds', async () => {
+      const dir = await fresh();
+      const file = path.join(dir, 'exclude');
+      let attempts = 0;
+      await atomicRepositoryWrite(file, 'body\n', {
+        platform: 'win32',
+        rename: async (from, to) => {
+          attempts += 1;
+          // What MoveFileEx reports when the destination is open without
+          // FILE_SHARE_DELETE.
+          if (attempts < 3) throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
+          return fsp.rename(from, to);
+        },
+      });
+      assert.equal(attempts, 3);
+      assert.equal(await fsp.readFile(file, 'utf8'), 'body\n');
+    });
+
+    it('gives up rather than falling back to a truncating write', async () => {
+      const dir = await fresh();
+      const file = path.join(dir, 'exclude');
+      await fsp.writeFile(file, 'original\n', 'utf8');
+      let attempts = 0;
+      await assert.rejects(
+        atomicRepositoryWrite(file, 'replacement\n', {
+          platform: 'win32',
+          rename: async () => {
+            attempts += 1;
+            throw Object.assign(new Error('EBUSY: resource busy or locked, rename'), { code: 'EBUSY' });
+          },
+        }),
+        (error) => ['EBUSY', 'EPERM'].includes(error.code),
+      );
+      assert.ok(attempts > 1, 'the replace must have been retried');
+      // A silent fallback to fs.writeFile here would reintroduce the empty-file
+      // window exactly when a reader is known to be holding the target.
+      assert.equal(await fsp.readFile(file, 'utf8'), 'original\n');
+      assert.deepEqual((await fsp.readdir(dir)).sort(), ['exclude']);
+    });
+
+    it('does not retry on POSIX, where rename has no such constraint', async () => {
+      const dir = await fresh();
+      const file = path.join(dir, 'exclude');
+      let attempts = 0;
+      await assert.rejects(
+        atomicRepositoryWrite(file, 'body\n', {
+          platform: 'linux',
+          rename: async () => {
+            attempts += 1;
+            throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
+          },
+        }),
+        (error) => error.code === 'EPERM',
+      );
+      assert.equal(attempts, 1, 'a POSIX EPERM is a real fault, not contention');
+    });
+
+    it('never retries an error that is not destination contention', async () => {
+      const dir = await fresh();
+      const file = path.join(dir, 'exclude');
+      let attempts = 0;
+      await assert.rejects(
+        atomicRepositoryWrite(file, 'body\n', {
+          platform: 'win32',
+          rename: async () => {
+            attempts += 1;
+            throw Object.assign(new Error('ENOSPC: no space left on device, rename'), { code: 'ENOSPC' });
+          },
+        }),
+        (error) => error.code === 'ENOSPC',
+      );
+      assert.equal(attempts, 1);
+    });
   });
 
   it('refuses a symlinked target instead of replacing the link', async () => {

@@ -685,12 +685,47 @@ export async function atomicRepositoryWrite(file, data, options = {}) {
     // written through; the UUID makes that a fault, not an attack surface.
     await writeFile(temporary, buffer(data), { flag: 'wx' });
     await assertFinalNotReparse(absolute);
-    await (options.rename ?? rename)(temporary, absolute);
+    await replaceWithRetry(options.rename ?? rename, temporary, absolute, options);
     if ((options.platform ?? process.platform) !== 'win32') await fsyncDir(directory);
   } catch (error) {
     // Never leave a stray .tmp in someone's working tree.
     await safeCleanup(temporary);
     throw normalizeSecurityError(error);
+  }
+}
+
+// Windows only, and the reason the atomic write needs a retry at all.
+//
+// `MoveFileEx(..., REPLACE_EXISTING)` requires DELETE access on the destination,
+// and Node opens files without `FILE_SHARE_DELETE`, so a reader that merely has
+// the target OPEN makes the replace fail with EPERM (or EACCES/EBUSY, and the
+// same from an indexer or scanner holding a handle). POSIX `rename(2)` has no
+// such constraint and never enters this path.
+//
+// Retrying is the honest fix. The alternative — falling back to a truncating
+// write when the replace is refused — would reintroduce on Windows exactly the
+// empty-file window this function exists to close, and it would do so precisely
+// when a reader is known to be present, which is the worst possible moment. A
+// reader holds the file for microseconds, so the budget below is enormous
+// relative to the contention; exhausting it means something is holding the file
+// open indefinitely, and that must surface as an error rather than as a silent
+// downgrade.
+const REPLACE_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const REPLACE_ATTEMPTS = 50;
+const REPLACE_BACKOFF_MS = 10;
+
+async function replaceWithRetry(renameImpl, from, to, options = {}) {
+  const platform = options.platform ?? process.platform;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await renameImpl(from, to);
+      return;
+    } catch (error) {
+      if (platform !== 'win32'
+        || attempt >= REPLACE_ATTEMPTS
+        || !REPLACE_RETRY_CODES.has(error.code)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, REPLACE_BACKOFF_MS));
+    }
   }
 }
 
