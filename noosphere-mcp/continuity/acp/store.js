@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, lstat, open, readFile, rename, rm } from 'node:fs/promises';
+import { chmod, lstat, open, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { createProjectState } from './project-state.js';
 import { decodeEnvelope, encodeEnvelope } from './wire.js';
@@ -10,11 +10,31 @@ import { syncDirectoryPath, syncFilePath } from './durability.js';
 import {
   atomicOwnerOnlyWrite,
   ensureContainedDir,
+  readBoundedRegularFile,
   readOwnerOnlyFile,
   writeOwnerOnlyFileExclusive,
 } from '../secure-fs.js';
 
 const JSON_FILE = 'continuity.json';
+
+// SEC-05 Phase 4B-R4 — bounded, non-blocking lock read.
+//
+// A lock path lives inside the working tree, so anything that can write there
+// can plant a FIFO at it. A bare readFile then blocks forever with no error
+// code, which strands the release and stale-check paths this helper serves.
+// Locks are small JSON; the shared primitive refuses anything non-regular,
+// symlinked, or larger, and never blocks on the open.
+const MAX_LOCK_BYTES = 4096;
+
+async function readLockJson(lockPath) {
+  try {
+    const raw = await readBoundedRegularFile(lockPath, { maxBytes: MAX_LOCK_BYTES });
+    return raw === null ? null : JSON.parse(raw.toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
 const MD_FILE = 'continuity.md';
 
 export function statePaths(root) {
@@ -332,13 +352,13 @@ async function withStateLock(root, operation, options = {}) {
   if (!handle) throw storeError('state-lock-timeout');
   try { return await operation(); } finally {
     await handle.close();
-    const current = await readFile(lockPath, 'utf8').then(JSON.parse).catch(() => null);
+    const current = await readLockJson(lockPath);
     if (current?.token === token) await rm(lockPath, { force: true });
   }
 }
 
 async function staleStateLock(lockPath) {
-  const lock = await readFile(lockPath, 'utf8').then(JSON.parse).catch(() => null);
+  const lock = await readLockJson(lockPath);
   if (!lock || !Number.isInteger(lock.pid)) {
     const details = await lstat(lockPath).catch(() => null);
     return details !== null && Date.now() - details.mtimeMs > 60_000;

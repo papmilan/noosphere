@@ -347,6 +347,7 @@ noosphere recall "query"
 noosphere remember --agent <name> --type <type> "content"
 noosphere journal --agent <name> "note"
 noosphere master-prompt [--replace]
+noosphere trust approve master-prompt|instructions|baseline   # interactive only
 noosphere state [show|set|next|reopen|restore] [--json]
 noosphere acp state [--json] [validate|sync|push|pull|history|quarantine]
 noosphere handoff --stdin | --file <handoff.json>

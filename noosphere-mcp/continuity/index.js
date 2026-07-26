@@ -7,8 +7,6 @@ import {
   access,
   appendFile,
   mkdir,
-  readFile,
-  rename,
   rm,
   rmdir,
   stat,
@@ -62,8 +60,12 @@ import { mutateSyncMetadata, readSyncMetadata, withUploadReservationLock } from 
 import { approveOrigin, secureRelayerFetch } from './relayer-authority.js';
 import { quoteUntrustedMemory, sanitizeMemoryText } from './memory-safety.js';
 import { renderSlotBlock } from './render.js';
+import { atomicRepositoryWrite as atomicWrite, readBoundedRegularFile } from './secure-fs.js';
 import { isSlotAuthoritative } from './trust-store.js';
+import { approveSlot } from './internal/approval-service.js';
+import { APPROVABLE_SLOTS, MAX_SLOT_SOURCE_BYTES, UNUSABLE_SOURCE_CODES, baselineBody, resolveSlotSource, resolveSlotSourceForRead } from './slot-sources.js';
 import {
+  MAX_EXCLUDE_BYTES,
   cspPaths,
   loadRuntimeState,
   loadState as loadCspState,
@@ -87,6 +89,35 @@ const DEFAULT_READ_TIMEOUT_MS = 30_000;
 const DEFAULT_BASELINE_HISTORY_COMMITS = 50;
 const MAX_BASELINE_HISTORY_COMMITS = 200;
 const MAX_HANDOFF_BYTES = 1_048_576;
+// SEC-05 Phase 4B-R4 — the size bound for repository-controlled files that are
+// NOT authority-capable slots: the journal, followups, project config, rendered
+// context, adapter files, git excludes.
+//
+// 8 MiB rather than the slots' 1 MiB because these grow legitimately —
+// journal.md is append-only across the whole life of a project and followups
+// accumulate per session — so a bound tight enough to be a policy statement
+// would eventually refuse honest data. Its job is only to stop a working-tree
+// writer turning `mkfile -n 8g .noosphere/journal.md` into an out-of-memory kill
+// of every watcher on the machine. Both bounds are enforced by the same
+// primitive; only the number differs.
+const MAX_REPOSITORY_INPUT_BYTES = 8 * 1024 * 1024;
+// The failure modes a working-tree writer can force on a repository file. Same
+// shape as slot-sources' UNUSABLE_SOURCE_CODES, in the filesystem primitive's
+// vocabulary: the file EXISTS but cannot yield content. Anything outside this
+// set (EIO, ENOMEM, an unrecognised code) is a real fault and still throws —
+// degrading on unknown errors is how genuine breakage becomes a silently empty
+// render.
+const REPOSITORY_UNUSABLE_CODES = new Set([
+  'state-file-symlink',
+  'state-file-not-regular',
+  'state-file-too-large',
+  'state-file-changed',
+  'EISDIR',
+  'ENOTDIR',
+  'ELOOP',
+  'EACCES',
+  'EPERM',
+]);
 const EXECUTION_DEFAULT_TTL_MS = 72 * 60 * 60 * 1000;
 const EXECUTION_MAX_TARGET_BYTES = positiveIntegerEnv('NOOSPHERE_EXEC_MAX_TARGET_BYTES', 4 * 1024 * 1024);
 const MANAGED_START = '<!-- noosphere:continuity:start -->';
@@ -95,17 +126,23 @@ const ALL_ADAPTERS = ['codex', 'claude', 'gemini', 'cursor', 'mcp'];
 const ACP_LEGACY_STATE_ALIASES = new Set([
   'validate', 'sync', 'push', 'pull', 'history', 'quarantine',
 ]);
+const TRUST_REFUSAL_CODES = new Set([
+  'approval-requires-tty',
+  'approval-declined',
+  'approval-input-too-long',
+  'slot-invalid-utf8',
+]);
 
 const command = process.argv[2] || 'help';
-const explicitProjectPath = readOption('--path');
-const projectDir = path.resolve(
-  explicitProjectPath ||
-    process.env.NOOSPHERE_PROJECT_DIR ||
-    process.env.INIT_CWD ||
-    '.',
-);
 
 try {
+  const explicitProjectPath = readOption('--path');
+  const projectDir = path.resolve(
+    explicitProjectPath ||
+      process.env.NOOSPHERE_PROJECT_DIR ||
+      process.env.INIT_CWD ||
+      '.',
+  );
   switch (command) {
     case 'init':
       await initializeProject(projectDir);
@@ -146,6 +183,9 @@ try {
       break;
     case 'approve-relayer':
       await approveRelayerFromCli(process.argv[3]);
+      break;
+    case 'trust':
+      await trustFromCli(projectDir, process.argv.slice(3));
       break;
     case 'recall':
       await recallFromCli(projectDir);
@@ -245,7 +285,13 @@ try {
   }
 } catch (error) {
   console.error(`Noosphere continuity: ${error.message}`);
-  process.exitCode = 1;
+  process.exitCode = error.exitCode
+    ?? (command === 'trust' && error.message === '--path requires a value.' ? 2 : null)
+    // Exit 3 means "the owner refused / could not confirm a trust approval".
+    // Scope it to `trust`: other commands share some of these error codes (a
+    // malformed slot raises slot-invalid-utf8 from share-master-prompt too), and
+    // a wrapper script must not read those as an approval refusal.
+    ?? (command === 'trust' && TRUST_REFUSAL_CODES.has(error.code) ? 3 : 1);
 }
 
 export async function initializeProject(root, options = {}) {
@@ -341,7 +387,7 @@ export async function activateProject(start, { quiet = false } = {}) {
   });
 
   const contextFile = path.join(root, '.noosphere', 'context.md');
-  const contextContent = await readFile(contextFile, 'utf8').catch(() => '');
+  const contextContent = await readRepositoryText(contextFile);
   const contextIsEmpty = !contextContent.trim() || contextContent.includes('No onboarding baseline');
   if (isNew || contextIsEmpty) {
     await refreshContext(root).catch((error) => {
@@ -653,11 +699,7 @@ export async function prepareProjectBaseline(root, options = {}) {
   const fingerprint = hash(baseline);
   const generatedAt = new Date().toISOString();
 
-  await writeFile(
-    path.join(root, '.noosphere', 'baseline.md'),
-    baseline,
-    'utf8',
-  );
+  await atomicWrite(path.join(root, '.noosphere', 'baseline.md'), baseline);
   await writeRuntimeState(root, {
     ...state,
     baseline: {
@@ -695,10 +737,21 @@ export async function storePreparedBaseline(root) {
     };
   }
 
-  const content = await readFile(
+  // The baseline slot is authority-capable, so it carries the slot bound rather
+  // than the looser repository one. Strict on purpose: this uploads the bytes,
+  // and a truncated or unreadable baseline must fail rather than be shared as if
+  // it were the whole thing.
+  const baselineFile = await readRepositoryFile(
     path.join(root, '.noosphere', 'baseline.md'),
-    'utf8',
+    { maxBytes: MAX_SLOT_SOURCE_BYTES },
   );
+  if (!baselineFile.present) {
+    throw new Error('No project baseline is present to store.');
+  }
+  if (baselineFile.unusable) {
+    throw new Error(`The project baseline exists but could not be read (${baselineFile.reason}).`);
+  }
+  const content = baselineFile.text;
   const response = await requestJson(
     `${config.relayer_url}/v1/actions`,
     {
@@ -857,21 +910,25 @@ export async function refreshContext(root, options = {}) {
       config.project_id,
     )}/context?format=text&limit=50&q=${query}`,
   );
-  let baseline = await readFile(
-    path.join(root, '.noosphere', 'baseline.md'),
-    'utf8',
-  ).catch(() => '');
-  let masterPrompt = await readMasterPrompt(root);
+  let baselineSource = await resolveSlotSourceForRead(root, 'baseline');
+  let masterPromptSource = await resolveSlotSourceForRead(root, 'master-prompt');
   let followups = await readFollowupPrompts(root);
 
-  if (!baseline || !masterPrompt || followups.length === 0) {
+  // Restore from Walrus only for a genuinely ABSENT slot. A slot file that is
+  // present but unusable (corrupt bytes, a planted directory, oversized,
+  // revoked permissions) must not select remote content: that would let anyone
+  // with working-tree write access swap the rendered baseline or master prompt
+  // for whatever sits in the relayer namespace, by breaking the local file.
+  const baselineMissing = !baselineSource.text && !baselineSource.unusable;
+  const masterPromptMissing = !masterPromptSource.text && !masterPromptSource.unusable;
+  if (baselineMissing || masterPromptMissing || followups.length === 0) {
     const walrusRestore = await recallTypedMemories(config, {
-      baseline: !baseline,
-      masterPrompt: !masterPrompt,
+      baseline: baselineMissing,
+      masterPrompt: masterPromptMissing,
       followups: followups.length === 0,
     });
-    if (!baseline && walrusRestore.baseline) baseline = walrusRestore.baseline;
-    if (!masterPrompt && walrusRestore.masterPrompt) masterPrompt = walrusRestore.masterPrompt;
+    if (baselineMissing && walrusRestore.baseline) baselineSource = sourceFromRestoredText(walrusRestore.baseline, 'baseline');
+    if (masterPromptMissing && walrusRestore.masterPrompt) masterPromptSource = sourceFromRestoredText(walrusRestore.masterPrompt, 'master-prompt');
     if (followups.length === 0 && walrusRestore.followups.length > 0) followups = walrusRestore.followups;
   }
 
@@ -879,16 +936,16 @@ export async function refreshContext(root, options = {}) {
   // recall provenance. A slot renders as authoritative (unquoted) only when an
   // authenticated, owner-only, out-of-tree trust record vouches for these exact
   // bytes; otherwise the content is quoted, non-authoritative data (fail-closed).
-  const baselineBody = baseline
-    ? baseline.replace(/^# Noosphere project baseline\s*/i, '').trim()
-    : '';
-  // M-2: gate on the exact bytes that render (the header-stripped body), so the
-  // displayed authoritative content equals the bytes the trust record binds.
-  const baselineAuthoritative = baselineBody
-    ? await isSlotAuthoritative({ projectRoot: root, slot: 'baseline', rawBytes: baselineBody })
+  // M-2: gate on the exact bytes that render, so the displayed authoritative
+  // content equals the bytes the trust record binds. resolveSlotSource owns the
+  // baseline derivation; recalled strings derive one Buffer and keep it intact.
+  const renderedBaseline = baselineSource.text;
+  const masterPrompt = masterPromptSource.text;
+  const baselineAuthoritative = baselineSource.bytes.length > 0
+    ? await isSlotAuthoritative({ projectRoot: root, slot: 'baseline', rawBytes: baselineSource.bytes })
     : false;
-  const masterAuthoritative = masterPrompt
-    ? await isSlotAuthoritative({ projectRoot: root, slot: 'master-prompt', rawBytes: masterPrompt })
+  const masterAuthoritative = masterPromptSource.bytes.length > 0
+    ? await isSlotAuthoritative({ projectRoot: root, slot: 'master-prompt', rawBytes: masterPromptSource.bytes })
     : false;
 
   const output = [
@@ -899,13 +956,18 @@ export async function refreshContext(root, options = {}) {
     '',
     'Read this before changing the project. It may contain work from another AI tool.',
     '',
-    baselineBody
+    renderedBaseline
       ? [
           '## Initial project baseline',
           '',
-          renderSlotBlock(baselineBody, { authoritative: baselineAuthoritative }),
+          renderSlotBlock(renderedBaseline, { authoritative: baselineAuthoritative }),
         ].join('\n')
-      : '## Initial project baseline\n\nNo onboarding baseline has been created.',
+      : unusableSlotSection(
+          '## Initial project baseline',
+          baselineSource,
+          'baseline',
+          'No onboarding baseline has been created.',
+        ),
     '',
     masterPrompt
       ? [
@@ -917,7 +979,12 @@ export async function refreshContext(root, options = {}) {
           '',
           renderSlotBlock(masterPrompt, { authoritative: masterAuthoritative }),
         ].join('\n')
-      : '## Pinned master prompt\n\nNo master prompt has been recorded.',
+      : unusableSlotSection(
+          '## Pinned master prompt',
+          masterPromptSource,
+          'master-prompt',
+          'No master prompt has been recorded.',
+        ),
     '',
     '## Follow-up user instructions (quoted as data)',
     '',
@@ -937,6 +1004,35 @@ export async function refreshContext(root, options = {}) {
   ].join('\n');
   await atomicWrite(path.join(root, '.noosphere', 'context.md'), output);
   return output;
+}
+
+// A slot has three states and the render must show three, not two.
+//
+// "No master prompt has been recorded" is a claim about the OWNER — that they
+// never pinned one. Printing it over a master prompt that exists but is corrupt,
+// oversized, non-regular, or unreadable is a lie an agent then acts on, and it
+// is a lie any working-tree writer can induce with one byte. Present-but-unusable
+// therefore renders its own fail-closed section: non-authoritative (the bytes
+// are empty and isSlotAuthoritative rejects empty outright), no Walrus
+// restoration (decided above), and no silence about the fact that local owner
+// content is there.
+//
+// The diagnostic carries the slot name, the fixed relative path, and the
+// classification code — all constants from this codebase. It never includes any
+// byte from the file: the whole reason this path ran is that those bytes are
+// untrustworthy, and a render that quoted them would hand a tree writer the
+// unquoted-output channel this section exists to deny.
+function unusableSlotSection(heading, source, slot, absentMessage) {
+  if (!source.unusable) return `${heading}\n\n${absentMessage}`;
+  return [
+    heading,
+    '',
+    `This slot EXISTS but could not be read (${source.reason}); its content is`,
+    'deliberately not shown and is NOT authoritative. This is not an empty slot —',
+    'do not treat it as though the owner recorded nothing.',
+    '',
+    `Repair \`.noosphere/${slot}.md\` and re-run \`noosphere refresh\`.`,
+  ].join('\n');
 }
 
 async function recallTypedMemories(config, { baseline, masterPrompt, followups }) {
@@ -1009,7 +1105,7 @@ export async function buildWorkspaceSnapshot(root, config) {
   }
   if (config.privacy.share_journal) {
     snapshot.public_work_journal = (
-      await readFile(path.join(root, '.noosphere', 'journal.md'), 'utf8')
+      await readRepositoryText(path.join(root, '.noosphere', 'journal.md'))
     ).slice(-20_000);
   }
   return snapshot;
@@ -1261,12 +1357,16 @@ verifiable findings and handoffs to the journal. Do not write hidden chain-of-th
 
 async function ensureLocalExcludes(root) {
   const exclude = path.join(root, '.git', 'info', 'exclude');
-  let current = '';
-  try {
-    current = await readFile(exclude, 'utf8');
-  } catch {
-    // git init normally creates this file, but creating it is harmless.
+  // git init normally creates this file, but creating it is harmless. Same bound
+  // and same strictness as csp/storage.js, which reads and rewrites this exact
+  // file: this function writes `current` back with our entries appended, so
+  // degrading an unreadable file to '' would silently replace the user's
+  // excludes instead of refusing.
+  const existing = await readRepositoryFile(exclude, { maxBytes: MAX_EXCLUDE_BYTES });
+  if (existing.unusable) {
+    throw new Error(`${exclude} exists but could not be read (${existing.reason}).`);
   }
+  const current = existing.text;
   const entries = [
     '.noosphere/baseline.md',
     '.noosphere/context.md',
@@ -1288,41 +1388,47 @@ async function ensureLocalExcludes(root) {
   }
   const next = `${lines.join('\n')}\n`;
   if (next !== current) {
-    await mkdir(path.dirname(exclude), { recursive: true });
-    await writeFile(exclude, next, 'utf8');
+    await atomicWrite(exclude, next);
   }
 }
 
 async function upsertManagedBlock(file, block) {
-  let current = '';
-  try {
-    current = await readFile(file, 'utf8');
-  } catch {
-    // Create the adapter when the tool-specific file is absent.
+  // Create the adapter when the tool-specific file is absent.
+  //
+  // Present-but-unusable must abort, exactly as it does in ensureLocalExcludes
+  // and removeManagedBlock: this is a read-modify-write, so degrading an
+  // unreadable adapter to '' would write the managed block back as the WHOLE
+  // file and destroy everything the user wrote around it. The reachable case is
+  // an adapter file that is a symlink (`CLAUDE.md -> AGENTS.md` is an ordinary
+  // setup, and pre-Phase-4B readFile followed it); an oversized, non-regular, or
+  // permission-revoked adapter reaches the same branch.
+  const existing = await readRepositoryFile(file);
+  if (existing.unusable) {
+    throw new Error(
+      `${file} exists but could not be read (${existing.reason}); refusing to replace it. Replace a symlinked adapter file with a regular file, or repair it, then re-run.`,
+    );
   }
+  const current = existing.text;
   const pattern = new RegExp(
     `${escapeRegExp(MANAGED_START)}[\\s\\S]*?${escapeRegExp(MANAGED_END)}`,
   );
   const next = pattern.test(current)
     ? current.replace(pattern, block)
     : `${current.trimEnd()}${current.trim() ? '\n\n' : ''}${block}\n`;
-  await writeFile(file, next, 'utf8');
+  await atomicWrite(file, next);
 }
 
 async function removeManagedBlock(file) {
-  let current;
-  try {
-    current = await readFile(file, 'utf8');
-  } catch {
-    return;
-  }
+  const existing = await readRepositoryFile(file);
+  if (!existing.present || existing.unusable) return;
+  const current = existing.text;
   const pattern = new RegExp(
     `${escapeRegExp(MANAGED_START)}[\\s\\S]*?${escapeRegExp(MANAGED_END)}\\n?`,
   );
   if (!pattern.test(current)) return;
   const next = current.replace(pattern, '').trim();
   if (next) {
-    await writeFile(file, `${next}\n`, 'utf8');
+    await atomicWrite(file, `${next}\n`);
   } else {
     await rm(file, { force: true });
   }
@@ -1416,11 +1522,12 @@ function formatCheckpoint(snapshot) {
 
 async function printContext(root) {
   const file = path.join(root, '.noosphere', 'context.md');
-  try {
-    process.stdout.write(await readFile(file, 'utf8'));
-  } catch {
-    process.stdout.write(await refreshContext(root));
+  const cached = await readRepositoryFile(file).catch(() => ({ present: false }));
+  if (cached.present && !cached.unusable) {
+    process.stdout.write(cached.text);
+    return;
   }
+  process.stdout.write(await refreshContext(root));
 }
 
 async function approveRelayerFromCli(url) {
@@ -1430,6 +1537,32 @@ async function approveRelayerFromCli(url) {
   const origin = await approveOrigin(url);
   console.log(`Approved relayer origin: ${origin}`);
   console.log('The API token may now be sent to this origin.');
+}
+
+// SEC-05 Phase 4B — the owner-approval boundary.
+//
+// This is the only supported way to make project content authoritative. It is
+// interactive on purpose: the approval service refuses without a TTY on stdin
+// and stdout, and there is deliberately no --yes/env/config bypass, so piped,
+// redirected, and scripted approval are refused. A TTY check is not proof of
+// human presence — an adversary who can run commands as the owner can allocate
+// a PTY and compute the phrase offline. See SECURITY.md for the accepted
+// residual.
+async function trustFromCli(root, args) {
+  const remaining = [...args];
+  const pathIndex = remaining.indexOf('--path');
+  if (pathIndex !== -1) remaining.splice(pathIndex, 2);
+  const [subcommand, slot] = remaining;
+  if (remaining.length !== 2 || subcommand !== 'approve' || !APPROVABLE_SLOTS.includes(slot)) {
+    const error = new Error(`Usage: noosphere trust approve <${APPROVABLE_SLOTS.join('|')}> [--path /absolute/repository]`);
+    error.exitCode = 2;
+    throw error;
+  }
+  const { record, manifest } = await approveSlot({ projectRoot: root, slot });
+  console.log(`Approved ${slot} as generation ${manifest.currentGeneration}.`);
+  console.log(`  record: ${record.recordId}`);
+  console.log(`  audit:  ${record.auditEventId}`);
+  console.log('These exact bytes now render as authoritative project instructions.');
 }
 
 async function recallFromCli(root) {
@@ -1486,14 +1619,20 @@ async function journalFromCli(root) {
 }
 
 async function masterPromptFromCli(root) {
-  const existing = await readMasterPrompt(root);
+  const { text: existing, exists: existingPresent, unusable: existingUnusable, reason: existingReason } =
+    await readMasterPromptForCapture(root);
   const hasInput =
     Boolean(readFlag('--content')) ||
     contentPositionals().length > 0 ||
     !process.stdin.isTTY;
 
   if (!hasInput) {
-    if (!existing) {
+    if (existingUnusable) {
+      throw new Error(
+        `The master prompt exists but cannot be read (${existingReason}); repair or replace it with --replace.`,
+      );
+    }
+    if (!existingPresent) {
       console.log('No master prompt has been captured for this project.');
       return;
     }
@@ -1648,11 +1787,21 @@ async function readHandoffSource() {
   if (file && useStdin) throw new Error('Provide exactly one of --file or --stdin.');
   if (file) {
     const resolved = path.resolve(file);
-    const details = await stat(resolved);
-    if (details.size > MAX_HANDOFF_BYTES) {
-      throw new Error(`ACP handoff file exceeds ${MAX_HANDOFF_BYTES} bytes.`);
+    // One bounded read replaces stat-then-readFile: the size is checked on the
+    // descriptor that is actually read, so the file cannot grow past the bound
+    // between the two calls, and a FIFO fails instead of blocking.
+    const handoff = await readBoundedRegularFile(resolved, { maxBytes: MAX_HANDOFF_BYTES }).catch((error) => {
+      if (error.code === 'state-file-too-large') {
+        throw new Error(`ACP handoff file exceeds ${MAX_HANDOFF_BYTES} bytes.`);
+      }
+      throw error;
+    });
+    if (handoff === null) {
+      const error = new Error(`ENOENT: no such file or directory, open '${resolved}'`);
+      error.code = 'ENOENT';
+      throw error;
     }
-    return readFile(resolved, 'utf8');
+    return handoff.toString('utf8');
   }
   if (useStdin || !process.stdin.isTTY) {
     const chunks = [];
@@ -1789,7 +1938,9 @@ async function classifyAgainstRepository(root, execution, now) {
 async function execImportPlan(root, planPath, now) {
   if (!planPath) throw new Error('Usage: noosphere exec import-plan <markdown-file>');
   const resolved = path.resolve(planPath);
-  const markdown = await readFile(resolved, 'utf8');
+  const plan = await readBoundedRegularFile(resolved, { maxBytes: MAX_REPOSITORY_INPUT_BYTES });
+  if (plan === null) throw new Error(`No such plan file: ${resolved}`);
+  const markdown = plan.toString('utf8');
   const boxes = [...markdown.matchAll(/^[-*] \[([ xX])\] (.+)$/gm)];
   if (!boxes.length) throw new Error('No markdown checkboxes (`- [ ]` / `- [x]`) found in the plan.');
   const relativePlan = path.relative(root, resolved) || path.basename(resolved);
@@ -2246,8 +2397,9 @@ export async function captureMasterPrompt(
   if (automatic && config.privacy.capture_master_prompt === false) {
     return { captured: false, reason: 'disabled' };
   }
-  const existing = await readMasterPrompt(root);
-  if (existing && !force) {
+  const { text: existing, exists: existingPresent } = await readMasterPromptForCapture(root);
+  // Unusable counts as present: refuse the overwrite unless --replace.
+  if (existingPresent && !force) {
     return captureFollowupPrompt(root, prompt, {
       config,
       share,
@@ -2392,10 +2544,9 @@ export function isMasterPromptCandidate(content) {
 async function ollamaFromCli(root) {
   const config = await loadConfig(root);
   const options = parseOllamaArguments(process.argv.slice(3));
-  const instructions = await readFile(
-    path.join(root, '.noosphere', 'instructions.md'),
-    'utf8',
-  ).catch(() => '');
+  // Phase 4B: read the instructions slot through the shared resolver, so the
+  // bytes this sink gates on are the bytes `trust approve instructions` binds.
+  const instructions = (await resolveSlotSourceForRead(root, 'instructions')).text;
   let context;
   try {
     context = await refreshContext(root, {
@@ -2407,16 +2558,14 @@ async function ollamaFromCli(root) {
     console.warn(
       `[Noosphere] Remote context refresh failed; using local context: ${error.message}`,
     );
-    context = await readFile(
-      path.join(root, '.noosphere', 'context.md'),
-      'utf8',
-    ).catch(() => emptyContext(config.project_id));
+    const cached = await readRepositoryFile(path.join(root, '.noosphere', 'context.md'));
+    context = cached.present && !cached.unusable ? cached.text : emptyContext(config.project_id);
   }
-  const journal = await readFile(
+  const journal = await readRepositoryText(
     path.join(root, '.noosphere', 'journal.md'),
-    'utf8',
-  ).catch(() => '');
-  const masterPrompt = await readMasterPrompt(root);
+  );
+  // Render-only sink: degrade rather than abort if the slot is unusable.
+  const masterPrompt = (await resolveSlotSourceForRead(root, 'master-prompt')).text;
   const followups = formatFollowupPrompts(await readFollowupPrompts(root));
 
   await runOllamaSession({
@@ -2460,23 +2609,83 @@ async function ollamaFromCli(root) {
   });
 }
 
+// STRICT: this is an output contract, not a render. Callers pipe `noosphere
+// protocol` into agents; emitting zero bytes with exit 0 hands them a silently
+// empty protocol and no way to tell that apart from a project that genuinely has
+// none.
+//
+// All four failure shapes therefore share ONE contract — nonzero exit and a
+// diagnostic on stderr:
+//   absent        .noosphere/instructions.md does not exist;
+//   non-regular   a FIFO, socket, device, directory or symlink at that path;
+//   unreadable    permissions revoked, oversized, changed mid-read;
+//   malformed     not valid UTF-8.
+// Absence is the one that regressed: before Phase 4B this was a bare readFile,
+// so an absent file raised ENOENT and exited nonzero. Phase 4B routed it through
+// resolveSlotSource, whose empty-source-for-absent convention turned that into
+// zero bytes and exit 0. `present` restores the distinction.
+//
+// PRESENT-but-EMPTY keeps the pre-Phase-4B behaviour deliberately: an empty file
+// is a readable file, so it writes zero bytes and exits 0, exactly as readFile
+// did.
 async function printProtocol(root) {
-  const file = path.join(root, '.noosphere', 'instructions.md');
-  process.stdout.write(await readFile(file, 'utf8'));
+  const source = await resolveSlotSource(root, 'instructions');
+  if (!source.present) {
+    const error = new Error(
+      'No protocol instructions are recorded for this project (.noosphere/instructions.md does not exist). Run `noosphere init` first.',
+    );
+    error.code = 'slot-absent';
+    throw error;
+  }
+  process.stdout.write(source.text);
 }
 
+// STRICT on purpose. Every caller of this either writes the slot
+// (captureMasterPrompt, masterPromptFromCli) or ships its content elsewhere
+// (shareMasterPromptFromCli), and those paths must not mistake an unreadable
+// master prompt for an absent one: `existing` falsy sends captureMasterPrompt
+// down its overwrite branch, silently replacing the owner's pinned prompt after
+// a tree writer plants a single invalid byte. Read-only render paths use
+// resolveSlotSourceForRead instead.
 async function readMasterPrompt(root) {
-  return readFile(
-    path.join(root, '.noosphere', 'master-prompt.md'),
-    'utf8',
-  ).catch(() => '');
+  return (await resolveSlotSource(root, 'master-prompt')).text;
+}
+
+// Capture/write paths need three states, not two: absent, present-and-readable,
+// and present-but-unusable. Collapsing the third into "absent" is what let a
+// planted invalid byte turn `noosphere master-prompt "…"` into a silent
+// overwrite of the owner's pinned prompt. Unusable counts as EXISTING, so the
+// no-force branch refuses; an explicit --replace still overwrites, which is what
+// --replace means.
+async function readMasterPromptForCapture(root) {
+  try {
+    const text = (await resolveSlotSource(root, 'master-prompt')).text;
+    return { text, exists: Boolean(text), unusable: false };
+  } catch (error) {
+    if (UNUSABLE_SOURCE_CODES.has(error.code)) {
+      return { text: '', exists: true, unusable: true, reason: error.code };
+    }
+    throw error;
+  }
+}
+
+// Restored (Walrus) content must land on EXACTLY the bytes the local file would
+// have produced. storePreparedBaseline uploads the whole baseline file, header
+// included, so a restored baseline needs the same header strip and trim local
+// content gets — otherwise the sink renders the header for restored content
+// only, and the "one derivation" guarantee in slot-sources.js is false.
+function sourceFromRestoredText(text, slot) {
+  const sourceText = slot === 'baseline' ? baselineBody(text) : String(text ?? '');
+  return { bytes: Buffer.from(sourceText, 'utf8'), text: sourceText };
 }
 
 async function readFollowupPrompts(root) {
-  const content = await readFile(
+  // Bounded and non-blocking: this runs on every refresh and every watch tick,
+  // so a FIFO here used to stall the watcher permanently. Unusable degrades to
+  // "no follow-ups"; an unrecognised fault still propagates.
+  const content = await readRepositoryText(
     path.join(root, '.noosphere', 'followups.jsonl'),
-    'utf8',
-  ).catch(() => '');
+  );
   return content
     .split(/\r?\n/)
     .filter(Boolean)
@@ -2704,11 +2913,7 @@ next recommended action.
 - HTTP recall: \`POST /v1/projects/${slug}/recall\`
 - MCP namespace: \`noosphere-${slug}\`
 `;
-  await writeFile(
-    path.join(root, '.noosphere', 'instructions.md'),
-    content,
-    'utf8',
-  );
+  await atomicWrite(path.join(root, '.noosphere', 'instructions.md'), content);
   await writeJson(path.join(root, '.noosphere', 'protocol.json'), {
     protocol: 'noosphere-continuity',
     version: '1.0',
@@ -2746,13 +2951,14 @@ async function projectConfigExists(root) {
 
 async function removeLegacyProjectFiles(root) {
   const legacyProtocol = path.join(root, 'NOOSPHERE.md');
-  const content = await readFile(legacyProtocol, 'utf8').catch(() => '');
+  const content = await readRepositoryText(legacyProtocol);
   if (content.startsWith('# Noosphere universal agent protocol')) {
     await rm(legacyProtocol, { force: true });
   }
 
   const gitignore = path.join(root, '.gitignore');
-  const current = await readFile(gitignore, 'utf8').catch(() => null);
+  const gitignoreFile = await readRepositoryFile(gitignore);
+  const current = gitignoreFile.present && !gitignoreFile.unusable ? gitignoreFile.text : null;
   if (current === null) return;
   const legacyEntries = new Set([
     '.noosphere/context.md',
@@ -2766,17 +2972,16 @@ async function removeLegacyProjectFiles(root) {
     .join('\n')
     .replace(/^\n+|\n+$/g, '');
   if (remaining) {
-    await writeFile(gitignore, `${remaining}\n`, 'utf8');
+    await atomicWrite(gitignore, `${remaining}\n`);
   } else {
     await rm(gitignore, { force: true });
   }
 }
 
 async function formatLocalJournal(root) {
-  const journal = await readFile(
+  const journal = await readRepositoryText(
     path.join(root, '.noosphere', 'journal.md'),
-    'utf8',
-  ).catch(() => '');
+  );
   const firstEntry = journal.indexOf('\n## ');
   const entries =
     firstEntry >= 0 ? journal.slice(firstEntry + 1).trim() : '';
@@ -2786,10 +2991,9 @@ async function formatLocalJournal(root) {
 }
 
 async function fileHasJournalEntries(root) {
-  const journal = await readFile(
+  const journal = await readRepositoryText(
     path.join(root, '.noosphere', 'journal.md'),
-    'utf8',
-  ).catch(() => '');
+  );
   return journal.includes('\n## ');
 }
 
@@ -2879,13 +3083,44 @@ async function requestText(url) {
   return text;
 }
 
-async function readJson(file) {
+// THE read for every repository-controlled file in this module.
+//
+// Bare readFile is not safe on a path a working tree controls: `mkfifo
+// .noosphere/followups.jsonl` makes it block forever with no error code, so
+// refresh never returns, and under `watch` the refresh guard it set stays set —
+// the watcher is alive but has permanently stopped refreshing. Routing through
+// readBoundedRegularFile (O_NOFOLLOW, O_NONBLOCK, fstat-after-open, size bound,
+// bounded read) makes every such object fail fast instead.
+//
+// Returns { text, present, unusable, reason }. Absent is not unusable and
+// unusable is not absent; callers that need to tell them apart can.
+async function readRepositoryFile(file, { maxBytes = MAX_REPOSITORY_INPUT_BYTES } = {}) {
   try {
-    return JSON.parse(await readFile(file, 'utf8'));
+    const bytes = await readBoundedRegularFile(file, { maxBytes });
+    if (bytes === null) return { text: '', present: false, unusable: false };
+    return { text: bytes.toString('utf8'), present: true, unusable: false };
   } catch (error) {
-    if (error.code === 'ENOENT') return null;
+    if (REPOSITORY_UNUSABLE_CODES.has(error.code)) {
+      return { text: '', present: true, unusable: true, reason: error.code };
+    }
     throw error;
   }
+}
+
+// Convenience for the many callers whose only correct response to an absent or
+// unusable file is an empty string.
+async function readRepositoryText(file, options) {
+  return (await readRepositoryFile(file, options)).text;
+}
+
+async function readJson(file) {
+  const { text, present, unusable, reason } = await readRepositoryFile(file);
+  if (!present) return null;
+  // Present-but-unusable is NOT absent. Returning null here would let a planted
+  // FIFO at .noosphere/config.json silently fall through to the legacy
+  // .noosphere.json — a configuration downgrade a tree writer could trigger.
+  if (unusable) throw new Error(`${file} exists but could not be read (${reason}).`);
+  return JSON.parse(text);
 }
 
 async function readRuntimeState(root) {
@@ -2907,8 +3142,7 @@ async function exists(file) {
 }
 
 async function writeJson(file, value) {
-  await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  await atomicWrite(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 async function writeTextIfMissing(file, value) {
@@ -2917,13 +3151,6 @@ async function writeTextIfMissing(file, value) {
   } catch {
     await writeFile(file, value, 'utf8');
   }
-}
-
-async function atomicWrite(file, value) {
-  await mkdir(path.dirname(file), { recursive: true });
-  const temporary = `${file}.${randomUUID()}.tmp`;
-  await writeFile(temporary, value, 'utf8');
-  await rename(temporary, file);
 }
 
 function emptyContext(projectId) {
@@ -3071,6 +3298,11 @@ Commands:
   journal     Append a concise public work note
   master-prompt
               Print or explicitly store the exact pinned project prompt
+  trust approve <slot>
+              Approve a source slot (master-prompt, instructions, baseline) so
+              its exact current bytes render as authoritative instructions.
+              Interactive only: it shows the bytes and requires a typed
+              confirmation at your terminal, and has no unattended mode.
   ollama      Run any Ollama model with shared project memory
   protocol    Print the universal agent protocol
   state       Print or transition canonical CSP project state:

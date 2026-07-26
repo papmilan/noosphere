@@ -27,6 +27,7 @@ import {
   TrustStoreError,
   canonicalize,
   ensureMachineKey,
+  homeDir,
   machineKeyId,
   ownerScope,
 } from '../trust-store-internal.js';
@@ -108,8 +109,11 @@ function verifyMac(key, type, record) {
 }
 
 export function createFormatV2Store({ env = process.env, secureFileOptions = {}, now } = {}) {
-  const home = env.NOOSPHERE_HOME;
-  if (!home) throw new Error('NOOSPHERE_HOME is required for the format-2 store');
+  // Phase 4B: production callers (the approval service and the authority gate)
+  // run without NOOSPHERE_HOME set, so fall back to the same default home the
+  // rest of the trust store uses. This is a default, not a new selector: the
+  // value still comes from homeDir(env), with no added precedence.
+  const home = homeDir(env);
   const root = path.join(home, 'trust-v2');
   const options = { ...secureFileOptions, root: home };
   const key = () => ensureMachineKey(env, options);
@@ -137,9 +141,12 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
   }
 
   async function createProjectBinding(projectRoot) {
+    // The approval path deliberately leaves NOOSPHERE_HOME absent until the
+    // owner confirms. Establish the owner-only root/key before the first secure
+    // binding read so a genuine first approval can initialize format 2.
+    const machineKey = await key();
     const file = bindingPath(projectRoot);
     if (await readOwnerOnlyFile(file, options) !== null) return readProjectBinding(projectRoot);
-    const machineKey = await key();
     const fields = { format: FORMAT, type: 'project-binding', projectIdentity: crypto.randomUUID(), ownerScope: scope(), realpathHash: hash(await fs.realpath(projectRoot)), keyId: machineKeyId(machineKey) };
     const binding = { ...fields, mac: hmac(machineKey, 'project-binding', fields) };
     try { await writeExclusive(file, binding); } catch (error) { if (error.code !== 'state-file-exists') throw error; }
