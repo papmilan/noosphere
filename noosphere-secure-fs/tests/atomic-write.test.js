@@ -411,7 +411,7 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
     assert.equal(calls, 2);
   });
 
-  it('does not retry Windows EPERM when no lock exists', async () => {
+  it('bounds Windows EPERM retries when a contended lock vanishes before inspection', async () => {
     const root = await fresh();
     let calls = 0;
     await assert.rejects(
@@ -419,6 +419,8 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
         root,
         platform: 'win32',
         maxBytes: 1024,
+        vanishedLockRetries: 2,
+        lockBackoffMs: 1,
         open: async () => {
           calls += 1;
           throw Object.assign(new Error('permission denied'), { code: 'EPERM' });
@@ -426,7 +428,7 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
       }),
       (error) => error.code === 'EPERM',
     );
-    assert.equal(calls, 1);
+    assert.equal(calls, 3);
   });
 
   it('removes only regular files and real empty directories under the repository root', async () => {

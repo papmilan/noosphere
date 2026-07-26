@@ -722,6 +722,8 @@ export async function appendRepositoryFile(file, data, options = {}) {
   const platform = options.platform ?? process.platform;
   let lockHandle;
   let ownsLock = false;
+  const maxAttempts = options.lockAttempts ?? 100;
+  const vanishedLockRetries = Math.min(options.vanishedLockRetries ?? 5, maxAttempts);
   try {
     for (let attempt = 1; ; attempt += 1) {
       try {
@@ -736,9 +738,9 @@ export async function appendRepositoryFile(file, data, options = {}) {
         let contention = error.code === 'EEXIST';
         if (platform === 'win32' && ['EPERM', 'EACCES'].includes(error.code)) {
           const lockInfo = await assertFinalNotReparse(lock);
-          contention = lockInfo !== null;
+          contention = lockInfo !== null || attempt <= vanishedLockRetries;
         }
-        if (!contention || attempt >= (options.lockAttempts ?? 100)) {
+        if (!contention || attempt >= maxAttempts) {
           if (contention) {
             throw new PathBoundaryError('state-append-busy', `append lock remained busy: ${resolved.file}`, error);
           }

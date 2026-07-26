@@ -118,11 +118,15 @@ try {
       Fail 'state-acl-copy-failed' 'a source file path is required'
     }
     try {
-      $security = [System.IO.File]::GetAccessControl(
+      $sections = [System.Security.AccessControl.AccessControlSections]::Access
+      $sourceSecurity = [System.IO.File]::GetAccessControl(
         $SourcePath,
-        [System.Security.AccessControl.AccessControlSections]::Access
+        $sections
       )
-      [System.IO.File]::SetAccessControl($LiteralPath, $security)
+      $sddl = $sourceSecurity.GetSecurityDescriptorSddlForm($sections)
+      $destinationSecurity = [System.Security.AccessControl.FileSecurity]::new()
+      $destinationSecurity.SetSecurityDescriptorSddlForm($sddl, $sections)
+      [System.IO.File]::SetAccessControl($LiteralPath, $destinationSecurity)
       exit 0
     } catch {
       Fail 'state-acl-copy-failed' $_.Exception.Message
