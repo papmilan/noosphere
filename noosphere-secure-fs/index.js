@@ -478,7 +478,9 @@ export async function readBoundedRegularFile(file, { maxBytes } = {}) {
       throw error;
     });
     if (info === null) return null;
-    if (windowsPreOpen(info, absolute, limit) === null) return null;
+    // Classifies or throws; it has no "absent" answer, because absence was
+    // already decided by the lstat above.
+    windowsPreOpen(info, absolute, limit);
   }
   let handle;
   try {
