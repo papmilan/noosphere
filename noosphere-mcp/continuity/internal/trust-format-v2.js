@@ -41,6 +41,10 @@ import {
   projectIdentityDigest,
 } from './project-identity.js';
 import { is, parseAuthenticatedRecord } from './strict-schema.js';
+import {
+  buildRevokedGeneration,
+  validateTrustGeneration,
+} from './trust-generation.js';
 
 export const FORMAT = 2;
 export const FORMAT2_SLOTS = Object.freeze(['master-prompt', 'instructions', 'baseline']);
@@ -53,6 +57,7 @@ export const JOURNAL_STATES = Object.freeze([
 
 const SLOT_SET = new Set(FORMAT2_SLOTS);
 const STATE_SET = new Set(JOURNAL_STATES);
+const AUTHORITY_STATE_SET = new Set(['approved', 'revoked']);
 
 function hash(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
 function hmac(key, domain, fields) { return authenticatedMac(key, domain, fields); }
@@ -88,11 +93,31 @@ const RECORD_SCHEMA = {
   approvalEventId: is.uuid, previousRecordId: is.nullable(is.uuid), auditEventId: is.uuid,
   approvedAt: is.rfc3339utc, keyId: is.hex64, mac: is.hex64,
 };
+const REVOKED_RECORD_SCHEMA = {
+  domain: is.enumOf(new Set([AUTH_DOMAINS.revokedGeneration])),
+  schema: is.enumOf(new Set(['noosphere.sec05.revoked-generation'])),
+  version: is.intEquals(1),
+  recordId: is.uuid,
+  projectIdentityDigest: isProjectIdentityDigest,
+  ownerScope: is.str,
+  slot: isSlot,
+  generation: is.posInt,
+  previousGeneration: is.nonNegInt,
+  previousCurrentRecordId: is.uuid,
+  previousCurrentRecordHash: is.hex64,
+  transition: is.enumOf(new Set(['revoked'])),
+  keyIdentity: is.hex64,
+  auditEventId: is.uuid,
+  createdAt: is.rfc3339utc,
+  sourceOrigin: is.str,
+  mac: is.hex64,
+};
 const MANIFEST_SCHEMA = {
   domain: is.enumOf(new Set([AUTH_DOMAINS.manifest])),
   format: isFormat, type: is.enumOf(new Set(['manifest'])),
   projectIdentity: is.uuid, projectIdentityDigest: isProjectIdentityDigest,
   ownerScope: is.str, slot: isSlot, currentGeneration: is.posInt,
+  currentState: is.enumOf(AUTHORITY_STATE_SET),
   currentRecordId: is.uuid, currentRecordHash: is.hex64, auditHeadId: is.uuid, auditHeadHash: is.hex64,
   keyId: is.hex64, mac: is.hex64,
 };
@@ -225,11 +250,23 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
     return projectIdentityDigest(identity);
   }
 
-  async function readImmutableRecord(file) {
-    const record = await readParsed(file, 'slot-record', RECORD_SCHEMA);
+  async function readImmutableRecord(
+    file,
+    expectedState = 'approved',
+    expectedIdentityDigest,
+  ) {
+    const revoked = expectedState === 'revoked';
+    const type = revoked ? 'revoked-generation' : 'slot-record';
+    const domain = revoked
+      ? AUTH_DOMAINS.revokedGeneration
+      : AUTH_DOMAINS.approvedGeneration;
+    const schema = revoked ? REVOKED_RECORD_SCHEMA : RECORD_SCHEMA;
+    const record = await readParsed(file, type, schema);
     if (!record) return null;
-    verifyMac(await key(), 'slot-record', AUTH_DOMAINS.approvedGeneration, record);
-    if (record.projectIdentityDigest !== identityDigestFor(record)) {
+    verifyMac(await key(), type, domain, record);
+    if (revoked) validateTrustGeneration(record);
+    const canonicalDigest = expectedIdentityDigest ?? identityDigestFor(record);
+    if (record.projectIdentityDigest !== canonicalDigest) {
       throw new TrustStoreError(
         'project-identity-invalid',
         'slot record does not match the canonical project identity',
@@ -365,12 +402,68 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
     } catch { return false; }
   }
 
+  async function readSlotRecordSequence(binding, slot) {
+    const directory = path.join(rootFor(binding), 'records', slot);
+    const entries = await fs.readdir(directory).catch(error =>
+      error.code === 'ENOENT' ? [] : Promise.reject(error));
+    const counts = new Map();
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue;
+      const match = /^([1-9]\d*)-([0-9a-f-]{36})\.json$/.exec(entry);
+      if (!match || !is.uuid(match[2])) {
+        throw new TrustStoreError(
+          'authority-history-invalid',
+          'generation filename is invalid',
+        );
+      }
+      const generation = Number(match[1]);
+      counts.set(generation, (counts.get(generation) ?? 0) + 1);
+    }
+    return counts;
+  }
+
+  async function validateSlotRecordSequence(binding, slot, manifest) {
+    const counts = await readSlotRecordSequence(binding, slot);
+    if (!manifest) {
+      if (counts.size !== 0) {
+        throw new TrustStoreError(
+          'authority-history-invalid',
+          'generation history exists without a manifest',
+        );
+      }
+      return;
+    }
+    if (counts.size !== manifest.currentGeneration) {
+      throw new TrustStoreError(
+        'authority-history-invalid',
+        'generation history length does not match the manifest',
+      );
+    }
+    for (let generation = 1; generation <= manifest.currentGeneration; generation += 1) {
+      if (counts.get(generation) !== 1) {
+        throw new TrustStoreError(
+          'authority-history-invalid',
+          'generation history has a gap, duplicate, or rollback',
+        );
+      }
+    }
+  }
+
   async function isFormat2Authoritative({ binding, slot, rawBytes }) {
     try {
-      const manifest = await readManifest(binding, slot); if (!manifest || !await verifyAuditChain(binding, slot)) return false;
+      const manifest = await readManifest(binding, slot);
+      if (!manifest) return false;
+      await validateSlotRecordSequence(binding, slot, manifest);
+      if (!await verifyAuditChain(binding, slot)) return false;
+      if (manifest.currentState !== 'approved') return false;
       const event = await readAudit(binding, manifest.auditHeadId); if (!event) return false;
       const file = recordPath(binding, slot, manifest.currentGeneration, event.eventId);
-      const record = await readImmutableRecord(file); if (!record) return false;
+      const record = await readImmutableRecord(
+        file,
+        'approved',
+        identityDigestFor(binding),
+      );
+      if (!record) return false;
       const raw = await readOwnerOnlyFile(file, options);
       const value = bytes(rawBytes);
       return record.recordId === manifest.currentRecordId
@@ -519,6 +612,7 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
         ownerScope: scope(),
         slot,
         currentGeneration: generation,
+        currentState: 'approved',
         currentRecordId: recordId,
         currentRecordHash: recordHash,
         auditHeadId: eventId,
@@ -541,7 +635,299 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
     }
   }
 
+  async function classifySlot({ binding, slot }) {
+    assertSlot(slot);
+    const manifest = await readManifest(binding, slot);
+    if (!manifest) {
+      await validateSlotRecordSequence(binding, slot, null);
+      return Object.freeze({
+        state: 'pristine-unapproved',
+        generation: 0,
+        recordId: null,
+        recordHash: null,
+      });
+    }
+    await validateSlotRecordSequence(binding, slot, manifest);
+    if (!await verifyAuditChain(binding, slot)) {
+      throw new TrustStoreError('authority-history-invalid', 'authority audit chain is invalid');
+    }
+    const event = await readAudit(binding, manifest.auditHeadId);
+    if (!event) {
+      throw new TrustStoreError('authority-history-invalid', 'current audit event is missing');
+    }
+    const file = recordPath(
+      binding,
+      slot,
+      manifest.currentGeneration,
+      event.eventId,
+    );
+    const generation = await readImmutableRecord(
+      file,
+      manifest.currentState,
+      identityDigestFor(binding),
+    );
+    const raw = await readOwnerOnlyFile(file, options);
+    if (!generation || !raw ||
+        generation.recordId !== manifest.currentRecordId ||
+        hash(raw) !== manifest.currentRecordHash ||
+        event.recordId !== manifest.currentRecordId ||
+        event.recordHash !== manifest.currentRecordHash) {
+      throw new TrustStoreError('authority-history-invalid', 'current generation is invalid');
+    }
+    return Object.freeze({
+      state: manifest.currentState,
+      generation: manifest.currentGeneration,
+      recordId: manifest.currentRecordId,
+      recordHash: manifest.currentRecordHash,
+      generationRecord: generation,
+      manifest,
+    });
+  }
+
+  async function commitApproval(input = {}) {
+    const result = await commitTransaction(input);
+    return Object.freeze({
+      ...result,
+      status: 'approved',
+      generation: result.record,
+    });
+  }
+
+  async function commitRevocation({
+    binding,
+    slot,
+    sourceOrigin,
+    onStep = () => {},
+  } = {}) {
+    assertSlot(slot);
+    if (sourceOrigin !== `cli:trust-revoke:${slot}`) {
+      throw new TrustStoreError(
+        'revoked-generation-invalid',
+        'revocation source origin is invalid',
+      );
+    }
+    const eventId = crypto.randomUUID();
+    const lock = await acquireLock(binding, slot, eventId);
+    try {
+      const prior = await readManifest(binding, slot);
+      if (!prior) {
+        throw new TrustStoreError(
+          'revocation-no-approved-generation',
+          'revocation requires an approved current generation',
+        );
+      }
+      if (prior.currentState === 'revoked') {
+        const current = await classifySlot({ binding, slot });
+        return Object.freeze({
+          status: 'already-revoked',
+          generation: current.generationRecord,
+          manifest: current.manifest,
+        });
+      }
+      if (prior.currentState !== 'approved' ||
+          !await verifyAuditChain(binding, slot)) {
+        throw new TrustStoreError(
+          'authority-history-invalid',
+          'revocation requires valid approved history',
+        );
+      }
+      const priorAudit = await readAudit(binding, prior.auditHeadId);
+      const priorRecordFile = recordPath(
+        binding,
+        slot,
+        prior.currentGeneration,
+        priorAudit.eventId,
+      );
+      const priorRecord = await readImmutableRecord(
+        priorRecordFile,
+        'approved',
+        identityDigestFor(binding),
+      );
+      const priorRecordRaw = await readOwnerOnlyFile(priorRecordFile, options);
+      if (!priorRecord || !priorRecordRaw ||
+          hash(priorRecordRaw) !== prior.currentRecordHash) {
+        throw new TrustStoreError(
+          'authority-history-invalid',
+          'current approved generation is invalid',
+        );
+      }
+
+      const generation = prior.currentGeneration + 1;
+      const machineKey = await key();
+      const keyId = machineKeyId(machineKey);
+      const projectIdentityDigest = identityDigestFor(binding);
+      const recordId = crypto.randomUUID();
+      const createdAt = nowIso(now);
+      const priorManifestHash = hash(
+        await readOwnerOnlyFile(manifestPath(binding, slot), options),
+      );
+      const journal = {
+        domain: AUTH_DOMAINS.authorityJournal,
+        format: FORMAT,
+        type: 'transaction-journal',
+        transactionId: eventId,
+        projectIdentity: binding.projectIdentity,
+        projectIdentityDigest,
+        ownerScope: scope(),
+        slot,
+        candidateGeneration: generation,
+        priorManifestHash,
+        recordId,
+        auditEventId: eventId,
+        recordHash: null,
+        auditHash: null,
+        state: 'journal-prepared',
+        keyId,
+      };
+      await writeJournal(binding, eventId, journal);
+      await onStep('journal-prepared');
+
+      const tombstoneFields = buildRevokedGeneration({
+        recordId,
+        projectIdentityDigest,
+        ownerScope: scope(),
+        slot,
+        generation,
+        previousGeneration: prior.currentGeneration,
+        previousCurrentRecordId: prior.currentRecordId,
+        previousCurrentRecordHash: prior.currentRecordHash,
+        keyIdentity: keyId,
+        auditEventId: eventId,
+        createdAt,
+        sourceOrigin,
+      });
+      const tombstone = {
+        ...tombstoneFields,
+        mac: hmac(machineKey, AUTH_DOMAINS.revokedGeneration, tombstoneFields),
+      };
+      validateTrustGeneration(tombstone);
+      const generationFile = recordPath(binding, slot, generation, eventId);
+      await writeExclusive(generationFile, tombstone);
+      const recordHash = hash(
+        await readOwnerOnlyFile(generationFile, options),
+      );
+      await writeJournal(binding, eventId, {
+        ...journal,
+        recordHash,
+        state: 'record-created',
+      });
+      await onStep('record-created');
+
+      const auditFields = {
+        domain: AUTH_DOMAINS.audit,
+        format: FORMAT,
+        type: 'audit-event',
+        eventId,
+        eventType: 'revoked',
+        projectIdentity: binding.projectIdentity,
+        projectIdentityDigest,
+        ownerScope: scope(),
+        slot,
+        generation,
+        recordId,
+        recordHash,
+        previousGeneration: prior.currentGeneration,
+        previousRecordId: prior.currentRecordId,
+        previousAuditEventId: prior.auditHeadId,
+        previousAuditEventHash: prior.auditHeadHash,
+        normAlgo: priorRecord.normAlgo,
+        normVersion: priorRecord.normVersion,
+        rawHash: priorRecord.rawHash,
+        contentHash: priorRecord.contentHash,
+        keyId,
+        timestamp: createdAt,
+      };
+      const audit = {
+        ...auditFields,
+        mac: hmac(machineKey, AUTH_DOMAINS.audit, auditFields),
+      };
+      const auditFile = auditPath(binding, eventId);
+      await writeExclusive(auditFile, audit);
+      const auditHash = hash(await readOwnerOnlyFile(auditFile, options));
+      await writeJournal(binding, eventId, {
+        ...journal,
+        recordHash,
+        auditHash,
+        state: 'audit-event-created',
+      });
+      await onStep('audit-event-created');
+
+      const current = await readManifest(binding, slot);
+      if (!current ||
+          current.currentGeneration !== prior.currentGeneration ||
+          current.currentState !== 'approved' ||
+          hash(await readOwnerOnlyFile(manifestPath(binding, slot), options)) !==
+            priorManifestHash) {
+        throw new TrustStoreError(
+          'manifest-cas-mismatch',
+          'manifest changed during revocation',
+        );
+      }
+      const manifestFields = {
+        domain: AUTH_DOMAINS.manifest,
+        format: FORMAT,
+        type: 'manifest',
+        projectIdentity: binding.projectIdentity,
+        projectIdentityDigest,
+        ownerScope: scope(),
+        slot,
+        currentGeneration: generation,
+        currentState: 'revoked',
+        currentRecordId: recordId,
+        currentRecordHash: recordHash,
+        auditHeadId: eventId,
+        auditHeadHash: auditHash,
+        keyId,
+      };
+      const manifest = {
+        ...manifestFields,
+        mac: hmac(machineKey, AUTH_DOMAINS.manifest, manifestFields),
+      };
+      await writeAtomic(manifestPath(binding, slot), manifest);
+      await writeJournal(binding, eventId, {
+        ...journal,
+        recordHash,
+        auditHash,
+        state: 'manifest-committed',
+      });
+      await onStep('manifest-committed');
+
+      const classified = await classifySlot({ binding, slot });
+      if (classified.state !== 'revoked' ||
+          classified.generation !== generation) {
+        throw new TrustStoreError(
+          'commit-verification-failed',
+          'committed revocation did not verify',
+        );
+      }
+      await fs.rm(journalPath(binding, eventId), { force: true });
+      return Object.freeze({
+        status: 'revoked',
+        generation: tombstone,
+        audit,
+        manifest,
+      });
+    } finally {
+      await lock.release().catch(() => undefined);
+    }
+  }
+
   async function quarantine(file) { await fs.rename(file, `${file}.quarantine`).catch(() => undefined); }
+
+  async function quarantineIncompleteArtifacts(binding, slot, journal) {
+    if (journal.state === 'record-created' ||
+        journal.state === 'audit-event-created') {
+      await quarantine(recordPath(
+        binding,
+        slot,
+        journal.candidateGeneration,
+        journal.auditEventId,
+      ));
+    }
+    if (journal.state === 'audit-event-created') {
+      await quarantine(auditPath(binding, journal.auditEventId));
+    }
+  }
 
   // Decide the recovery disposition of one journal WITHOUT ever synthesizing or
   // repairing a manifest. Returns 'delete' (safe cleanup), 'quarantine'
@@ -558,12 +944,37 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
     // Incomplete states: re-verify the referenced artifacts' hashes before
     // discarding the (inert) orphans. A mismatch means tampering → quarantine.
     if (journal.state === 'record-created' || journal.state === 'audit-event-created') {
-      const recRaw = await readOwnerOnlyFile(recordPath(binding, slot, journal.candidateGeneration, journal.auditEventId), options).catch(() => null);
+      const file = recordPath(
+        binding,
+        slot,
+        journal.candidateGeneration,
+        journal.auditEventId,
+      );
+      const recRaw = await readOwnerOnlyFile(file, options).catch(() => null);
       if (!recRaw || !journal.recordHash || !equal(hash(recRaw), journal.recordHash)) return 'quarantine';
+      let candidate;
+      try {
+        candidate = JSON.parse(recRaw.toString('utf8'));
+        const state = candidate.domain === AUTH_DOMAINS.revokedGeneration
+          ? 'revoked'
+          : 'approved';
+        await readImmutableRecord(
+          file,
+          state,
+          identityDigestFor(binding),
+        );
+      } catch {
+        return 'quarantine';
+      }
     }
     if (journal.state === 'audit-event-created') {
       const evtRaw = await readOwnerOnlyFile(auditPath(binding, journal.auditEventId), options).catch(() => null);
       if (!evtRaw || !journal.auditHash || !equal(hash(evtRaw), journal.auditHash)) return 'quarantine';
+      try {
+        await readAudit(binding, journal.auditEventId);
+      } catch {
+        return 'quarantine';
+      }
     }
     return 'delete';
   }
@@ -609,7 +1020,14 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
         }
         const disposition = await journalDisposition(binding, slot, journal);
         if (disposition === 'ambiguous') throw new TrustStoreError('recovery-ambiguous', 'committed journal does not match manifest');
-        if (disposition === 'quarantine') { await quarantine(file); continue; }
+        if (disposition === 'quarantine') {
+          await quarantineIncompleteArtifacts(binding, slot, journal);
+          await quarantine(file);
+          continue;
+        }
+        if (journal.state !== 'manifest-committed') {
+          await quarantineIncompleteArtifacts(binding, slot, journal);
+        }
         await fs.rm(file, { force: true });
       }
     } finally {
@@ -620,7 +1038,8 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
   return Object.freeze({
     createProjectBinding, readProjectBinding, readCanonicalProjectIdentity,
     canonicalProjectIdentityDigest, readImmutableRecord, readManifest, readAudit,
-    acquireLock, inspectLock, verifyAuditChain, isFormat2Authoritative, commitTransaction, recover,
+    acquireLock, inspectLock, verifyAuditChain, isFormat2Authoritative,
+    classifySlot, commitApproval, commitRevocation, commitTransaction, recover,
     ensureMachineKey: key,
     bindingPath, manifestPath, auditPath, recordPath, journalPath, lockPath,
     pathFor: (binding, relative) => path.join(rootFor(binding), relative),

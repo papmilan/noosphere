@@ -25,10 +25,10 @@ async function fixture() {
 }
 
 // Spawn the child and hard-kill it at `crashAt`. Returns once the process is dead.
-function crash({ home, project, env }, crashAt, bytes) {
+function crash({ home, project, env }, crashAt, bytes, transition = 'approved') {
   const result = spawnSync(process.execPath, [CHILD], {
     cwd: path.dirname(path.dirname(CHILD)),
-    env: { ...process.env, CRASH_HOME: home, CRASH_PROJECT: project, CRASH_SLOT: SLOT, CRASH_BYTES: bytes, CRASH_AT: crashAt, CRASH_SCOPE: env.NOOSPHERE_OWNER_SCOPE },
+    env: { ...process.env, CRASH_HOME: home, CRASH_PROJECT: project, CRASH_SLOT: SLOT, CRASH_BYTES: bytes, CRASH_AT: crashAt, CRASH_SCOPE: env.NOOSPHERE_OWNER_SCOPE, CRASH_TRANSITION: transition },
     // Bound the wait: a regression that never reaches the crash hook must fail
     // this test explicitly, not block the single-concurrency suite until the
     // global timeout. A timeout surfaces as result.error (asserted below).
@@ -76,6 +76,34 @@ describe('SEC-05 Phase 4A-R2 — real process-death recovery', () => {
       const next = await harness.commitTestTransaction({ binding, slot: SLOT, rawBytes: 'after-recovery' });
       assert.equal(next.record.generation, expectAuthority ? 2 : 1);
       assert.equal(await harness.isFormat2Authoritative({ binding, slot: SLOT, rawBytes: 'after-recovery' }), true);
+    });
+  }
+
+  for (const [boundary, expectedState] of [
+    ['journal-prepared', 'approved'],
+    ['record-created', 'approved'],
+    ['audit-event-created', 'approved'],
+    ['manifest-committed', 'revoked'],
+  ]) {
+    it(`SIGKILL during revocation at ${boundary}: recovers to ${expectedState}`, async () => {
+      const fx = await fixture();
+      const { harness, binding } = fx;
+      await harness.commitApproval({
+        binding,
+        slot: SLOT,
+        rawBytes: 'candidate',
+        sourceOrigin: `cli:trust-approve:${SLOT}`,
+      });
+
+      const result = crash(fx, boundary, 'unused', 'revoked');
+      assertKilled(result);
+      await fs.rm(harness.pathFor(binding, `locks/${SLOT}.lock`), { force: true });
+      await harness.recover(binding, SLOT);
+      await harness.recover(binding, SLOT);
+
+      const current = await harness.classifySlot({ binding, slot: SLOT });
+      assert.equal(current.state, expectedState);
+      assert.equal(current.generation, expectedState === 'revoked' ? 2 : 1);
     });
   }
 
