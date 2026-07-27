@@ -64,13 +64,24 @@ import {
   removeRepositoryFile,
 } from './secure-fs.js';
 import { isSlotAuthoritative } from './trust-store.js';
-import { approveSlot } from './internal/approval-service.js';
+import {
+  approveSlot,
+  escapeBytesForTerminal,
+} from './internal/approval-service.js';
 import { migrateTrustInventory } from './internal/migration-service.js';
 import { revokeSlot } from './internal/revocation-service.js';
+import {
+  listRestoreCandidates,
+  showRestoreCandidate,
+  stageRestoreCandidate,
+} from './internal/restore/candidate-store.js';
+import { parseRestoreArgs } from './internal/restore/cli.js';
+import { recallRestoreSourceHttp } from './internal/restore/recall.js';
 import {
   exitCodeForError,
   usageError,
 } from './internal/security-cli-error.js';
+import { TrustStoreError } from './trust-store-internal.js';
 import { APPROVABLE_SLOTS, MAX_SLOT_SOURCE_BYTES, UNUSABLE_SOURCE_CODES, baselineBody, resolveSlotSource, resolveSlotSourceForRead } from './slot-sources.js';
 import {
   MAX_EXCLUDE_BYTES,
@@ -244,7 +255,7 @@ try {
       console.log(`Forgot project ${process.argv[3]}`);
       break;
     case 'restore':
-      await restoreFromWalrus(projectDir);
+      await restoreFromCli(projectDir, process.argv.slice(3));
       break;
     case 'handoff':
       await handoffFromCli(projectDir);
@@ -2124,75 +2135,77 @@ async function findExecutionContention(root, agentId, state, now) {
   return matches.sort((left, right) => left.agent_id.localeCompare(right.agent_id));
 }
 
-async function restoreFromWalrus(root) {
-  const config = await loadConfig(root);
-  console.log(`Restoring project state from Walrus for ${config.project_id}...`);
-
-  await discoverExactState(root, config).catch(() => undefined);
-
-  if (!(await pingRelayer(config.relayer_url))) {
-    throw relayerDownError(config.relayer_url);
+async function restoreFromCli(root, args) {
+  const remaining = [...args];
+  const pathIndex = remaining.indexOf('--path');
+  if (pathIndex !== -1) {
+    if (pathIndex + 1 >= remaining.length ||
+        remaining.filter(value => value === '--path').length !== 1) {
+      throw usageError('--path requires exactly one value');
+    }
+    remaining.splice(pathIndex, 2);
   }
-
-  let recalled;
-  try {
-    recalled = await recallTypedMemories(config, {
-      baseline: true,
-      masterPrompt: true,
-      followups: true,
+  const parsed = parseRestoreArgs(remaining);
+  if (parsed.verb === 'stage') {
+    const result = await stageRestoreCandidate({
+      projectRoot: root,
+      slot: parsed.slot,
+      recallSource: async ({ slot }) => recallRestoreSourceHttp({
+        slot,
+        config: await loadConfig(root),
+      }),
     });
-  } catch (error) {
-    throw new Error(
-      [
-        `Walrus recall failed: ${error.message}`,
-        '',
-        'Confirm credentials are present:',
-        '  noosphere credentials status',
-        '',
-        'Or switch to local-only mode without Walrus:',
-        '  noosphere setup --local',
-      ].join('\n'),
-    );
+    if (result.status === 'no-candidate') {
+      console.log(`No restore candidate found for ${parsed.slot}.`);
+      return;
+    }
+    console.log(`Staged untrusted ${parsed.slot} candidate.`);
+    console.log(`  candidate: ${result.candidate.candidateId}`);
+    console.log(`  payload:   ${result.candidate.payloadHash}`);
+    console.log('Project files and authority state were not changed.');
+    return;
   }
-
-  let restored = 0;
-
-  if (recalled.baseline) {
-    await atomicWrite(
-      path.join(root, '.noosphere', 'baseline.md'),
-      recalled.baseline,
-      { root },
-    );
-    console.log('  baseline.md restored from Walrus');
-    restored++;
-  } else {
-    console.log('  baseline.md kept local; no Walrus baseline found');
+  if (parsed.verb === 'list') {
+    const candidates = await listRestoreCandidates({ projectRoot: root });
+    if (candidates.length === 0) {
+      console.log('No active restore candidates.');
+      return;
+    }
+    for (const candidate of candidates) {
+      console.log([
+        candidate.candidateId,
+        candidate.slot,
+        candidate.payloadHash,
+        candidate.expiresAt,
+        candidate.trustLabel,
+      ].join('  '));
+    }
+    return;
   }
-
-  if (recalled.masterPrompt) {
-    await atomicWrite(
-      path.join(root, '.noosphere', 'master-prompt.md'),
-      recalled.masterPrompt,
-      { root },
-    );
-    console.log('  master-prompt.md restored from Walrus');
-    restored++;
+  if (parsed.verb === 'show') {
+    const candidate = await showRestoreCandidate({
+      projectRoot: root,
+      candidateId: parsed.candidateId,
+    });
+    console.log(`Candidate: ${candidate.candidateId}`);
+    console.log(`Slot:      ${candidate.slot}`);
+    console.log(`Trust:     ${candidate.trustLabel}`);
+    console.log(`Payload:   ${candidate.payloadHash}`);
+    console.log(`Bytes:     ${candidate.byteLength}`);
+    console.log(`Metadata:  ${escapeBytesForTerminal(
+      canonicalize(candidate.remoteMetadata),
+    )}`);
+    console.log(`Byte view: ${escapeBytesForTerminal(candidate.content)}`);
+    console.log('');
+    console.log(renderSlotBlock(candidate.content.toString('utf8'), {
+      authoritative: false,
+    }));
+    return;
   }
-
-  if (recalled.followups.length > 0) {
-    const lines = recalled.followups.map((f) => JSON.stringify(f)).join('\n');
-    await atomicWrite(
-      path.join(root, '.noosphere', 'followups.jsonl'),
-      `${lines}\n`,
-      { root },
-    );
-    console.log(`  followups.jsonl restored (${recalled.followups.length} entries) from Walrus`);
-    restored++;
-  }
-
-  await refreshContext(root);
-  console.log(`  context.md refreshed from Walrus`);
-  console.log(`Restore complete. ${restored} file(s) written.`);
+  throw new TrustStoreError(
+    'restore-apply-not-implemented',
+    'restore apply is not available until its confirmation state is installed',
+  );
 }
 
 async function stateRemoteFromCli(root, mode) {
@@ -3353,6 +3366,18 @@ Commands:
               its exact current bytes render as authoritative instructions.
               Interactive only: it shows the bytes and requires a typed
               confirmation at your terminal, and has no unattended mode.
+  trust revoke <slot>
+              Append an authenticated tombstone for the current approval.
+  trust migrate
+              Re-approve eligible legacy slots through separate prompts.
+  restore stage <slot>
+              Recall and stage one untrusted owner-local restore candidate.
+  restore list
+              List active candidates without displaying their payloads.
+  restore show <candidate-id>
+              Authenticate and display one untrusted candidate.
+  restore apply <candidate-id>
+              Apply one candidate through the one-shot confirmation ceremony.
   ollama      Run any Ollama model with shared project memory
   protocol    Print the universal agent protocol
   state       Print or transition canonical CSP project state:
