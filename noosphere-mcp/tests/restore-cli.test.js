@@ -150,6 +150,17 @@ describe('SEC-05 Phase 4C — exact restore grammar and candidate identifiers', 
     await assert.rejects(fs.access(path.join(result.home, 'trust-v2')));
   });
 
+  it('refuses noninteractive apply with exit 4 before candidate lookup or mutation', async () => {
+    const result = await runCli([
+      'restore',
+      'apply',
+      `${'a'.repeat(51)}q`,
+    ]);
+    assert.equal(result.code, 4);
+    assert.match(result.stderr, /interactive terminal/i);
+    await assert.rejects(fs.access(path.join(result.home, 'trust-v2')));
+  });
+
   it('allows noninteractive list and reports an empty active store', async () => {
     const result = await runCli(['restore', 'list']);
     assert.equal(result.code, 0);

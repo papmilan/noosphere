@@ -75,13 +75,13 @@ import {
   showRestoreCandidate,
   stageRestoreCandidate,
 } from './internal/restore/candidate-store.js';
+import { applyRestoreCandidate } from './internal/restore/apply-service.js';
 import { parseRestoreArgs } from './internal/restore/cli.js';
 import { recallRestoreSourceHttp } from './internal/restore/recall.js';
 import {
   exitCodeForError,
   usageError,
 } from './internal/security-cli-error.js';
-import { TrustStoreError } from './trust-store-internal.js';
 import { APPROVABLE_SLOTS, MAX_SLOT_SOURCE_BYTES, UNUSABLE_SOURCE_CODES, baselineBody, resolveSlotSource, resolveSlotSourceForRead } from './slot-sources.js';
 import {
   MAX_EXCLUDE_BYTES,
@@ -2202,9 +2202,16 @@ async function restoreFromCli(root, args) {
     }));
     return;
   }
-  throw new TrustStoreError(
-    'restore-apply-not-implemented',
-    'restore apply is not available until its confirmation state is installed',
+  const result = await applyRestoreCandidate({
+    projectRoot: root,
+    candidateId: parsed.candidateId,
+  });
+  console.log(`Applied restore candidate ${result.candidateId}.`);
+  console.log(`  transaction: ${result.transactionId}`);
+  console.log(
+    result.authoritative
+      ? 'The live bytes match the current approved generation.'
+      : 'The restored bytes remain untrusted; use `noosphere trust approve` after review.',
   );
 }
 

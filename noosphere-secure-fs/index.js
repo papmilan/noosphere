@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -199,6 +199,360 @@ export async function atomicOwnerOnlyWrite(file, data, options = {}) {
     await safeCleanup(temporary);
     throw normalizeSecurityError(error);
   }
+}
+
+function fileSnapshot(info) {
+  return Object.freeze({
+    dev: String(info.dev),
+    gid: String(info.gid),
+    ino: String(info.ino),
+    mode: Number(info.mode),
+    mtimeNs: String(info.mtimeNs),
+    nlink: Number(info.nlink),
+    size: Number(info.size),
+    uid: String(info.uid),
+  });
+}
+
+function sameSnapshot(left, right) {
+  return left.dev === right.dev &&
+    left.gid === right.gid &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.mtimeNs === right.mtimeNs &&
+    left.nlink === right.nlink &&
+    left.size === right.size &&
+    left.uid === right.uid;
+}
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+async function assertSafeDestinationParents(root, directory, options) {
+  const relative = path.relative(root, directory);
+  let current = root;
+  for (const segment of relative === '' ? [] : relative.split(path.sep)) {
+    current = path.join(current, segment);
+    const info = await lstat(current, { bigint: true });
+    if (info.isSymbolicLink()) {
+      throw new PathBoundaryError(
+        'state-dir-symlink',
+        `refusing symlinked destination parent: ${current}`,
+      );
+    }
+    if (!info.isDirectory()) {
+      throw new PathBoundaryError(
+        'state-dir-not-directory',
+        `destination parent is not a directory: ${current}`,
+      );
+    }
+    if (typeof process.getuid === 'function' &&
+        info.uid !== BigInt(process.getuid())) {
+      throw new PathBoundaryError(
+        'state-dir-owner-mismatch',
+        `destination parent is not owned by the current user: ${current}`,
+      );
+    }
+    if ((options.platform ?? process.platform) !== 'win32' &&
+        (Number(info.mode) & 0o022) !== 0) {
+      throw new PathBoundaryError(
+        'state-dir-unsafe-mode',
+        `destination parent is writable by group or other: ${current}`,
+      );
+    }
+  }
+}
+
+export async function inspectOwnerOnlyDestination(file, options = {}) {
+  const resolved = rootAndDirectory(file, options.root);
+  const parent = await assertContainedChain(resolved.root, resolved.directory);
+  if (parent === null) {
+    throw new PathBoundaryError(
+      'state-destination-parent-missing',
+      `destination parent is missing: ${resolved.directory}`,
+    );
+  }
+  await assertSafeDestinationParents(
+    resolved.root,
+    resolved.directory,
+    options,
+  );
+  let info;
+  try {
+    info = await lstat(resolved.file, { bigint: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return Object.freeze({
+        path: resolved.file,
+        root: resolved.root,
+        state: 'absent',
+      });
+    }
+    throw error;
+  }
+  if (info.isSymbolicLink()) {
+    throw new PathBoundaryError(
+      'state-file-symlink',
+      `refusing symlinked destination: ${resolved.file}`,
+    );
+  }
+  if (!info.isFile()) {
+    throw new PathBoundaryError(
+      'state-file-not-regular',
+      `refusing non-regular destination: ${resolved.file}`,
+    );
+  }
+  if (Number(info.nlink) !== 1) {
+    throw new PathBoundaryError(
+      'state-file-hard-link',
+      `refusing multiply-linked destination: ${resolved.file}`,
+    );
+  }
+  if (typeof process.getuid === 'function' &&
+      info.uid !== BigInt(process.getuid())) {
+    throw new PathBoundaryError(
+      'state-file-owner-mismatch',
+      `destination is not owned by the current user: ${resolved.file}`,
+    );
+  }
+  const platform = options.platform ?? process.platform;
+  if (platform !== 'win32' && (Number(info.mode) & 0o022) !== 0) {
+    throw new PathBoundaryError(
+      'state-file-unsafe-mode',
+      `destination is writable by group or other: ${resolved.file}`,
+    );
+  }
+  if (platform === 'win32') verifyOwnerOnlyWindows(resolved.file, options);
+  const maxBytes = options.maxBytes ?? 1_048_576;
+  const bytes = await readBoundedRegularFile(resolved.file, {
+    ...options,
+    maxBytes,
+    root: resolved.root,
+  });
+  const after = await lstat(resolved.file, { bigint: true });
+  const beforeSnapshot = fileSnapshot(info);
+  const afterSnapshot = fileSnapshot(after);
+  if (!sameSnapshot(beforeSnapshot, afterSnapshot)) {
+    throw new PathBoundaryError(
+      'state-destination-changed',
+      `destination changed during inspection: ${resolved.file}`,
+    );
+  }
+  return Object.freeze({
+    path: resolved.file,
+    root: resolved.root,
+    state: 'present',
+    contentHash: sha256(bytes),
+    byteLength: bytes.length,
+    snapshot: afterSnapshot,
+  });
+}
+
+function validatePreparedReplacement(prepared, options = {}) {
+  if (!prepared || typeof prepared !== 'object' ||
+      typeof prepared.temporaryPath !== 'string' ||
+      typeof prepared.destination?.path !== 'string' ||
+      typeof prepared.temporarySnapshot !== 'object') {
+    throw new PathBoundaryError(
+      'state-replacement-invalid',
+      'prepared replacement is invalid',
+    );
+  }
+  const resolved = rootAndDirectory(
+    prepared.destination.path,
+    options.root ?? prepared.destination.root,
+  );
+  const expectedPrefix = `.${path.basename(resolved.file)}.`;
+  if (path.dirname(prepared.temporaryPath) !== resolved.directory ||
+      !path.basename(prepared.temporaryPath).startsWith(expectedPrefix) ||
+      !path.basename(prepared.temporaryPath).endsWith('.restore-tmp')) {
+    throw new PathBoundaryError(
+      'state-replacement-invalid',
+      'prepared replacement temporary path is invalid',
+    );
+  }
+  return resolved;
+}
+
+export async function prepareOwnerOnlyReplacement(file, data, options = {}) {
+  const bytes = buffer(data);
+  const maxBytes = options.maxBytes ?? 1_048_576;
+  if (bytes.length > maxBytes) {
+    throw new PathBoundaryError(
+      'state-file-too-large',
+      `replacement exceeds the ${maxBytes}-byte bound: ${file}`,
+    );
+  }
+  const destination = await inspectOwnerOnlyDestination(file, {
+    ...options,
+    maxBytes,
+  });
+  if (options.expectedDestination &&
+      !sameDestinationObservation(destination, options.expectedDestination)) {
+    throw new PathBoundaryError(
+      'state-destination-changed',
+      `destination changed after the caller's final barrier: ${file}`,
+    );
+  }
+  const resolved = rootAndDirectory(file, options.root);
+  const writeExclusive = options.writeExclusive ?? writeOwnerOnlyFileExclusive;
+  for (let attempt = 0; attempt < 128; attempt += 1) {
+    const token = (options.randomUUID ?? randomUUID)();
+    const temporaryPath = path.join(
+      resolved.directory,
+      `.${path.basename(resolved.file)}.${token}.restore-tmp`,
+    );
+    try {
+      await writeExclusive(temporaryPath, bytes, {
+        ...options,
+        root: resolved.root,
+        mode: 0o600,
+      });
+      const temporary = await inspectOwnerOnlyDestination(temporaryPath, {
+        ...options,
+        root: resolved.root,
+        maxBytes,
+      });
+      if (temporary.state !== 'present' ||
+          temporary.byteLength !== bytes.length ||
+          temporary.contentHash !== sha256(bytes)) {
+        throw new PathBoundaryError(
+          'state-write-incomplete',
+          `replacement temporary write is incomplete: ${temporaryPath}`,
+        );
+      }
+      return Object.freeze({
+        destination,
+        temporaryPath,
+        temporarySnapshot: temporary.snapshot,
+        byteLength: bytes.length,
+        contentHash: sha256(bytes),
+      });
+    } catch (error) {
+      if (error.code === 'state-file-exists' || error.code === 'EEXIST') {
+        continue;
+      }
+      await safeCleanup(temporaryPath);
+      throw normalizeSecurityError(error);
+    }
+  }
+  throw new PathBoundaryError(
+    'state-replacement-collision-limit',
+    'replacement temporary-name collisions exceeded the fixed retry limit',
+  );
+}
+
+async function revalidatePreparedDestination(prepared, options) {
+  const observed = await inspectOwnerOnlyDestination(
+    prepared.destination.path,
+    {
+      ...options,
+      root: options.root ?? prepared.destination.root,
+      maxBytes: options.maxBytes ?? 1_048_576,
+    },
+  );
+  const expected = prepared.destination;
+  if (observed.state !== expected.state ||
+      (expected.state === 'present' &&
+       (observed.contentHash !== expected.contentHash ||
+        observed.byteLength !== expected.byteLength ||
+        !sameSnapshot(observed.snapshot, expected.snapshot)))) {
+    throw new PathBoundaryError(
+      'state-destination-changed',
+      `destination changed after replacement preparation: ${expected.path}`,
+    );
+  }
+  return observed;
+}
+
+function sameDestinationObservation(observed, expected) {
+  return observed?.state === expected?.state &&
+    observed?.path === expected?.path &&
+    (expected?.state === 'absent' ||
+      (observed?.contentHash === expected?.contentHash &&
+       observed?.byteLength === expected?.byteLength &&
+       sameSnapshot(observed.snapshot, expected.snapshot)));
+}
+
+async function fsyncDirectoryStrict(directory) {
+  let handle;
+  try {
+    handle = await open(directory, 'r');
+    await handle.sync();
+  } catch (error) {
+    if (!isIgnorableDirFsyncError(error)) throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+export async function commitOwnerOnlyReplacement(prepared, options = {}) {
+  validatePreparedReplacement(prepared, options);
+  await revalidatePreparedDestination(prepared, options);
+  const temporary = await inspectOwnerOnlyDestination(
+    prepared.temporaryPath,
+    {
+      ...options,
+      root: options.root ?? prepared.destination.root,
+      maxBytes: options.maxBytes ?? 1_048_576,
+    },
+  );
+  if (temporary.state !== 'present' ||
+      !sameSnapshot(temporary.snapshot, prepared.temporarySnapshot) ||
+      temporary.byteLength !== prepared.byteLength ||
+      temporary.contentHash !== prepared.contentHash) {
+    throw new PathBoundaryError(
+      'state-replacement-temporary-changed',
+      'prepared replacement temporary file changed',
+    );
+  }
+  await replaceWithRetry(
+    options.rename ?? rename,
+    prepared.temporaryPath,
+    prepared.destination.path,
+    options,
+  );
+  if ((options.platform ?? process.platform) !== 'win32') {
+    try {
+      await (options.fsyncDirectory ?? fsyncDirectoryStrict)(
+        path.dirname(prepared.destination.path),
+      );
+    } catch (cause) {
+      const error = new PathBoundaryError(
+        'state-directory-fsync-failed-after-replace',
+        'destination was replaced but directory durability was not confirmed',
+        cause,
+      );
+      error.destinationReplaced = true;
+      throw error;
+    }
+  }
+  return Object.freeze({
+    path: prepared.destination.path,
+    byteLength: prepared.byteLength,
+    contentHash: prepared.contentHash,
+  });
+}
+
+export async function discardOwnerOnlyReplacement(prepared, options = {}) {
+  validatePreparedReplacement(prepared, options);
+  let info;
+  try {
+    info = await lstat(prepared.temporaryPath, { bigint: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+  if (!info.isFile() ||
+      !sameSnapshot(fileSnapshot(info), prepared.temporarySnapshot)) {
+    throw new PathBoundaryError(
+      'state-replacement-temporary-changed',
+      'refusing to remove a changed replacement temporary file',
+    );
+  }
+  await rm(prepared.temporaryPath, { force: false });
+  return true;
 }
 
 export function atomicOwnerOnlyWriteSync(file, data, options = {}) {
