@@ -9,9 +9,6 @@
 // trust records. The sole production capability is asking whether a slot's exact
 // bytes are authenticated (isSlotAuthoritative), which never makes an authority
 // decision more permissive.
-import fs from 'node:fs/promises';
-
-import { isSlotAuthoritative as isFormat1Authoritative } from './trust-store-internal.js';
 import { FORMAT2_SLOTS, createFormatV2Store } from './internal/trust-format-v2.js';
 
 export {
@@ -21,14 +18,10 @@ export {
   TrustStoreError,
 } from './trust-store-internal.js';
 
-// THE authority decision, Phase 4B edition.
-//
-// Format-2 (owner-approved through `noosphere trust approve`) is consulted
-// first. Once a format-2 manifest exists for a slot it is the SOLE authority for
-// that slot: a leftover Phase-1 record for the same slot is ignored, so anyone
-// who can restore an old format-1 record cannot downgrade past a newer owner
-// approval. Format-1 remains valid only while a slot has no format-2 manifest at
-// all, so existing installs keep working until they re-approve.
+// THE authority decision, Phase 4C edition. Loading this dispatcher is the
+// irreversible format-1 retirement event: only current authenticated Phase 4C
+// state can authorize bytes. Legacy state remains available solely through the
+// internal, read-only migration inventory.
 //
 // Every failure, at any layer, fails closed to false.
 export async function isSlotAuthoritative(request) {
@@ -45,44 +38,12 @@ export async function isSlotAuthoritative(request) {
   // supported inputs; anything else is not a slot's bytes.
   if (!Buffer.isBuffer(rawBytes) && typeof rawBytes !== 'string') return false;
   if (Buffer.byteLength(rawBytes) === 0) return false;
-  if (FORMAT2_SLOTS.includes(slot)) {
+  if (!FORMAT2_SLOTS.includes(slot)) return false;
+  try {
     const store = createFormatV2Store({ env, secureFileOptions });
-    // Only an absent binding can select format 1. Any other binding state —
-    // including a symlink, directory, unreadable file, or lookup failure — is
-    // evidence of format-2 state and must fail closed rather than downgrade.
-    // Resolve the binding path OUTSIDE the guarded lstat: bindingPath() calls
-    // realpathSync(projectRoot), which throws ENOENT of its own for an
-    // unresolvable project path. Inside the guard that ENOENT would be read as
-    // "binding absent" and would downgrade to format 1 — a path-resolution
-    // failure is not evidence that the owner never approved this slot.
-    let bindingFile;
-    try {
-      bindingFile = store.bindingPath(projectRoot);
-    } catch {
-      return false;
-    }
-    let bindingAbsent = false;
-    try {
-      await fs.lstat(bindingFile);
-    } catch (error) {
-      if (error.code === 'ENOENT') bindingAbsent = true;
-      else return false;
-    }
-    if (!bindingAbsent) {
-      try {
-        const binding = await store.readProjectBinding(projectRoot);
-        const manifest = await store.readManifest(binding, slot);
-        // A bound project with no manifest for THIS slot has never approved it
-        // under format-2; its Phase-1 record (if any) still governs that slot.
-        // Known limitation until 4C retires format-1: someone who can delete
-        // inside the owner-only trust root AND kept a superseded Phase-1 record
-        // can force this fallback. Both artifacts are owner-minted, so this
-        // reverts to older owner-approved bytes; it never authorizes new ones.
-        if (manifest) return await store.isFormat2Authoritative({ binding, slot, rawBytes });
-      } catch {
-        return false;
-      }
-    }
+    const binding = await store.readProjectBinding(projectRoot);
+    return await store.isFormat2Authoritative({ binding, slot, rawBytes });
+  } catch {
+    return false;
   }
-  return isFormat1Authoritative(request);
 }
