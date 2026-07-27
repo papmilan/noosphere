@@ -9,6 +9,7 @@ import {
   homeDir,
   ownerScope,
 } from '../trust-store-internal.js';
+import { AUTH_DOMAINS } from './authenticated-records.js';
 
 const LEGACY_SLOTS = Object.freeze([
   'master-prompt',
@@ -158,7 +159,7 @@ async function inventoryFormat1Slot({
     path.join(directory, `${slot}.json`),
     secureFileOptions,
   );
-  if (instance.state === 'absent' && record.state === 'absent') {
+  if (record.state === 'absent') {
     return Object.freeze({ classification: 'absent', legacyFormats: Object.freeze([]) });
   }
   if (keyResult.state !== 'present' ||
@@ -188,27 +189,35 @@ async function readPhase4bBinding({
   keyResult,
   secureFileOptions,
 }) {
-  const file = path.join(
-    homeDir(env),
-    'trust-v2',
-    'bindings',
-    `${sha256(canonicalRoot)}.json`,
-  );
-  const result = await readCanonicalRecord(file, secureFileOptions);
-  if (result.state !== 'present') return result;
-  const binding = result.value;
-  if (keyResult.state !== 'present' ||
-      !hasExactKeys(binding, PHASE4B_KEYS.binding) ||
-      !phase4bMacValid(keyResult.key, 'project-binding', binding) ||
-      binding.format !== 2 ||
-      binding.type !== 'project-binding' ||
-      !validUuid(binding.projectIdentity) ||
-      binding.ownerScope !== ownerScope(env) ||
-      binding.realpathHash !== sha256(canonicalRoot) ||
-      binding.keyId !== sha256(keyResult.key)) {
-    return Object.freeze({ state: 'invalid', failure: 'phase4b-binding-invalid' });
+  for (const directory of ['trust-v2-retired-phase4b', 'trust-v2']) {
+    const storeRoot = path.join(homeDir(env), directory);
+    const file = path.join(
+      storeRoot,
+      'bindings',
+      `${sha256(canonicalRoot)}.json`,
+    );
+    const result = await readCanonicalRecord(file, secureFileOptions);
+    if (result.state === 'absent') continue;
+    if (result.state !== 'present') return result;
+    const binding = result.value;
+    if (binding?.domain === AUTH_DOMAINS.projectBinding &&
+        directory === 'trust-v2') {
+      continue;
+    }
+    if (keyResult.state !== 'present' ||
+        !hasExactKeys(binding, PHASE4B_KEYS.binding) ||
+        !phase4bMacValid(keyResult.key, 'project-binding', binding) ||
+        binding.format !== 2 ||
+        binding.type !== 'project-binding' ||
+        !validUuid(binding.projectIdentity) ||
+        binding.ownerScope !== ownerScope(env) ||
+        binding.realpathHash !== sha256(canonicalRoot) ||
+        binding.keyId !== sha256(keyResult.key)) {
+      return Object.freeze({ state: 'invalid', failure: 'phase4b-binding-invalid' });
+    }
+    return Object.freeze({ state: 'present', value: binding, storeRoot });
   }
-  return Object.freeze({ state: 'present', value: binding });
+  return Object.freeze({ state: 'absent' });
 }
 
 async function inventoryPhase4bSlot({
@@ -229,8 +238,7 @@ async function inventoryPhase4bSlot({
   }
   const binding = bindingResult.value;
   const projectDirectory = path.join(
-    homeDir(env),
-    'trust-v2',
+    bindingResult.storeRoot,
     'projects',
     binding.projectIdentity,
   );
@@ -417,6 +425,12 @@ export async function readLegacyTrustInventory({
     schema: 'noosphere.legacy-trust-inventory',
     version: 1,
     projectRoot: canonicalRoot,
+    phase4bProjectIdentity: phase4bBinding.state === 'present'
+      ? phase4bBinding.value.projectIdentity
+      : null,
+    phase4bStore: phase4bBinding.state === 'present'
+      ? path.basename(phase4bBinding.storeRoot)
+      : null,
     slots: Object.freeze(slots),
   });
 }

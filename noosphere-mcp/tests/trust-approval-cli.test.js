@@ -243,7 +243,7 @@ describe('SEC-05 Phase 4B — approval refuses every non-interactive path', () =
     it(`refuses with ${name} and mints nothing`, async () => {
       const context = await fresh();
       const result = await run(['trust', 'approve', 'master-prompt'], { ...context, stdin });
-      assert.equal(result.code, 3, 'a piped approval is an owner/TTY refusal');
+      assert.equal(result.code, 4, 'a piped approval is a security validation refusal');
       assert.match(result.stderr, /interactive terminal/i);
       assert.equal(await mintedAnything(context), false);
       assert.equal(await touchedTrustStore(context), false, 'a refused approval must not create trust state');
@@ -275,7 +275,13 @@ describe('SEC-05 Phase 4B — approval refuses every non-interactive path', () =
 
   it('rejects malformed invocations without touching the trust store', async () => {
     const context = await fresh();
-    for (const args of [['trust'], ['trust', 'approve'], ['trust', 'revoke', 'master-prompt'], ['trust', 'approve', 'followups']]) {
+    for (const args of [
+      ['trust'],
+      ['trust', 'approve'],
+      ['trust', 'revoke'],
+      ['trust', 'revoke', 'master-prompt', 'extra'],
+      ['trust', 'approve', 'followups'],
+    ]) {
       const result = await run(args, { ...context, stdin: '' });
       assert.equal(result.code, 2, `${args.join(' ')} must be a usage or slot error`);
     }
@@ -485,7 +491,7 @@ describe('SEC-05 Phase 4B — one baseline derivation for local and restored con
   });
 });
 
-describe('SEC-05 Phase 4B — exit code 3 means a trust refusal and nothing else', () => {
+describe('SEC-05 Phase 4C — typed security exits remain command-independent', () => {
   it('does not leak code 3 out of non-trust commands sharing an error code', async () => {
     const context = await fresh(MASTER);
     await fs.writeFile(
@@ -504,9 +510,9 @@ describe('SEC-05 Phase 4B — exit code 3 means a trust refusal and nothing else
     assert.notEqual(shared.code, 0);
     assert.notEqual(shared.code, 3, 'only `trust` may exit 3');
 
-    // The trust command still reports refusals as 3.
+    // A non-TTY trust mutation is a security validation refusal.
     const approval = await run(['trust', 'approve', 'master-prompt'], { ...context, stdin: '' });
-    assert.equal(approval.code, 3);
+    assert.equal(approval.code, 4);
   });
 });
 

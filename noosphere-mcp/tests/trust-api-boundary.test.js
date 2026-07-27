@@ -85,10 +85,10 @@ describe('SEC-05 Phase 4A-R1 — production writer boundary', () => {
     assert.throws(() => require.resolve('noosphere-continuity'), (error) => error?.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED');
   });
 
-  // SEC-05 Phase 4B: approval is reachable from exactly one place — the
-  // interactive CLI. Anything else that imported it would be a second minting
-  // path with no owner in the loop.
-  it('is imported only by the CLI entry point', async () => {
+  // SEC-05 Phase 4C: approval is reachable from the interactive CLI and the
+  // migration service, which delegates each eligible slot to the same owner
+  // ceremony. No other production path may mint an approval.
+  it('is imported only by the CLI and migration ceremony', async () => {
     const importers = [];
     for (const dir of ['continuity', 'continuity/internal', 'continuity/acp', 'continuity/csp', 'lifecycle', 'hooks']) {
       const abs = path.join(packageRoot, dir);
@@ -100,7 +100,10 @@ describe('SEC-05 Phase 4A-R1 — production writer boundary', () => {
         }
       }
     }
-    assert.deepEqual(importers.sort(), ['continuity/index.js']);
+    assert.deepEqual(importers.sort(), [
+      'continuity/index.js',
+      'continuity/internal/migration-service.js',
+    ]);
   });
 
   it('has no production import of the Phase 4A test writer', async () => {

@@ -65,6 +65,12 @@ import {
 } from './secure-fs.js';
 import { isSlotAuthoritative } from './trust-store.js';
 import { approveSlot } from './internal/approval-service.js';
+import { migrateTrustInventory } from './internal/migration-service.js';
+import { revokeSlot } from './internal/revocation-service.js';
+import {
+  exitCodeForError,
+  usageError,
+} from './internal/security-cli-error.js';
 import { APPROVABLE_SLOTS, MAX_SLOT_SOURCE_BYTES, UNUSABLE_SOURCE_CODES, baselineBody, resolveSlotSource, resolveSlotSourceForRead } from './slot-sources.js';
 import {
   MAX_EXCLUDE_BYTES,
@@ -128,13 +134,6 @@ const ALL_ADAPTERS = ['codex', 'claude', 'gemini', 'cursor', 'mcp'];
 const ACP_LEGACY_STATE_ALIASES = new Set([
   'validate', 'sync', 'push', 'pull', 'history', 'quarantine',
 ]);
-const TRUST_REFUSAL_CODES = new Set([
-  'approval-requires-tty',
-  'approval-declined',
-  'approval-input-too-long',
-  'slot-invalid-utf8',
-]);
-
 const command = process.argv[2] || 'help';
 
 try {
@@ -289,11 +288,9 @@ try {
   console.error(`Noosphere continuity: ${error.message}`);
   process.exitCode = error.exitCode
     ?? (command === 'trust' && error.message === '--path requires a value.' ? 2 : null)
-    // Exit 3 means "the owner refused / could not confirm a trust approval".
-    // Scope it to `trust`: other commands share some of these error codes (a
-    // malformed slot raises slot-invalid-utf8 from share-master-prompt too), and
-    // a wrapper script must not read those as an approval refusal.
-    ?? (command === 'trust' && TRUST_REFUSAL_CODES.has(error.code) ? 3 : 1);
+    ?? (command === 'trust' || command === 'restore'
+      ? exitCodeForError(error)
+      : 1);
 }
 
 export async function initializeProject(root, options = {}) {
@@ -1558,18 +1555,53 @@ async function approveRelayerFromCli(url) {
 async function trustFromCli(root, args) {
   const remaining = [...args];
   const pathIndex = remaining.indexOf('--path');
-  if (pathIndex !== -1) remaining.splice(pathIndex, 2);
-  const [subcommand, slot] = remaining;
-  if (remaining.length !== 2 || subcommand !== 'approve' || !APPROVABLE_SLOTS.includes(slot)) {
-    const error = new Error(`Usage: noosphere trust approve <${APPROVABLE_SLOTS.join('|')}> [--path /absolute/repository]`);
-    error.exitCode = 2;
-    throw error;
+  if (pathIndex !== -1) {
+    if (pathIndex + 1 >= remaining.length ||
+        remaining.filter(value => value === '--path').length !== 1) {
+      throw usageError('--path requires exactly one value');
+    }
+    remaining.splice(pathIndex, 2);
   }
-  const { record, manifest } = await approveSlot({ projectRoot: root, slot });
-  console.log(`Approved ${slot} as generation ${manifest.currentGeneration}.`);
-  console.log(`  record: ${record.recordId}`);
-  console.log(`  audit:  ${record.auditEventId}`);
-  console.log('These exact bytes now render as authoritative project instructions.');
+  const [subcommand, slot] = remaining;
+  if (remaining.includes('--') ||
+      (subcommand !== 'migrate' &&
+       (remaining.length !== 2 || !APPROVABLE_SLOTS.includes(slot))) ||
+      (subcommand === 'migrate' && remaining.length !== 1) ||
+      !new Set(['approve', 'revoke', 'migrate']).has(subcommand)) {
+    throw usageError(
+      `Usage: noosphere trust <approve|revoke> <${APPROVABLE_SLOTS.join('|')}>`
+      + ' | noosphere trust migrate',
+    );
+  }
+  if (subcommand === 'approve') {
+    const { record, manifest } = await approveSlot({ projectRoot: root, slot });
+    console.log(`Approved ${slot} as generation ${manifest.currentGeneration}.`);
+    console.log(`  record: ${record.recordId}`);
+    console.log(`  audit:  ${record.auditEventId}`);
+    console.log('These exact bytes now render as authoritative project instructions.');
+    return;
+  }
+  if (subcommand === 'revoke') {
+    const { status, generation, manifest } = await revokeSlot({
+      projectRoot: root,
+      slot,
+    });
+    if (status === 'already-revoked') {
+      console.log(
+        `${slot} is already revoked at generation ${manifest.currentGeneration}.`,
+      );
+      return;
+    }
+    console.log(`Revoked ${slot} as generation ${manifest.currentGeneration}.`);
+    console.log(`  tombstone: ${generation.recordId}`);
+    console.log(`  audit:     ${generation.auditEventId}`);
+    console.log('No bytes for this slot are authoritative until a fresh approval.');
+    return;
+  }
+  const migration = await migrateTrustInventory({ projectRoot: root });
+  for (const slotName of APPROVABLE_SLOTS) {
+    console.log(`${slotName}: ${migration.slots[slotName]}`);
+  }
 }
 
 async function recallFromCli(root) {

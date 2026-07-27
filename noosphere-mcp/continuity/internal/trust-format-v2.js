@@ -187,18 +187,24 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
     return parseAuthenticatedRecord(raw, { type, maxBytes: MAX_TRUST_RECORD_BYTES, schema });
   }
 
-  async function createProjectBinding(projectRoot) {
+  async function createProjectBinding(projectRoot, { projectIdentity } = {}) {
     // The approval path deliberately leaves NOOSPHERE_HOME absent until the
     // owner confirms. Establish the owner-only root/key before the first secure
     // binding read so a genuine first approval can initialize format 2.
     const machineKey = await key();
     const file = bindingPath(projectRoot);
     if (await readOwnerOnlyFile(file, options) !== null) return readProjectBinding(projectRoot);
+    if (projectIdentity !== undefined && !is.uuid(projectIdentity)) {
+      throw new TrustStoreError(
+        'binding-invalid',
+        'migrated project identity must be a canonical UUID v4',
+      );
+    }
     const fields = {
       domain: AUTH_DOMAINS.projectBinding,
       format: FORMAT,
       type: 'project-binding',
-      projectIdentity: crypto.randomUUID(),
+      projectIdentity: projectIdentity ?? crypto.randomUUID(),
       ownerScope: scope(),
       realpathHash: hash(await fs.realpath(projectRoot)),
       keyId: machineKeyId(machineKey),
@@ -495,13 +501,35 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
   // boundary; it can never mint authority and is undefined in production callers.
   // ponytail: exception-injection crash tests use this seam in R1; R2 replaces
   // them with child-process SIGKILL and this seam becomes the kill point.
-  async function commitTransaction({ binding, slot, rawBytes, sourceOrigin, onStep = () => {} } = {}) {
+  async function commitTransaction({
+    binding,
+    slot,
+    rawBytes,
+    sourceOrigin,
+    expectedCurrent,
+    onStep = () => {},
+  } = {}) {
     assertSlot(slot);
     if (typeof sourceOrigin !== 'string' || sourceOrigin.length === 0) throw new TrustStoreError('record-invalid', 'sourceOrigin is required');
     const eventId = crypto.randomUUID();
     const lock = await acquireLock(binding, slot, eventId);
     try {
       const prior = await readManifest(binding, slot);
+      if (expectedCurrent) {
+        const actualState = prior?.currentState ?? 'pristine-unapproved';
+        const actualGeneration = prior?.currentGeneration ?? 0;
+        const actualRecordId = prior?.currentRecordId ?? null;
+        const actualRecordHash = prior?.currentRecordHash ?? null;
+        if (actualState !== expectedCurrent.state ||
+            actualGeneration !== expectedCurrent.generation ||
+            actualRecordId !== expectedCurrent.recordId ||
+            actualRecordHash !== expectedCurrent.recordHash) {
+          throw new TrustStoreError(
+            'authority-state-changed',
+            'authority state changed after approval confirmation',
+          );
+        }
+      }
       const generation = (prior?.currentGeneration ?? 0) + 1;
       const value = bytes(rawBytes);
       const machineKey = await key();
@@ -697,6 +725,7 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
     binding,
     slot,
     sourceOrigin,
+    expectedCurrent,
     onStep = () => {},
   } = {}) {
     assertSlot(slot);
@@ -710,6 +739,17 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
     const lock = await acquireLock(binding, slot, eventId);
     try {
       const prior = await readManifest(binding, slot);
+      if (expectedCurrent &&
+          (!prior ||
+           prior.currentState !== expectedCurrent.state ||
+           prior.currentGeneration !== expectedCurrent.generation ||
+           prior.currentRecordId !== expectedCurrent.recordId ||
+           prior.currentRecordHash !== expectedCurrent.recordHash)) {
+        throw new TrustStoreError(
+          'revocation-state-changed',
+          'authority state changed after revocation confirmation',
+        );
+      }
       if (!prior) {
         throw new TrustStoreError(
           'revocation-no-approved-generation',
