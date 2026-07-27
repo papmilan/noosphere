@@ -18,6 +18,7 @@ export const RESTORE_SLOTS = Object.freeze({
 
 export const CANDIDATE_ID_PATTERN = /^[a-z2-7]{51}[aq]$/;
 export const ACTIVE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+export const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 export const AUTHORITY_PAYLOAD_BYTES = 1_048_576;
 export const OBSERVATION_PAYLOAD_BYTES = 8_388_608;
 export const RESTORE_RECORD_BYTES = 65_536;

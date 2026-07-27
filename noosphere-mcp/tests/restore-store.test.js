@@ -135,6 +135,7 @@ describe('SEC-05 Phase 4C — authenticated restore candidate staging', () => {
 
     assert.equal(result.status, 'staged');
     assert.equal(result.candidate.trustLabel, 'untrusted');
+    assert.equal(result.candidate.candidateState.state, 'active');
     assert.deepEqual(result.candidate.content, Buffer.from('proposed remote bytes'));
     assert.equal(await fs.readFile(destination, 'utf8'), 'existing owner bytes');
     const listed = await listRestoreCandidates({

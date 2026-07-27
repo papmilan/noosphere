@@ -35,6 +35,12 @@ import {
   RESTORE_SLOTS,
 } from './constants.js';
 import { recallRestoreSource } from './recall.js';
+import {
+  CANDIDATE_TRANSITIONS,
+  createStateMachine,
+  readStateMachine,
+  transitionStateMachine,
+} from './state-machine.js';
 
 const UTF8 = new TextDecoder('utf-8', { fatal: true });
 const ENVELOPE_FIELDS = new Set([
@@ -204,6 +210,16 @@ function candidatePaths(store, binding, candidateId) {
   });
 }
 
+function candidateStateExpected(binding, envelope) {
+  return Object.freeze({
+    domain: AUTH_DOMAINS.restoreCandidate,
+    entityKind: 'candidate',
+    entityId: envelope.candidateId,
+    projectIdentityDigest: envelope.projectIdentityDigest,
+    keyId: binding.keyId,
+  });
+}
+
 async function assertSafeCandidateChain(store, binding, directory) {
   try {
     const result = await assertContainedChain(
@@ -281,10 +297,18 @@ async function readCandidate({
       'restore candidate bytes do not match the authenticated envelope',
     );
   }
+  const candidateState = await readStateMachine({
+    root: paths.directory,
+    key: await store.ensureMachineKey(),
+    expected: candidateStateExpected(binding, envelope),
+    transitions: CANDIDATE_TRANSITIONS,
+    secureFileOptions,
+  });
   return Object.freeze({
     ...envelope,
     content,
     derivedSlotBytes,
+    candidateState,
   });
 }
 
@@ -374,6 +398,14 @@ export async function stageRestoreCandidate({
         canonicalize(envelope),
         secureFileOptions,
       );
+      await createStateMachine({
+        root: paths.directory,
+        key,
+        expected: candidateStateExpected(binding, envelope),
+        initialState: 'active',
+        now: observedNow,
+        secureFileOptions,
+      });
       const candidate = await readCandidate({
         projectRoot,
         env,
@@ -453,8 +485,13 @@ export async function listRestoreCandidates({
     if (new Date(candidate.expiresAt).getTime() <= observedNow.getTime()) {
       continue;
     }
-    const { content: ignoredContent, derivedSlotBytes: ignoredDerived, ...metadata } =
-      candidate;
+    if (candidate.candidateState.state !== 'active') continue;
+    const {
+      content: ignoredContent,
+      derivedSlotBytes: ignoredDerived,
+      candidateState: ignoredState,
+      ...metadata
+    } = candidate;
     active.push(Object.freeze(metadata));
   }
   active.sort((left, right) => left.candidateId.localeCompare(right.candidateId));
@@ -463,6 +500,117 @@ export async function listRestoreCandidates({
 
 export function showRestoreCandidate(input) {
   return readCandidate(input);
+}
+
+export async function readCandidateState(input) {
+  return (await readCandidate(input)).candidateState;
+}
+
+export async function markApplyInProgress({
+  projectRoot,
+  env = process.env,
+  secureFileOptions = {},
+  candidateId,
+  contextId,
+  transactionId,
+  now = () => new Date(),
+} = {}) {
+  const candidate = await readCandidate({
+    projectRoot,
+    env,
+    secureFileOptions,
+    candidateId,
+  });
+  if (candidate.candidateState.state === 'consumed') {
+    throw restoreError(
+      'ERR_RESTORE_CANDIDATE_CONSUMED',
+      'restore candidate is already consumed',
+    );
+  }
+  if (candidate.candidateState.state !== 'active') {
+    throw restoreError(
+      'ERR_RESTORE_CANDIDATE_IN_PROGRESS',
+      'restore candidate is already apply-in-progress',
+    );
+  }
+  const { readConfirmation } = await import('./confirmation-store.js');
+  const confirmation = await readConfirmation({
+    projectRoot,
+    env,
+    secureFileOptions,
+    contextId,
+  });
+  if (confirmation.state !== 'spent' ||
+      confirmation.transactionId !== transactionId ||
+      confirmation.candidateId !== candidateId ||
+      confirmation.candidatePayloadHash !== candidate.payloadHash ||
+      confirmation.projectIdentityDigest !== candidate.projectIdentityDigest) {
+    throw restoreError(
+      'ERR_RESTORE_CANDIDATE_TRANSITION',
+      'restore candidate requires its own spent confirmation transaction',
+    );
+  }
+  const store = createFormatV2Store({ env, secureFileOptions });
+  const binding = await store.readProjectBinding(projectRoot);
+  return transitionStateMachine({
+    root: candidatePaths(store, binding, candidateId).directory,
+    key: await store.ensureMachineKey(),
+    expected: candidateStateExpected(binding, candidate),
+    transitions: CANDIDATE_TRANSITIONS,
+    to: 'apply-in-progress',
+    code: 'ERR_RESTORE_CANDIDATE_TRANSITION',
+    metadata: { contextId, transactionId },
+    now: now(),
+    secureFileOptions,
+  });
+}
+
+export async function consumeCandidate({
+  projectRoot,
+  env = process.env,
+  secureFileOptions = {},
+  candidateId,
+  transactionId,
+  outcome,
+  now = () => new Date(),
+} = {}) {
+  const candidate = await readCandidate({
+    projectRoot,
+    env,
+    secureFileOptions,
+    candidateId,
+  });
+  if (candidate.candidateState.state === 'consumed') {
+    throw restoreError(
+      'ERR_RESTORE_CANDIDATE_CONSUMED',
+      'restore candidate is already consumed',
+    );
+  }
+  if (candidate.candidateState.state !== 'apply-in-progress' ||
+      candidate.candidateState.transactionId !== transactionId ||
+      !['applied', 'failed'].includes(outcome)) {
+    throw restoreError(
+      'ERR_RESTORE_CANDIDATE_TRANSITION',
+      'restore candidate cannot be consumed by this transaction',
+    );
+  }
+  const store = createFormatV2Store({ env, secureFileOptions });
+  const binding = await store.readProjectBinding(projectRoot);
+  return transitionStateMachine({
+    root: candidatePaths(store, binding, candidateId).directory,
+    key: await store.ensureMachineKey(),
+    expected: candidateStateExpected(binding, candidate),
+    transitions: CANDIDATE_TRANSITIONS,
+    to: 'consumed',
+    code: 'ERR_RESTORE_CANDIDATE_TRANSITION',
+    metadata: {
+      contextId: candidate.candidateState.contextId,
+      transactionId,
+      outcome,
+    },
+    now: now(),
+    secureFileOptions,
+  });
 }
 
 export async function cleanupExpiredCandidates({
