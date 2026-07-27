@@ -31,6 +31,15 @@ import {
   machineKeyId,
   ownerScope,
 } from '../trust-store-internal.js';
+import {
+  AUTH_DOMAINS,
+  authenticatedMac,
+  verifyRecord,
+} from './authenticated-records.js';
+import {
+  canonicalProjectIdentity,
+  projectIdentityDigest,
+} from './project-identity.js';
 import { is, parseAuthenticatedRecord } from './strict-schema.js';
 
 export const FORMAT = 2;
@@ -46,9 +55,7 @@ const SLOT_SET = new Set(FORMAT2_SLOTS);
 const STATE_SET = new Set(JOURNAL_STATES);
 
 function hash(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
-function hmac(key, type, fields) {
-  return crypto.createHmac('sha256', key).update(`noosphere/sec05/v2/${type}\0${canonicalize(fields)}`).digest('hex');
-}
+function hmac(key, domain, fields) { return authenticatedMac(key, domain, fields); }
 function equal(left, right) {
   const a = Buffer.from(String(left), 'utf8');
   const b = Buffer.from(String(right), 'utf8');
@@ -63,28 +70,37 @@ const isSlot = is.enumOf(SLOT_SET);
 const isFormat = is.intEquals(FORMAT);
 const isNormAlgo = is.enumOf(new Set([NORM_ALGO]));
 const isNormVersion = is.intEquals(NORM_VERSION);
+const isProjectIdentityDigest = value =>
+  typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value);
 
 const BINDING_SCHEMA = {
+  domain: is.enumOf(new Set([AUTH_DOMAINS.projectBinding])),
   format: isFormat, type: is.enumOf(new Set(['project-binding'])),
   projectIdentity: is.uuid, ownerScope: is.str, realpathHash: is.hex64, keyId: is.hex64, mac: is.hex64,
 };
 const RECORD_SCHEMA = {
+  domain: is.enumOf(new Set([AUTH_DOMAINS.approvedGeneration])),
   format: isFormat, type: is.enumOf(new Set(['slot-record'])),
-  recordId: is.uuid, projectIdentity: is.uuid, ownerScope: is.str, slot: isSlot,
+  recordId: is.uuid, projectIdentity: is.uuid, projectIdentityDigest: isProjectIdentityDigest,
+  ownerScope: is.str, slot: isSlot,
   generation: is.posInt, rawHash: is.hex64, contentHash: is.hex64,
   normAlgo: isNormAlgo, normVersion: isNormVersion, sourceOrigin: is.str,
   approvalEventId: is.uuid, previousRecordId: is.nullable(is.uuid), auditEventId: is.uuid,
   approvedAt: is.rfc3339utc, keyId: is.hex64, mac: is.hex64,
 };
 const MANIFEST_SCHEMA = {
+  domain: is.enumOf(new Set([AUTH_DOMAINS.manifest])),
   format: isFormat, type: is.enumOf(new Set(['manifest'])),
-  projectIdentity: is.uuid, ownerScope: is.str, slot: isSlot, currentGeneration: is.posInt,
+  projectIdentity: is.uuid, projectIdentityDigest: isProjectIdentityDigest,
+  ownerScope: is.str, slot: isSlot, currentGeneration: is.posInt,
   currentRecordId: is.uuid, currentRecordHash: is.hex64, auditHeadId: is.uuid, auditHeadHash: is.hex64,
   keyId: is.hex64, mac: is.hex64,
 };
 const AUDIT_SCHEMA = {
+  domain: is.enumOf(new Set([AUTH_DOMAINS.audit])),
   format: isFormat, type: is.enumOf(new Set(['audit-event'])),
-  eventId: is.uuid, eventType: is.str, projectIdentity: is.uuid, ownerScope: is.str, slot: isSlot,
+  eventId: is.uuid, eventType: is.str, projectIdentity: is.uuid,
+  projectIdentityDigest: isProjectIdentityDigest, ownerScope: is.str, slot: isSlot,
   generation: is.posInt, recordId: is.uuid, recordHash: is.hex64,
   previousGeneration: is.nonNegInt, previousRecordId: is.nullable(is.uuid),
   previousAuditEventId: is.nullable(is.uuid), previousAuditEventHash: is.nullable(is.hex64),
@@ -92,8 +108,10 @@ const AUDIT_SCHEMA = {
   keyId: is.hex64, timestamp: is.rfc3339utc, mac: is.hex64,
 };
 const JOURNAL_SCHEMA = {
+  domain: is.enumOf(new Set([AUTH_DOMAINS.authorityJournal])),
   format: isFormat, type: is.enumOf(new Set(['transaction-journal'])),
-  transactionId: is.uuid, projectIdentity: is.uuid, ownerScope: is.str, slot: isSlot,
+  transactionId: is.uuid, projectIdentity: is.uuid,
+  projectIdentityDigest: isProjectIdentityDigest, ownerScope: is.str, slot: isSlot,
   candidateGeneration: is.posInt, priorManifestHash: is.nullable(is.hex64),
   recordId: is.uuid, auditEventId: is.uuid,
   recordHash: is.nullable(is.hex64), auditHash: is.nullable(is.hex64),
@@ -103,9 +121,10 @@ const JOURNAL_SCHEMA = {
 function assertSlot(slot) { if (!SLOT_SET.has(slot)) throw new TrustStoreError('invalid-slot', `unsupported Phase 4A slot: ${slot}`); }
 
 // Structural parse + MAC verification. Returns the parsed record or throws.
-function verifyMac(key, type, record) {
-  const { mac, ...fields } = record;
-  if (!equal(hmac(key, type, fields), mac)) throw new TrustStoreError(`${type}-invalid`, `${type} MAC is invalid`);
+function verifyMac(key, type, domain, record) {
+  if (!verifyRecord(key, domain, record)) {
+    throw new TrustStoreError(`${type}-invalid`, `${type} MAC is invalid`);
+  }
 }
 
 export function createFormatV2Store({ env = process.env, secureFileOptions = {}, now } = {}) {
@@ -118,6 +137,7 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
   const options = { ...secureFileOptions, root: home };
   const key = () => ensureMachineKey(env, options);
   const scope = () => ownerScope(env);
+  const identities = new Map();
   const rootFor = (binding) => path.join(root, 'projects', binding.projectIdentity);
   // The only binding key is the canonical realpath. Phase 4A deliberately permits
   // one active security principal per physical tree (Option A); repository
@@ -130,7 +150,9 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
   const journalPath = (binding, eventId) => path.join(rootFor(binding), 'transactions', `${eventId}.json`);
   const lockPath = (binding, slot) => path.join(rootFor(binding), 'locks', `${slot}.lock`);
 
-  async function signed(type, fields) { return { ...fields, mac: hmac(await key(), type, fields) }; }
+  async function signed(domain, fields) {
+    return { ...fields, mac: hmac(await key(), domain, fields) };
+  }
   async function writeExclusive(file, value) { await ensureRealDirectoryPath(path.dirname(file)); await writeOwnerOnlyFileExclusive(file, canonicalize(value), options); }
   async function writeAtomic(file, value) { await ensureRealDirectoryPath(path.dirname(file)); await atomicOwnerOnlyWrite(file, canonicalize(value), options); }
 
@@ -147,8 +169,19 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
     const machineKey = await key();
     const file = bindingPath(projectRoot);
     if (await readOwnerOnlyFile(file, options) !== null) return readProjectBinding(projectRoot);
-    const fields = { format: FORMAT, type: 'project-binding', projectIdentity: crypto.randomUUID(), ownerScope: scope(), realpathHash: hash(await fs.realpath(projectRoot)), keyId: machineKeyId(machineKey) };
-    const binding = { ...fields, mac: hmac(machineKey, 'project-binding', fields) };
+    const fields = {
+      domain: AUTH_DOMAINS.projectBinding,
+      format: FORMAT,
+      type: 'project-binding',
+      projectIdentity: crypto.randomUUID(),
+      ownerScope: scope(),
+      realpathHash: hash(await fs.realpath(projectRoot)),
+      keyId: machineKeyId(machineKey),
+    };
+    const binding = {
+      ...fields,
+      mac: authenticatedMac(machineKey, AUTH_DOMAINS.projectBinding, fields),
+    };
     try { await writeExclusive(file, binding); } catch (error) { if (error.code !== 'state-file-exists') throw error; }
     return readProjectBinding(projectRoot);
   }
@@ -156,19 +189,52 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
   async function readProjectBinding(projectRoot) {
     const binding = await readParsed(bindingPath(projectRoot), 'project-binding', BINDING_SCHEMA);
     if (!binding) throw new TrustStoreError('binding-invalid', 'project binding is missing');
-    verifyMac(await key(), 'project-binding', binding);
+    verifyMac(await key(), 'project-binding', AUTH_DOMAINS.projectBinding, binding);
     if (binding.ownerScope !== scope()
       || !equal(binding.realpathHash, hash(await fs.realpath(projectRoot)))
       || !equal(binding.keyId, machineKeyId(await key()))) {
       throw new TrustStoreError('binding-invalid', 'project binding does not match this project/key');
     }
+    const canonicalBindingBytes = await readOwnerOnlyFile(bindingPath(projectRoot), options);
+    const identity = canonicalProjectIdentity({
+      canonicalBindingBytes,
+      canonicalRealpath: await fs.realpath(projectRoot),
+      binding,
+    });
+    identities.set(binding.projectIdentity, identity);
     return binding;
+  }
+
+  async function readCanonicalProjectIdentity(projectRoot) {
+    const binding = await readProjectBinding(projectRoot);
+    return identities.get(binding.projectIdentity);
+  }
+
+  async function canonicalProjectIdentityDigest(projectRoot) {
+    return projectIdentityDigest(await readCanonicalProjectIdentity(projectRoot));
+  }
+
+  function identityDigestFor(binding) {
+    const identity = identities.get(binding.projectIdentity);
+    if (!identity) {
+      throw new TrustStoreError(
+        'project-identity-invalid',
+        'canonical project identity was not established from a verified binding',
+      );
+    }
+    return projectIdentityDigest(identity);
   }
 
   async function readImmutableRecord(file) {
     const record = await readParsed(file, 'slot-record', RECORD_SCHEMA);
     if (!record) return null;
-    verifyMac(await key(), 'slot-record', record);
+    verifyMac(await key(), 'slot-record', AUTH_DOMAINS.approvedGeneration, record);
+    if (record.projectIdentityDigest !== identityDigestFor(record)) {
+      throw new TrustStoreError(
+        'project-identity-invalid',
+        'slot record does not match the canonical project identity',
+      );
+    }
     return record;
   }
 
@@ -176,8 +242,11 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
     assertSlot(slot);
     const manifest = await readParsed(manifestPath(binding, slot), 'manifest', MANIFEST_SCHEMA);
     if (!manifest) return null;
-    verifyMac(await key(), 'manifest', manifest);
-    if (manifest.projectIdentity !== binding.projectIdentity || manifest.ownerScope !== scope() || manifest.slot !== slot || !equal(manifest.keyId, machineKeyId(await key()))) {
+    verifyMac(await key(), 'manifest', AUTH_DOMAINS.manifest, manifest);
+    if (manifest.projectIdentity !== binding.projectIdentity
+      || manifest.projectIdentityDigest !== identityDigestFor(binding)
+      || manifest.ownerScope !== scope() || manifest.slot !== slot
+      || !equal(manifest.keyId, machineKeyId(await key()))) {
       throw new TrustStoreError('manifest-invalid', 'manifest does not match binding');
     }
     return manifest;
@@ -186,14 +255,36 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
   async function readAudit(binding, eventId) {
     const event = await readParsed(auditPath(binding, eventId), 'audit-event', AUDIT_SCHEMA);
     if (!event) return null;
-    verifyMac(await key(), 'audit-event', event);
+    verifyMac(await key(), 'audit-event', AUTH_DOMAINS.audit, event);
+    if (event.projectIdentity !== binding.projectIdentity
+      || event.projectIdentityDigest !== identityDigestFor(binding)
+      || event.ownerScope !== scope()
+      || !equal(event.keyId, machineKeyId(await key()))) {
+      throw new TrustStoreError(
+        'project-identity-invalid',
+        'audit event does not match the canonical project identity',
+      );
+    }
     return event;
   }
 
   async function acquireLock(binding, slot, transactionId = crypto.randomUUID()) {
     assertSlot(slot);
-    const fields = { format: FORMAT, type: 'trust-lock', transactionId, projectIdentity: binding.projectIdentity, ownerScope: scope(), slot, pid: process.pid, startedAt: nowIso(now), keyId: machineKeyId(await key()) };
-    const metadata = await signed('trust-lock', fields);
+    const fields = {
+      domain: AUTH_DOMAINS.slotLock,
+      format: FORMAT,
+      type: 'trust-lock',
+      token: transactionId,
+      transactionId,
+      projectIdentity: binding.projectIdentity,
+      projectIdentityDigest: identityDigestFor(binding),
+      ownerScope: scope(),
+      slot,
+      pid: process.pid,
+      startedAt: nowIso(now),
+      keyId: machineKeyId(await key()),
+    };
+    const metadata = await signed(AUTH_DOMAINS.slotLock, fields);
     const lock = await acquireOwnerOnlyLock(lockPath(binding, slot), { token: transactionId, metadata, ...options });
     return Object.freeze({ ...lock, transactionId });
   }
@@ -222,16 +313,22 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
     let parsed;
     try { parsed = JSON.parse(raw.toString('utf8')); } catch { throw new TrustStoreError('trust-lock-malformed', 'lock metadata is not JSON'); }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new TrustStoreError('trust-lock-malformed', 'lock metadata is not an object');
-    const { token, mac, ...fields } = parsed;
-    if (!is.uuid(token) || !is.hex64(mac)) throw new TrustStoreError('trust-lock-malformed', 'lock token or MAC is malformed');
-    if (fields.type !== 'trust-lock' || fields.format !== FORMAT || !is.uuid(fields.transactionId) || !is.uuid(fields.projectIdentity) || !is.hex64(fields.keyId)) {
+    if (!is.uuid(parsed.token) || !is.hex64(parsed.mac)) throw new TrustStoreError('trust-lock-malformed', 'lock token or MAC is malformed');
+    if (parsed.domain !== AUTH_DOMAINS.slotLock || parsed.type !== 'trust-lock'
+      || parsed.format !== FORMAT || !is.uuid(parsed.transactionId)
+      || !is.uuid(parsed.projectIdentity) || !isProjectIdentityDigest(parsed.projectIdentityDigest)
+      || !is.hex64(parsed.keyId)) {
       throw new TrustStoreError('trust-lock-malformed', 'lock fields are malformed');
     }
-    if (!equal(hmac(await key(), 'trust-lock', fields), mac)) throw new TrustStoreError('trust-lock-unauthenticated', 'lock MAC does not verify');
-    if (fields.transactionId !== token || fields.projectIdentity !== binding.projectIdentity || fields.ownerScope !== scope() || fields.slot !== slot || !equal(fields.keyId, machineKeyId(await key()))) {
+    if (!verifyRecord(await key(), AUTH_DOMAINS.slotLock, parsed)) throw new TrustStoreError('trust-lock-unauthenticated', 'lock MAC does not verify');
+    if (parsed.transactionId !== parsed.token
+      || parsed.projectIdentity !== binding.projectIdentity
+      || parsed.projectIdentityDigest !== identityDigestFor(binding)
+      || parsed.ownerScope !== scope() || parsed.slot !== slot
+      || !equal(parsed.keyId, machineKeyId(await key()))) {
       throw new TrustStoreError('trust-lock-foreign', 'lock belongs to another project, owner, key, or slot');
     }
-    return fields;
+    return parsed;
   }
 
   // Complete structural chain validation (SEC-05 review §6). Walks head→genesis
@@ -293,7 +390,12 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
     } catch { return false; }
   }
 
-  async function writeJournal(binding, eventId, fields) { return writeAtomic(journalPath(binding, eventId), await signed('transaction-journal', fields)); }
+  async function writeJournal(binding, eventId, fields) {
+    return writeAtomic(
+      journalPath(binding, eventId),
+      await signed(AUTH_DOMAINS.authorityJournal, fields),
+    );
+  }
 
   // Serialized immutable commit. `onStep(state)` is an optional observation-only
   // seam (default no-op) used by crash tests to inject termination at a durable
@@ -311,23 +413,90 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
       const value = bytes(rawBytes);
       const machineKey = await key();
       const keyId = machineKeyId(machineKey);
+      const projectIdentityDigest = identityDigestFor(binding);
       const recordId = crypto.randomUUID();
       const approvedAt = nowIso(now);
       const priorManifestHash = prior ? hash(await readOwnerOnlyFile(manifestPath(binding, slot), options)) : null;
-      const journal = { format: FORMAT, type: 'transaction-journal', transactionId: eventId, projectIdentity: binding.projectIdentity, ownerScope: scope(), slot, candidateGeneration: generation, priorManifestHash, recordId, auditEventId: eventId, recordHash: null, auditHash: null, state: 'journal-prepared', keyId };
+      const journal = {
+        domain: AUTH_DOMAINS.authorityJournal,
+        format: FORMAT,
+        type: 'transaction-journal',
+        transactionId: eventId,
+        projectIdentity: binding.projectIdentity,
+        projectIdentityDigest,
+        ownerScope: scope(),
+        slot,
+        candidateGeneration: generation,
+        priorManifestHash,
+        recordId,
+        auditEventId: eventId,
+        recordHash: null,
+        auditHash: null,
+        state: 'journal-prepared',
+        keyId,
+      };
       await writeJournal(binding, eventId, journal);
       await onStep('journal-prepared');
 
-      const recordFields = { format: FORMAT, type: 'slot-record', recordId, projectIdentity: binding.projectIdentity, ownerScope: scope(), slot, generation, rawHash: hash(value), contentHash: contentHash(value), normAlgo: NORM_ALGO, normVersion: NORM_VERSION, sourceOrigin, approvalEventId: eventId, previousRecordId: prior?.currentRecordId ?? null, auditEventId: eventId, approvedAt, keyId };
-      const record = { ...recordFields, mac: hmac(machineKey, 'slot-record', recordFields) };
+      const recordFields = {
+        domain: AUTH_DOMAINS.approvedGeneration,
+        format: FORMAT,
+        type: 'slot-record',
+        recordId,
+        projectIdentity: binding.projectIdentity,
+        projectIdentityDigest,
+        ownerScope: scope(),
+        slot,
+        generation,
+        rawHash: hash(value),
+        contentHash: contentHash(value),
+        normAlgo: NORM_ALGO,
+        normVersion: NORM_VERSION,
+        sourceOrigin,
+        approvalEventId: eventId,
+        previousRecordId: prior?.currentRecordId ?? null,
+        auditEventId: eventId,
+        approvedAt,
+        keyId,
+      };
+      const record = {
+        ...recordFields,
+        mac: hmac(machineKey, AUTH_DOMAINS.approvedGeneration, recordFields),
+      };
       const recordFile = recordPath(binding, slot, generation, eventId);
       await writeExclusive(recordFile, record);
       const recordHash = hash(await readOwnerOnlyFile(recordFile, options));
       await writeJournal(binding, eventId, { ...journal, recordHash, state: 'record-created' });
       await onStep('record-created');
 
-      const auditFields = { format: FORMAT, type: 'audit-event', eventId, eventType: 'phase4a', projectIdentity: binding.projectIdentity, ownerScope: scope(), slot, generation, recordId, recordHash, previousGeneration: prior?.currentGeneration ?? 0, previousRecordId: prior?.currentRecordId ?? null, previousAuditEventId: prior?.auditHeadId ?? null, previousAuditEventHash: prior?.auditHeadHash ?? null, normAlgo: NORM_ALGO, normVersion: NORM_VERSION, rawHash: record.rawHash, contentHash: record.contentHash, keyId, timestamp: approvedAt };
-      const audit = { ...auditFields, mac: hmac(machineKey, 'audit-event', auditFields) };
+      const auditFields = {
+        domain: AUTH_DOMAINS.audit,
+        format: FORMAT,
+        type: 'audit-event',
+        eventId,
+        eventType: 'phase4a',
+        projectIdentity: binding.projectIdentity,
+        projectIdentityDigest,
+        ownerScope: scope(),
+        slot,
+        generation,
+        recordId,
+        recordHash,
+        previousGeneration: prior?.currentGeneration ?? 0,
+        previousRecordId: prior?.currentRecordId ?? null,
+        previousAuditEventId: prior?.auditHeadId ?? null,
+        previousAuditEventHash: prior?.auditHeadHash ?? null,
+        normAlgo: NORM_ALGO,
+        normVersion: NORM_VERSION,
+        rawHash: record.rawHash,
+        contentHash: record.contentHash,
+        keyId,
+        timestamp: approvedAt,
+      };
+      const audit = {
+        ...auditFields,
+        mac: hmac(machineKey, AUTH_DOMAINS.audit, auditFields),
+      };
       const eventFile = auditPath(binding, eventId);
       await writeExclusive(eventFile, audit);
       const auditHash = hash(await readOwnerOnlyFile(eventFile, options));
@@ -341,8 +510,25 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
         || (prior && hash(await readOwnerOnlyFile(manifestPath(binding, slot), options)) !== priorManifestHash)) {
         throw new TrustStoreError('manifest-cas-mismatch', 'manifest changed during transaction');
       }
-      const manifestFields = { format: FORMAT, type: 'manifest', projectIdentity: binding.projectIdentity, ownerScope: scope(), slot, currentGeneration: generation, currentRecordId: recordId, currentRecordHash: recordHash, auditHeadId: eventId, auditHeadHash: auditHash, keyId };
-      const manifest = { ...manifestFields, mac: hmac(machineKey, 'manifest', manifestFields) };
+      const manifestFields = {
+        domain: AUTH_DOMAINS.manifest,
+        format: FORMAT,
+        type: 'manifest',
+        projectIdentity: binding.projectIdentity,
+        projectIdentityDigest,
+        ownerScope: scope(),
+        slot,
+        currentGeneration: generation,
+        currentRecordId: recordId,
+        currentRecordHash: recordHash,
+        auditHeadId: eventId,
+        auditHeadHash: auditHash,
+        keyId,
+      };
+      const manifest = {
+        ...manifestFields,
+        mac: hmac(machineKey, AUTH_DOMAINS.manifest, manifestFields),
+      };
       await writeAtomic(manifestPath(binding, slot), manifest);
       await writeJournal(binding, eventId, { ...journal, recordHash, auditHash, state: 'manifest-committed' });
       await onStep('manifest-committed');
@@ -408,9 +594,19 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
           const raw = await readOwnerOnlyFile(file, options);
           if (raw === null) continue;
           journal = parseAuthenticatedRecord(raw, { type: 'transaction-journal', maxBytes: MAX_TRUST_RECORD_BYTES, schema: JOURNAL_SCHEMA });
-          verifyMac(await key(), 'transaction-journal', journal);
+          verifyMac(
+            await key(),
+            'transaction-journal',
+            AUTH_DOMAINS.authorityJournal,
+            journal,
+          );
         } catch { await quarantine(file); continue; }
-        if (journal.projectIdentity !== binding.projectIdentity || journal.slot !== slot) { await quarantine(file); continue; }
+        if (journal.projectIdentity !== binding.projectIdentity
+          || journal.projectIdentityDigest !== identityDigestFor(binding)
+          || journal.slot !== slot) {
+          await quarantine(file);
+          continue;
+        }
         const disposition = await journalDisposition(binding, slot, journal);
         if (disposition === 'ambiguous') throw new TrustStoreError('recovery-ambiguous', 'committed journal does not match manifest');
         if (disposition === 'quarantine') { await quarantine(file); continue; }
@@ -422,12 +618,23 @@ export function createFormatV2Store({ env = process.env, secureFileOptions = {},
   }
 
   return Object.freeze({
-    createProjectBinding, readProjectBinding, readImmutableRecord, readManifest, readAudit,
+    createProjectBinding, readProjectBinding, readCanonicalProjectIdentity,
+    canonicalProjectIdentityDigest, readImmutableRecord, readManifest, readAudit,
     acquireLock, inspectLock, verifyAuditChain, isFormat2Authoritative, commitTransaction, recover,
     ensureMachineKey: key,
     bindingPath, manifestPath, auditPath, recordPath, journalPath, lockPath,
     pathFor: (binding, relative) => path.join(rootFor(binding), relative),
     // Low-level helpers reused by the test-only harness to seed adversarial state.
-    _internal: Object.freeze({ signed, writeExclusive, hmac, hash, contentHash, machineKeyId, scope, nowIso: () => nowIso(now) }),
+    _internal: Object.freeze({
+      signed,
+      writeExclusive,
+      hmac,
+      hash,
+      contentHash,
+      machineKeyId,
+      scope,
+      identityDigestFor,
+      nowIso: () => nowIso(now),
+    }),
   });
 }

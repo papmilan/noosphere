@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, describe, it } from 'node:test';
 
+import { AUTH_DOMAINS } from '../continuity/internal/authenticated-records.js';
 import { createTrustTestHarness } from './helpers/trust-test-harness.js';
 
 const CHILD = fileURLToPath(new URL('./helpers/crash-child.mjs', import.meta.url));
@@ -86,8 +87,24 @@ describe('SEC-05 Phase 4A-R2 — real process-death recovery', () => {
     // A complete, MAC-valid lock under THIS machine key but a different owner: it
     // must reach and fail the ownership check as trust-lock-foreign, not bail out
     // early as malformed.
-    const fields = { format: 2, type: 'trust-lock', transactionId, projectIdentity: binding.projectIdentity, ownerScope: 'someone-else', slot: SLOT, pid: 4242, startedAt: nowIso(), keyId: machineKeyId(machineKey) };
-    const lock = { ...fields, mac: hmac(machineKey, 'trust-lock', fields), token: transactionId };
+    const fields = {
+      domain: AUTH_DOMAINS.slotLock,
+      format: 2,
+      type: 'trust-lock',
+      token: transactionId,
+      transactionId,
+      projectIdentity: binding.projectIdentity,
+      projectIdentityDigest: harness._internal.identityDigestFor(binding),
+      ownerScope: 'someone-else',
+      slot: SLOT,
+      pid: 4242,
+      startedAt: nowIso(),
+      keyId: machineKeyId(machineKey),
+    };
+    const lock = {
+      ...fields,
+      mac: hmac(machineKey, AUTH_DOMAINS.slotLock, fields),
+    };
     await writeExclusive(harness.pathFor(binding, `locks/${SLOT}.lock`), lock);
     await assert.rejects(harness.inspectLock(binding, SLOT), (e) => e.code === 'trust-lock-foreign');
     await assert.rejects(harness.recover(binding, SLOT), (e) => e.code === 'trust-lock-foreign');
