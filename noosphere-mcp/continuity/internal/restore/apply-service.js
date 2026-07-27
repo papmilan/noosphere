@@ -11,11 +11,19 @@ import {
 } from '../exact-confirmation.js';
 import { createFormatV2Store } from '../trust-format-v2.js';
 import {
+  appendApplyJournalState,
+  createApplyJournal,
+} from './apply-journal.js';
+import {
   consumeCandidate,
   markApplyInProgress,
   readCandidateState,
   showRestoreCandidate,
 } from './candidate-store.js';
+import {
+  commitConsumedMarker,
+  commitRestoreReceipt,
+} from './receipt-store.js';
 import {
   confirmContext,
   confirmationPhrase,
@@ -31,6 +39,19 @@ import {
 
 function restoreError(code, message) {
   return new TrustStoreError(code, message);
+}
+
+// Caller-supplied observation hooks are not filesystem or security failures, so
+// their errors propagate unchanged instead of being reclassified as an apply
+// failure. The unwind bookkeeping below still runs.
+async function runHook(hook, ...args) {
+  if (!hook) return;
+  try {
+    await hook(...args);
+  } catch (error) {
+    if (error && typeof error === 'object') error.restoreHookFailure = true;
+    throw error;
+  }
 }
 
 function fixedDestination(projectRoot, slot) {
@@ -241,6 +262,8 @@ export async function applyRestoreCandidate({
   confirm,
   afterConfirmation,
   onBarrier,
+  afterJournalState,
+  onDestinationReplaced,
   secureFs = defaultSecureFs,
   now = () => new Date(),
   createTransactionId = randomUUID,
@@ -351,6 +374,42 @@ export async function applyRestoreCandidate({
       now,
     });
     candidateInProgress = true;
+    const spent = await readConfirmation({
+      projectRoot,
+      env,
+      secureFileOptions,
+      contextId: confirmed.contextId,
+    });
+    await createApplyJournal({
+      projectRoot,
+      env,
+      secureFileOptions,
+      transactionId,
+      candidateId,
+      candidatePayloadHash: barrier.candidate.payloadHash,
+      contextId: confirmed.contextId,
+      confirmationEventHash: spent.stateEventHash,
+      slot: candidate.slot,
+      destinationBefore: destinationBinding(barrier.destination),
+      destinationAfterHash: barrier.candidate.payloadHash,
+      manifest: barrier.manifest,
+      now,
+    });
+    const journal = async (state, outcome = null) => {
+      if (state !== 'prepared') {
+        await appendApplyJournalState({
+          projectRoot,
+          env,
+          secureFileOptions,
+          transactionId,
+          to: state,
+          outcome,
+          now,
+        });
+      }
+      await runHook(afterJournalState, state);
+    };
+    await journal('prepared');
     prepared = await secureFs.prepareOwnerOnlyReplacement(
       barrier.destinationPath,
       barrier.candidate.content,
@@ -358,8 +417,12 @@ export async function applyRestoreCandidate({
         root: projectRoot,
         maxBytes: AUTHORITY_PAYLOAD_BYTES,
         expectedDestination: barrier.destination,
+        // Deterministic temporary name so recovery can authenticate and discard
+        // the temporary file of a killed transaction from the journal alone.
+        randomUUID: () => transactionId,
       },
     );
+    await journal('temporary-written');
     try {
       await secureFs.commitOwnerOnlyReplacement(prepared, {
         root: projectRoot,
@@ -370,6 +433,8 @@ export async function applyRestoreCandidate({
       if (error.destinationReplaced === true) destinationReplaced = true;
       throw error;
     }
+    await runHook(onDestinationReplaced);
+    await journal('destination-replaced');
     const live = await resolveSlotSource(projectRoot, candidate.slot);
     const authoritative = await isSlotAuthoritative({
       projectRoot,
@@ -378,6 +443,46 @@ export async function applyRestoreCandidate({
       env,
       secureFileOptions,
     });
+    await commitRestoreReceipt({
+      projectRoot,
+      env,
+      secureFileOptions,
+      receiptId: transactionId,
+      transactionId,
+      contextId: confirmed.contextId,
+      candidateId,
+      candidatePayloadHash: barrier.candidate.payloadHash,
+      destinationHash: barrier.candidate.payloadHash,
+      slot: candidate.slot,
+      outcome: 'applied',
+      authoritative,
+      now,
+    });
+    await journal('receipt-committed');
+    await commitConsumedMarker({
+      projectRoot,
+      env,
+      secureFileOptions,
+      transactionId,
+      contextId: confirmed.contextId,
+      candidateId,
+      candidatePayloadHash: barrier.candidate.payloadHash,
+      slot: candidate.slot,
+      outcome: 'applied',
+      receiptId: transactionId,
+      now,
+    });
+    await consumeCandidate({
+      projectRoot,
+      env,
+      secureFileOptions,
+      candidateId,
+      transactionId,
+      outcome: 'applied',
+      now,
+    });
+    await journal('consumed-marker-committed');
+    await journal('complete', 'applied');
     return Object.freeze({
       status: 'destination-replaced',
       authoritative,
@@ -412,7 +517,8 @@ export async function applyRestoreCandidate({
         now,
       }).catch(() => undefined);
     }
-    if (String(error.code ?? '').startsWith('ERR_RESTORE_') ||
+    if (error.restoreHookFailure === true ||
+        String(error.code ?? '').startsWith('ERR_RESTORE_') ||
         error instanceof TrustStoreError) {
       throw error;
     }

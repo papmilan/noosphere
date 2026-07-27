@@ -408,6 +408,7 @@ export async function readConfirmation({
     ...context,
     state: state.state,
     stateSequence: state.sequence,
+    stateEventHash: state.eventHash,
     transactionId: state.transactionId,
     stateReason: state.reason,
   });

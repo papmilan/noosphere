@@ -23,6 +23,28 @@ export const CANDIDATE_TRANSITIONS = Object.freeze({
   'apply-in-progress': Object.freeze(new Set(['consumed'])),
 });
 
+export const APPLY_JOURNAL_STATES = Object.freeze([
+  'prepared',
+  'temporary-written',
+  'destination-replaced',
+  'receipt-committed',
+  'consumed-marker-committed',
+  'complete',
+]);
+
+// Monotonic: every legal transition moves strictly forward through
+// APPLY_JOURNAL_STATES. The two early edges to `complete` are the
+// pre-replacement failure paths, where no destination byte was ever replaced
+// and the transaction terminates without a receipt or consumed marker.
+export const APPLY_TRANSITIONS = Object.freeze({
+  prepared: Object.freeze(new Set(['temporary-written', 'complete'])),
+  'temporary-written': Object.freeze(new Set(['destination-replaced', 'complete'])),
+  'destination-replaced': Object.freeze(new Set(['receipt-committed'])),
+  'receipt-committed': Object.freeze(new Set(['consumed-marker-committed'])),
+  'consumed-marker-committed': Object.freeze(new Set(['complete'])),
+  complete: Object.freeze(new Set()),
+});
+
 const EVENT_FIELDS = new Set([
   'contextId',
   'createdAt',
@@ -134,6 +156,16 @@ function validStateMetadata(value) {
         value.reason === null;
     }
     return false;
+  }
+  if (value.entityKind === 'apply') {
+    if (!APPLY_JOURNAL_STATES.includes(value.state)) return false;
+    return value.transactionId === value.entityId &&
+      UUID.test(value.transactionId) &&
+      UUID.test(value.contextId) &&
+      (value.state === 'complete'
+        ? ['applied', 'failed'].includes(value.outcome)
+        : value.outcome === null) &&
+      value.reason === null;
   }
   if (value.entityKind === 'confirmation') {
     if (value.state === 'issued' || value.state === 'confirmed') {
