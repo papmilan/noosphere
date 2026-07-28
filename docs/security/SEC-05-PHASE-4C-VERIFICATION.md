@@ -1,9 +1,9 @@
 # SEC-05 Phase 4C — Conformance Verification Record
 
 Status: **not released.** Findings 1 and 2 from the first audit round are closed
-in the product path. Release remains blocked on the Windows runner and on an
-independent hostile review at the exact head, submitted by someone other than
-the implementer.
+in the product path. Release is blocked on **Finding 4** — `restore apply` cannot
+succeed on Windows for any real repository file — and on an independent hostile
+review at the exact head, submitted by someone other than the implementer.
 
 This document is the traceable requirement-to-test matrix for SEC-05 Phase 4C,
 plus the exact evidence produced while verifying it. Nothing here is inferred: a
@@ -15,8 +15,8 @@ case.
 | Field | Value |
 |---|---|
 | Branch | `codex/sec-05-phase-4c1` |
-| Head | `80dcf16` — `test(security): drive migration through the PTY prompt, not ahead of it` |
-| Commit range | `d2992c3..80dcf16` — 16 Phase 4C commits on top of `origin/main` |
+| Head | `0941df1` — `fix(restore): keep the liveness verdict off the injectable clock` |
+| Commit range | `d2992c3..0941df1` — 18 Phase 4C commits on top of `origin/main` |
 | Merge base | `d2992c3f1ac3fd10bbd0abb9e1192bdc7193a016` |
 | Pull request | [#34](https://github.com/papmilan/noosphere/pull/34) — **draft, do not merge** |
 | CI run | [30373372871](https://github.com/papmilan/noosphere/actions/runs/30373372871) |
@@ -34,6 +34,8 @@ case.
 | `3d60be8` | fix(restore): recover crashed transactions in the production path |
 | `f35f0f8` | docs(security): document the owner authority commands |
 | `80dcf16` | test(security): drive migration through the PTY prompt, not ahead of it |
+| `fbd940b` | docs(security): record the phase 4c remediation evidence |
+| `0941df1` | fix(restore): keep the liveness verdict off the injectable clock |
 
 ## 2. Conformance matrix
 
@@ -48,22 +50,22 @@ containing the evidence. `L`/`M` are the Linux and macOS jobs of CI run
 
 | Spec section | Invariant | Implementation | Test evidence | L | M | W |
 |---|---|---|---|---|---|---|
-| Authority cutover | Loading the dispatcher retires format 1 irreversibly; legacy state is inventory only | `isSlotAuthoritative` — `continuity/trust-store.js` | `makes a valid format-1 approval inert before migration inventory`; `keeps format 1 inert after Phase 4C manifest deletion`; `keeps format 1 inert after binding deletion or corruption` — `tests/trust-phase4c-cutover.test.js` | pass | pass | pending runner |
-| Generations | Generations are append-only; a rolled-back or missing manifest is invalid, never permissive | `buildApprovedGeneration` — `continuity/internal/trust-generation.js` | `appends N+1 tombstone, is idempotent, and reapproves only at N+2`; `classifies missing or rolled-back manifests with generation artifacts as invalid` — `tests/trust-revocation.test.js`; `chains immutable events and rejects substitution or truncation` — `tests/trust-audit.test.js` | pass | pass | pending runner |
-| Revocation | Tombstones are authenticated, canonically shaped, and domain-bound | `revokeSlot` — `continuity/internal/revocation-service.js` | `builds the one exact canonical tombstone shape`; `rejects forbidden, null, inherited, unknown, and omitted tombstone fields`; `quarantines a MAC-invalid tombstone and its authenticated incomplete journal` — `tests/trust-revocation.test.js`; `rejects every ordered cross-domain substitution` — `tests/trust-domain-separation.test.js` | pass | pass | pending runner |
-| Migration | Every eligible slot requires a fresh owner approval; no legacy state is promoted | `migrateTrustInventory` — `continuity/internal/migration-service.js` | `requires a distinct normal approval for every eligible slot`; `never restarts invalid current Phase 4C history from legacy inventory`; `never prompts over a current authenticated tombstone`; `checks both TTY streams before inventory or mutation` — `tests/trust-migration.test.js` | pass | pass | pending runner |
-| Migration ceremony ordering | A confirmation typed before its prompt was displayed is discarded, not accepted | `readExactConfirmation` — `continuity/internal/exact-confirmation.js` | `requires distinct confirmations through a genuine PTY for two eligible slots`; `discards input typed before its prompt was displayed` — `tests/trust-migration.test.js` | pass | partial — PTY case passes; type-ahead case is `not applicable: needs script(1) with -c` | pending runner |
-| Restore staging | Staging authenticates a candidate and changes no project file and no authority state | `stageRestoreCandidate` — `continuity/internal/restore/candidate-store.js` | `stages one authenticated candidate without changing project files`; `fails closed on payload tampering and unsafe candidate-shaped entries`; `checks both TTY streams before recall or mutation` — `tests/restore-store.test.js`; `accepts only the four normative restore productions` — `tests/restore-cli.test.js` | pass | pass | pending runner |
-| Restore apply | The final barrier completes before the first temporary write; destination races fail closed; authority is recomputed, never asserted | `applyRestoreCandidate` — `continuity/internal/restore/apply-service.js` | `runs the complete final barrier before the first temporary write`; `detects a destination race after the barrier before creating the temporary file`; `applies into a revoked slot without changing its tombstone or authority`; `recomputes authority from the live bytes and current manifest` — `tests/restore-apply.test.js` | pass | pass | pending runner |
-| Receipts | A receipt is immutable, authenticated, and audit-only — it confers no authority | `commitRestoreReceipt` — `continuity/internal/restore/receipt-store.js` | `commits an immutable authenticated audit-only receipt` — `tests/restore-receipt.test.js` | pass | pass | pending runner |
-| Consumed markers | A spent confirmation cannot be replayed, rebound, or rolled back | `commitConsumedMarker` — `continuity/internal/restore/receipt-store.js` | `commits an independent authenticated consumed marker and rejects tampering` — `tests/restore-receipt.test.js`; `spends the issued context after one wrong phrase and refuses replay`; `cannot bind one spent confirmation transaction to another candidate`; `rejects authenticated current-state rollback and duplicate sequences` — `tests/restore-confirmation.test.js` | pass | pass | pending runner |
-| Crash recovery | A crashed transaction converges without repeating a destination replacement; conflicting evidence demands owner intervention | `recoverRestoreTransactions` — `continuity/internal/restore/recovery.js` | `recovers idempotently after ${state} without repeating replacement`; `reclaims the abandoned lock and converges`; `requires owner intervention when post-rename destination bytes changed` — `tests/restore-recovery.test.js`; `rejects a well-formed foreign-owner lock during recovery (fail-closed, no reclaim)` — `tests/trust-crash.test.js` | pass | pass | pending runner |
-| **Crash recovery reachability** | Recovery runs in the product, before any new apply transaction can begin | `recoverRestoreTransactions` call sites — `continuity/index.js` | `gives recoverRestoreTransactions at least one real non-test caller`; `runs recovery before a new apply transaction can begin`; `keeps the recover verb non-destructive and unable to start a transaction` — `tests/restore-boundary.test.js`; `converges a SIGKILL at ${boundary} before a new apply may begin`; `never repeats a destination replacement across repeated CLI recovery`; `leaves a destination changed after the committed replacement untouched` — `tests/restore-recovery-cli.test.js` | pass | pass | pending runner |
-| **Recovery lock policy** | Only an authenticated, own-transaction, provably-dead lock is reclaimed; never by age | `classifyLockLiveness` — `continuity/internal/restore/recovery.js` | `classifies liveness by ownership and process state, never by age`; `refuses to reclaim a lock held by a live process`; `fails closed on a malformed, unauthenticated, or foreign lock`; `does not touch a lock belonging to a different transaction` — `tests/restore-recovery-cli.test.js` | pass | pass | pending runner |
-| Package boundary | No writer is exported, deep-importable, or reachable through an exported object | `isSlotAuthoritative` — `continuity/trust-store.js` | `requirement 1 — exposes no new public export`; `requirement 2 — refuses a deep import of every writer module`; `requirement 9 — exposes no mutation primitive through an exported object`; `fails the boundary when the export map exposes a writer` — `tests/restore-boundary.test.js`; `does not expose a package-root entry point` — `tests/trust-api-boundary.test.js` | pass | pass | pending runner |
-| CLI boundary | Only `trust` and `restore` reach a mutation entry point, only interactively, with typed exits | `trustFromCli` — `continuity/index.js` | `requirement 8 — only the CLI entry module imports a mutation entry point`; `requirement 8 — routes exactly two subcommands into the mutation handlers` — `tests/restore-boundary.test.js`; `refuses noninteractive stage with exit 4 before config, recall, or mutation`; `refuses noninteractive apply with exit 4 before candidate lookup or mutation`; `rejects aliases, options, unsupported slots, and malformed arity` — `tests/restore-cli.test.js` | pass | pass | pending runner |
-| **Operator documentation** | Every documented claim matches the code; no documented command the CLI would reject | `Owner authority commands` — `noosphere-mcp/README.md` | `documents every owner authority command, and only real ones`; `documents exit codes 0 through 4 exactly as the code maps them`; `documents the seven-day retention, and that retention is not permission`; `documents crash recovery, the lock policy, and owner intervention`; `states the absence of every bypass, and no operator file contradicts it`; `shows no authority command the CLI would reject`; `documents the accepted PTY-relay residual` — `tests/operator-docs.test.js` | pass | pass | pending runner |
-| Platform boundary | One canonical principal per physical tree; a fixed destination no alias can redirect; unsafe paths fail closed | `fixedDestination` — `continuity/internal/restore/apply-service.js` | `treats a canonical tree as ONE principal even under an aliased path`; `cannot be forked or selected by the process environment` — `tests/trust-project-binding.test.js`; `treats an unsafe (symlink) lock path as fail-closed, not absent` — `tests/trust-crash.test.js`; `refuses a symlinked slot FILE, whatever it points at` — `tests/slot-source-safety.test.js`; `WINDOWS ACL: MCP ACP, execution, sync, and CSP writes use the exact SID DACL` — `tests/windows-acl.test.js` | partial — the Windows ACL case is `not applicable: Windows-only exact SID ACL coverage` | partial — same skip | pending runner |
+| Authority cutover | Loading the dispatcher retires format 1 irreversibly; legacy state is inventory only | `isSlotAuthoritative` — `continuity/trust-store.js` | `makes a valid format-1 approval inert before migration inventory`; `keeps format 1 inert after Phase 4C manifest deletion`; `keeps format 1 inert after binding deletion or corruption` — `tests/trust-phase4c-cutover.test.js` | pass | pass | **fail — Finding 4** |
+| Generations | Generations are append-only; a rolled-back or missing manifest is invalid, never permissive | `buildApprovedGeneration` — `continuity/internal/trust-generation.js` | `appends N+1 tombstone, is idempotent, and reapproves only at N+2`; `classifies missing or rolled-back manifests with generation artifacts as invalid` — `tests/trust-revocation.test.js`; `chains immutable events and rejects substitution or truncation` — `tests/trust-audit.test.js` | pass | pass | **fail — Finding 4** |
+| Revocation | Tombstones are authenticated, canonically shaped, and domain-bound | `revokeSlot` — `continuity/internal/revocation-service.js` | `builds the one exact canonical tombstone shape`; `rejects forbidden, null, inherited, unknown, and omitted tombstone fields`; `quarantines a MAC-invalid tombstone and its authenticated incomplete journal` — `tests/trust-revocation.test.js`; `rejects every ordered cross-domain substitution` — `tests/trust-domain-separation.test.js` | pass | pass | **fail — Finding 4** |
+| Migration | Every eligible slot requires a fresh owner approval; no legacy state is promoted | `migrateTrustInventory` — `continuity/internal/migration-service.js` | `requires a distinct normal approval for every eligible slot`; `never restarts invalid current Phase 4C history from legacy inventory`; `never prompts over a current authenticated tombstone`; `checks both TTY streams before inventory or mutation` — `tests/trust-migration.test.js` | pass | pass | **fail — Finding 4** |
+| Migration ceremony ordering | A confirmation typed before its prompt was displayed is discarded, not accepted | `readExactConfirmation` — `continuity/internal/exact-confirmation.js` | `requires distinct confirmations through a genuine PTY for two eligible slots`; `discards input typed before its prompt was displayed` — `tests/trust-migration.test.js` | pass | partial — PTY case passes; type-ahead case is `not applicable: needs script(1) with -c` | **not applicable: no PTY allocator — Finding 5** |
+| Restore staging | Staging authenticates a candidate and changes no project file and no authority state | `stageRestoreCandidate` — `continuity/internal/restore/candidate-store.js` | `stages one authenticated candidate without changing project files`; `fails closed on payload tampering and unsafe candidate-shaped entries`; `checks both TTY streams before recall or mutation` — `tests/restore-store.test.js`; `accepts only the four normative restore productions` — `tests/restore-cli.test.js` | pass | pass | **fail — Finding 4** |
+| Restore apply | The final barrier completes before the first temporary write; destination races fail closed; authority is recomputed, never asserted | `applyRestoreCandidate` — `continuity/internal/restore/apply-service.js` | `runs the complete final barrier before the first temporary write`; `detects a destination race after the barrier before creating the temporary file`; `applies into a revoked slot without changing its tombstone or authority`; `recomputes authority from the live bytes and current manifest` — `tests/restore-apply.test.js` | pass | pass | **fail — Finding 4** |
+| Receipts | A receipt is immutable, authenticated, and audit-only — it confers no authority | `commitRestoreReceipt` — `continuity/internal/restore/receipt-store.js` | `commits an immutable authenticated audit-only receipt` — `tests/restore-receipt.test.js` | pass | pass | **fail — Finding 4** |
+| Consumed markers | A spent confirmation cannot be replayed, rebound, or rolled back | `commitConsumedMarker` — `continuity/internal/restore/receipt-store.js` | `commits an independent authenticated consumed marker and rejects tampering` — `tests/restore-receipt.test.js`; `spends the issued context after one wrong phrase and refuses replay`; `cannot bind one spent confirmation transaction to another candidate`; `rejects authenticated current-state rollback and duplicate sequences` — `tests/restore-confirmation.test.js` | pass | pass | **fail — Finding 4** |
+| Crash recovery | A crashed transaction converges without repeating a destination replacement; conflicting evidence demands owner intervention | `recoverRestoreTransactions` — `continuity/internal/restore/recovery.js` | `recovers idempotently after ${state} without repeating replacement`; `reclaims the abandoned lock and converges`; `requires owner intervention when post-rename destination bytes changed` — `tests/restore-recovery.test.js`; `rejects a well-formed foreign-owner lock during recovery (fail-closed, no reclaim)` — `tests/trust-crash.test.js` | pass | pass | **fail — Finding 4** |
+| **Crash recovery reachability** | Recovery runs in the product, before any new apply transaction can begin | `recoverRestoreTransactions` call sites — `continuity/index.js` | `gives recoverRestoreTransactions at least one real non-test caller`; `runs recovery before a new apply transaction can begin`; `keeps the recover verb non-destructive and unable to start a transaction` — `tests/restore-boundary.test.js`; `converges a SIGKILL at ${boundary} before a new apply may begin`; `never repeats a destination replacement across repeated CLI recovery`; `leaves a destination changed after the committed replacement untouched` — `tests/restore-recovery-cli.test.js` | pass | pass | **fail — Finding 4** |
+| **Recovery lock policy** | Only an authenticated, own-transaction, provably-dead lock is reclaimed; never by age | `classifyLockLiveness` — `continuity/internal/restore/recovery.js` | `classifies liveness by ownership and process state, never by age`; `refuses to reclaim a lock held by a live process`; `fails closed on a malformed, unauthenticated, or foreign lock`; `does not touch a lock belonging to a different transaction` — `tests/restore-recovery-cli.test.js` | pass | pass | **fail — Finding 4** |
+| Package boundary | No writer is exported, deep-importable, or reachable through an exported object | `isSlotAuthoritative` — `continuity/trust-store.js` | `requirement 1 — exposes no new public export`; `requirement 2 — refuses a deep import of every writer module`; `requirement 9 — exposes no mutation primitive through an exported object`; `fails the boundary when the export map exposes a writer` — `tests/restore-boundary.test.js`; `does not expose a package-root entry point` — `tests/trust-api-boundary.test.js` | pass | pass | **fail — Finding 4** |
+| CLI boundary | Only `trust` and `restore` reach a mutation entry point, only interactively, with typed exits | `trustFromCli` — `continuity/index.js` | `requirement 8 — only the CLI entry module imports a mutation entry point`; `requirement 8 — routes exactly two subcommands into the mutation handlers` — `tests/restore-boundary.test.js`; `refuses noninteractive stage with exit 4 before config, recall, or mutation`; `refuses noninteractive apply with exit 4 before candidate lookup or mutation`; `rejects aliases, options, unsupported slots, and malformed arity` — `tests/restore-cli.test.js` | pass | pass | **fail — Finding 4** |
+| **Operator documentation** | Every documented claim matches the code; no documented command the CLI would reject | `Owner authority commands` — `noosphere-mcp/README.md` | `documents every owner authority command, and only real ones`; `documents exit codes 0 through 4 exactly as the code maps them`; `documents the seven-day retention, and that retention is not permission`; `documents crash recovery, the lock policy, and owner intervention`; `states the absence of every bypass, and no operator file contradicts it`; `shows no authority command the CLI would reject`; `documents the accepted PTY-relay residual` — `tests/operator-docs.test.js` | pass | pass | **fail — Finding 4** |
+| Platform boundary | One canonical principal per physical tree; a fixed destination no alias can redirect; unsafe paths fail closed | `fixedDestination` — `continuity/internal/restore/apply-service.js` | `treats a canonical tree as ONE principal even under an aliased path`; `cannot be forked or selected by the process environment` — `tests/trust-project-binding.test.js`; `treats an unsafe (symlink) lock path as fail-closed, not absent` — `tests/trust-crash.test.js`; `refuses a symlinked slot FILE, whatever it points at` — `tests/slot-source-safety.test.js`; `WINDOWS ACL: MCP ACP, execution, sync, and CSP writes use the exact SID DACL` — `tests/windows-acl.test.js` | partial — the Windows ACL case is `not applicable: Windows-only exact SID ACL coverage` | partial — same skip | **not reached — the job fails earlier, Finding 4** |
 
 Rows in **bold** are new in this remediation round.
 
@@ -374,7 +376,7 @@ Exit 3 was produced through a real PTY, not a simulated TTY.
 |---|---|---|---|---|
 | noosphere-mcp / ubuntu-latest | 720 tests, 717 pass, 0 fail, 3 skip | 133 tests, 129 pass, 0 fail, 4 skip | 182 tests, 182 pass, 0 fail, 0 skip | **pass** |
 | noosphere-mcp / macos-latest | 720 tests, 716 pass, 0 fail, 4 skip | 133 tests, 129 pass, 0 fail, 4 skip | 182 tests, 181 pass, 0 fail, 1 skip | **pass** |
-| noosphere-mcp / windows-latest | — | — | — | **pending runner** |
+| noosphere-mcp / windows-latest | **fail** — see Finding 4 | — | — | **fail** |
 | noosphere-relayer / ubuntu, macos, windows | — | — | — | pass |
 
 Every skip on Linux and macOS is named and platform-inapplicable:
@@ -389,11 +391,20 @@ Every skip on Linux and macOS is named and platform-inapplicable:
 No `listen EPERM` failure occurred on any runner, so no result is
 sandbox-degraded.
 
-### Windows: not verified
+### Windows: executed, and failing
 
-The Windows job has not reported. Until it does, **no Windows cell in §2 may be
-read as passing**, and these Windows-native cases have never executed in any run
-of this branch:
+The Windows job ran and **failed**. **No Windows cell in §2 may be read as
+passing.** The failures reduce to exactly three causes, all identified:
+
+1. `state-acl-broad` on the restore destination — **product defect**, Finding 4.
+   6 of 8 `restore-apply` cases and all 11 `restore-recovery` cases.
+2. `spawn script ENOENT` in the genuine-PTY migration test — no PTY allocator on
+   Windows, Finding 5, now an explicit named skip.
+3. `ERR_UNSUPPORTED_ESM_URL_SCHEME` in the boundary suite — test defect,
+   Finding 6, fixed.
+
+Because the job aborts at those failures, these Windows-native cases still have
+**not** executed on this branch:
 
 - exact SID DACL handling on ACP, execution, sync, and CSP writes
 - protected-DACL preservation across a replacement
@@ -402,10 +413,12 @@ of this branch:
 - durable replacement
 - reparse-point refusal
 
-Windows verification is **not** complete if those tests skip rather than run. The
+Windows verification is **not** complete if those tests skip rather than run, and
+it is not complete now: they have neither run nor been reported. The
 `test:security` shard is the gate that forces them to execute on
 `windows-latest`; a Windows job that reports them as `# SKIP` is a failed
-verification, not a pass.
+verification, not a pass — and a Windows job that fails before reaching them, as
+this one does, is not evidence of anything.
 
 ## 13. Findings
 
@@ -438,9 +451,80 @@ asked. The harness was wrong, not the ceremony. It now waits for each prompt, an
 the discard behaviour is pinned by its own test so a refactor to one shared stdin
 reader would fail loudly instead of silently weakening the ceremony.
 
-### Finding 4 — Windows unverified — **OPEN**
+### Finding 4 — Windows job fails: owner-only ACL semantics applied to a repository destination — **OPEN, RELEASE BLOCKER**
 
-See §12. This is the remaining platform blocker.
+The Windows job ran. It failed, and the failure is a product defect, not a
+harness artifact.
+
+`inspectOwnerOnlyDestination` — the observation the restore final barrier and
+recovery both take of the destination file — applies **owner-only** ACL
+semantics on Windows:
+
+```js
+// noosphere-secure-fs/index.js
+if (platform !== 'win32' && (Number(info.mode) & 0o022) !== 0) throw 'state-file-unsafe-mode';
+if (platform === 'win32') verifyOwnerOnlyWindows(resolved.file, options);
+```
+
+The two branches are not equivalent:
+
+| Platform | Refuses when | A normal repository file |
+|---|---|---|
+| POSIX | group or other has **write** (`mode & 0o022`) | 0644 passes |
+| Windows | the DACL is anything other than exactly `{SYSTEM, Administrators, owner}` with no inherited ACEs | **fails** — `state-acl-broad` |
+
+The restore destination is a **repository** file (`.noosphere/master-prompt.md`,
+`.noosphere/instructions.md`, `.noosphere/baseline.md`), not owner-only state.
+`atomicRepositoryWrite` confirms the intent: on Windows it *copies the
+destination's existing DACL* forward and on POSIX it carries the mode forward —
+repository files deliberately keep repository permissions. Every real
+`.noosphere/*.md` on Windows therefore carries inherited ACEs and is rejected.
+
+Consequence: **`noosphere restore apply` cannot succeed on Windows for any real
+repository file.** It fails at the final barrier with
+`ERR_RESTORE_FINAL_BARRIER: restore destination validation failed:
+state-acl-broad`, and `restore recover` fails the same way for the same reason.
+Observed in CI job
+[90309910778](https://github.com/papmilan/noosphere/actions/runs/30369668285/job/90309910778):
+6 of 8 `restore-apply` cases and all 11 `restore-recovery` cases fail with that
+exact error.
+
+This fails **closed** — no destination is written, no authority is granted — so
+it is an availability defect on Windows, not an authority defect. It is still a
+release blocker: the feature does not work on a supported platform.
+
+The fix is to make the Windows destination check mirror the POSIX one: refuse
+when a principal other than the owner, SYSTEM, or Administrators holds **write**
+access, and allow read. That requires new PowerShell to enumerate write-capable
+ACEs in `noosphere-secure-fs/windows-owner-only.ps1`, in the security-critical
+Windows path.
+
+**It has deliberately not been attempted in this round.** No Windows machine is
+available here, the change alters ACL semantics in the module both the relayer
+and the MCP package depend on, and writing it blind and then reporting it as
+verified is precisely what this record exists to prevent. It needs an
+implementer with a Windows runner in the loop.
+
+### Finding 5 — Windows PTY ceremony unverifiable — **OPEN**
+
+`requires distinct confirmations through a genuine PTY for two eligible slots`
+previously failed on Windows with `spawn script ENOENT`. Windows runners have
+neither `script(1)` nor `expect`, and Node cannot allocate a pseudo-terminal
+without a native addon.
+
+The test now skips on Windows with the named reason
+`not applicable: no PTY allocator on Windows runners`, so the job reports the
+gap instead of a spurious red. **The migration ceremony's behaviour under a real
+Windows terminal is unverified.** The TTY *refusal* is verified on every
+platform by `checks both TTY streams before inventory or mutation`; what is not
+verified is the interactive accept path on Windows.
+
+### Finding 6 — boundary suite used an absolute path as an ESM specifier — **CLOSED**
+
+`classifies every export of every writer module` imported each writer module by
+absolute path. On Windows Node reads `D:\...` as a URL with scheme `d:` and
+throws `ERR_UNSUPPORTED_ESM_URL_SCHEME`. Now uses `pathToFileURL`. A test-only
+defect, introduced in this workstream and caught by the first Windows run.
 
 ## 14. Release gate
 
@@ -450,8 +534,10 @@ Release remains blocked until every one of these is true:
 - [x] Finding 2 documented and tested
 - [x] Linux job passes
 - [x] macOS job passes
-- [ ] Windows job passes
+- [ ] **Windows job passes — currently FAILS, see Finding 4**
 - [ ] Windows-native cases actually execute rather than skip
+- [ ] Finding 4 fixed by an implementer with a Windows runner
+- [ ] Finding 5 either closed or accepted as a documented residual
 - [ ] Independent hostile review at the exact head finds no unresolved authority,
       recovery, replay, or destructive restore defect
 - [ ] An approving review is submitted by someone other than the implementer
@@ -462,7 +548,7 @@ The reviewer should be given:
 
 1. The Phase 4C specification and the implementation plan
    (`docs/superpowers/plans/2026-07-27-sec-05-phase-4c.md`).
-2. The complete commit range `d2992c3..80dcf16` (16 commits), and PR
+2. The complete commit range `d2992c3..0941df1` (18 commits), and PR
    [#34](https://github.com/papmilan/noosphere/pull/34).
 3. This conformance matrix, the production recovery call graph (§4), the lock
    policy (§5), and the boundary and export inventories (§8–§9).
@@ -504,3 +590,8 @@ Specifically asked of the reviewer — try to break, not confirm:
   one it does not.
 - **The documentation.** Every claim in `noosphere-mcp/README.md` is a claim an
   operator will act on. Find one that is false.
+- **Finding 4's blast radius.** `inspectOwnerOnlyDestination` is shared. Decide
+  whether any OTHER caller is relying on owner-only ACL semantics that a
+  POSIX-mirroring fix would relax, and whether the POSIX branch itself is right:
+  it permits group/other **read** of an authority-capable slot, which is correct
+  for a repository file but should be stated deliberately rather than inherited.

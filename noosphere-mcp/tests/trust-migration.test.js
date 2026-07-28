@@ -175,7 +175,16 @@ function driveLinuxPty(context, command, next, expected = 2) {
 }
 
 describe('SEC-05 Phase 4C — fresh per-slot migration approval', () => {
-  it('requires distinct confirmations through a genuine PTY for two eligible slots', async () => {
+  it('requires distinct confirmations through a genuine PTY for two eligible slots', async function () {
+    // Windows has neither script(1) nor expect, and Node cannot allocate a PTY
+    // without a native addon. The ceremony's Windows terminal behaviour is
+    // therefore NOT verified by this suite — recorded as unverified in
+    // docs/security/SEC-05-PHASE-4C-VERIFICATION.md rather than hidden behind a
+    // green job. The TTY refusal itself IS verified on every platform by
+    // 'checks both TTY streams before inventory or mutation'.
+    if (process.platform === 'win32') {
+      return this.skip('not applicable: no PTY allocator on Windows runners');
+    }
     const context = await fixture();
     await runMigrationInGenuinePty(context);
 

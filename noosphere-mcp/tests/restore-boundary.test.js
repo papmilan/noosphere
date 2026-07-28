@@ -13,7 +13,7 @@ import fs from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { after, describe, it } from 'node:test';
 
 import { npmCommand, npmSpawnOptions } from '../lifecycle/util.js';
@@ -60,7 +60,9 @@ describe('SEC-05 Phase 4C Task 9 — authority-writer surface audit', () => {
 
   it('classifies every export of every writer module', async () => {
     for (const relative of WRITER_MODULE_PATHS) {
-      const module = await import(path.join(packageRoot, relative));
+      // pathToFileURL, not the raw path: on Windows an absolute path is not a
+      // valid ESM specifier ('d:' is read as a URL scheme).
+      const module = await import(pathToFileURL(path.join(packageRoot, relative)).href);
       const declared = [
         ...Object.values(WRITER_MODULES)
           .filter((entry) => entry.module === relative)

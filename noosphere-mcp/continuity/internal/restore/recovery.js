@@ -61,6 +61,10 @@ function requireEvidence(condition, message) {
  *
  * Age alone is never a reason. A lock is not reclaimed because it is old.
  */
+// `now` and `uptimeSeconds` are injectable for the unit test ONLY. The recovery
+// path deliberately does not forward its own `now` seam here: a clock a caller
+// can move forward would turn a live lock into an "abandoned" one, and a
+// liveness decision must not be steerable by anything but the real machine.
 export function classifyLockLiveness(lock, { uptimeSeconds = os.uptime(), now = () => new Date() } = {}) {
   if (!Number.isInteger(lock?.pid) || lock.pid <= 0) return 'ambiguous';
   const startedAt = Date.parse(lock?.startedAt ?? '');
@@ -201,7 +205,7 @@ async function assertCompleteChain(journal, input) {
     lock.transactionId === journal.transactionId,
     'restore slot lock belongs to a different transaction',
   );
-  const liveness = classifyLockLiveness(lock, { now: input.now });
+  const liveness = classifyLockLiveness(lock);
   requireEvidence(
     liveness === 'abandoned',
     liveness === 'live'

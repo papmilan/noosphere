@@ -288,6 +288,30 @@ describe('SEC-05 Phase 4C — restore recovery lock policy', () => {
     }
   });
 
+  // A clock a caller can move forward would turn a live lock into an
+  // "abandoned" one through the pre-boot signal. The recovery path must not
+  // forward its own injectable `now` into the liveness decision.
+  it('does not let an injected clock steer the liveness decision', async () => {
+    const source = await fs.readFile(
+      path.join(packageRoot, 'continuity/internal/restore/recovery.js'), 'utf8',
+    );
+    // Exactly two mentions: the declaration, and one call with no options.
+    const mentions = [...source.matchAll(/classifyLockLiveness\s*\(/g)];
+    assert.equal(mentions.length, 2, 'unexpected classifyLockLiveness call sites');
+    assert.match(source, /export function classifyLockLiveness\(/);
+    assert.match(source, /const liveness = classifyLockLiveness\(lock\);/,
+      'recovery passes a caller-controlled clock into the liveness decision');
+
+    // The seam still exists for this file's own unit test, and it is the only
+    // thing that can move the verdict.
+    const live = { pid: process.pid, startedAt: new Date().toISOString() };
+    assert.equal(classifyLockLiveness(live), 'live');
+    assert.equal(
+      classifyLockLiveness(live, { now: () => new Date(Date.now() + 400 * 86400_000) }),
+      'abandoned',
+    );
+  });
+
   it('refuses to reclaim a lock held by a live process', async () => {
     const context = await fixture();
     crash(context, 'destination-replaced');
