@@ -51,6 +51,32 @@ jobs:
       # SEC-03 scope and tracked separately.
       - run: npm run test:security
 
+      # SEC-05 Phase 4C: the authority cutover, the restore state machines, and
+      # the writer-surface boundary run as their own fail-fast shard on all
+      # three platforms. `npm run check` runs these files too, but only after a
+      # 600 s-timeout full suite; a boundary breach must fail in seconds, and a
+      # platform cell in SEC-05-PHASE-4C-VERIFICATION.md is only evidence if the
+      # shard that produced it is named and reproducible.
+      - if: matrix.package == 'noosphere-mcp'
+        name: SEC-05 Phase 4C trust and restore
+        run: >-
+          node --test --test-concurrency=1 --test-timeout=600000
+          tests/trust-domain-separation.test.js
+          tests/trust-phase4c-cutover.test.js
+          tests/trust-revocation.test.js
+          tests/trust-migration.test.js
+          tests/trust-crash.test.js
+          tests/trust-project-binding.test.js
+          tests/restore-cli.test.js
+          tests/restore-store.test.js
+          tests/restore-confirmation.test.js
+          tests/restore-apply.test.js
+          tests/restore-recovery.test.js
+          tests/restore-receipt.test.js
+          tests/restore-boundary.test.js
+          tests/trust-api-boundary.test.js
+          tests/phase4c-conformance.test.js
+
       - run: npm audit --audit-level=high
 
   project-memory-postgres:
