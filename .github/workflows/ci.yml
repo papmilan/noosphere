@@ -62,6 +62,8 @@ jobs:
         run: >-
           node --test --test-concurrency=1 --test-timeout=1800000
           tests/trust-domain-separation.test.js
+          tests/trust-record-splicing.test.js
+          tests/trust-concurrency.test.js
           tests/trust-phase4c-cutover.test.js
           tests/trust-revocation.test.js
           tests/trust-migration.test.js

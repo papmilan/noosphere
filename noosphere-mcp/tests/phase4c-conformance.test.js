@@ -40,6 +40,8 @@ const repoRoot = path.resolve(packageRoot, '..');
 // bound to evidence that CI does not execute.
 export const PHASE4C_SHARD = Object.freeze([
   'tests/trust-domain-separation.test.js',
+  'tests/trust-record-splicing.test.js',
+  'tests/trust-concurrency.test.js',
   'tests/trust-phase4c-cutover.test.js',
   'tests/trust-revocation.test.js',
   'tests/trust-migration.test.js',
@@ -85,6 +87,30 @@ const CONFORMANCE = Object.freeze({
       ['tests/trust-revocation.test.js', 'rejects forbidden, null, inherited, unknown, and omitted tombstone fields'],
       ['tests/trust-revocation.test.js', 'quarantines a MAC-invalid tombstone and its authenticated incomplete journal'],
       ['tests/trust-domain-separation.test.js', 'rejects every ordered cross-domain substitution'],
+      ['tests/trust-record-splicing.test.js', 'refuses every spliced field of a real apply journal'],
+    ],
+  },
+  // Task 9 Step 3, second half: the domain matrix proves a record cannot cross
+  // domains; this proves no single FIELD can cross records under a kept MAC.
+  'field splicing': {
+    implementation: ['continuity/internal/authenticated-records.js', 'verifyRecord'],
+    evidence: [
+      ['tests/trust-record-splicing.test.js', 'refuses every spliced field of a real apply journal'],
+      ['tests/trust-record-splicing.test.js', 'refuses every spliced field of a real approved generation, manifest, and audit event'],
+      ['tests/trust-record-splicing.test.js', 'refuses a spliced record at the production reader, not only at the MAC'],
+    ],
+  },
+  // Task 9 Step 4, first half: serialization under real contention.
+  'concurrent transitions': {
+    implementation: ['continuity/internal/trust-format-v2.js', 'acquireLock'],
+    evidence: [
+      ['tests/trust-concurrency.test.js', 'lets exactly one transition commit from one observed generation'],
+      ['tests/trust-concurrency.test.js', 'never reuses a generation across a burst of racing approvals'],
+      ['tests/trust-concurrency.test.js', 'never lets a racing approval bypass a tombstone'],
+      ['tests/trust-concurrency.test.js', 'races per-slot migration approval against a direct approval'],
+      ['tests/trust-concurrency.test.js', 'never applies two restores to the same destination concurrently'],
+      ['tests/trust-concurrency.test.js', 'never lets a restore apply land against stale destination bytes'],
+      ['tests/trust-concurrency.test.js', 'races a restore apply against an authority transition on the same slot'],
     ],
   },
   migration: {
@@ -217,14 +243,16 @@ async function read(relative) {
 }
 
 describe('SEC-05 Phase 4C Task 10 — conformance gate', () => {
-  it('binds all fifteen normative properties to evidence', () => {
+  it('binds all seventeen normative properties to evidence', () => {
     assert.deepEqual(Object.keys(CONFORMANCE).sort(), [
       'CLI boundary',
       'append-only generations',
       'authenticated tombstones',
+      'concurrent transitions',
       'consumed replay prevention',
       'crash recovery',
       'crash recovery reachability',
+      'field splicing',
       'irreversible format-1 retirement',
       'migration',
       'operator documentation',
