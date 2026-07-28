@@ -53,6 +53,7 @@ export const PHASE4C_SHARD = Object.freeze([
   'tests/restore-recovery-cli.test.js',
   'tests/restore-receipt.test.js',
   'tests/restore-boundary.test.js',
+  'tests/operator-docs.test.js',
   'tests/trust-api-boundary.test.js',
   'tests/phase4c-conformance.test.js',
 ]);
@@ -149,6 +150,20 @@ const CONFORMANCE = Object.freeze({
       ['tests/restore-recovery-cli.test.js', 'leaves a destination changed after the committed replacement untouched'],
     ],
   },
+  // Finding 2 remediation. Documentation about a boundary is a claim an
+  // operator acts on, so it is verified like any other invariant.
+  'operator documentation': {
+    implementation: ['README.md', 'Owner authority commands'],
+    evidence: [
+      ['tests/operator-docs.test.js', 'documents every owner authority command, and only real ones'],
+      ['tests/operator-docs.test.js', 'documents exit codes 0 through 4 exactly as the code maps them'],
+      ['tests/operator-docs.test.js', 'documents the seven-day retention, and that retention is not permission'],
+      ['tests/operator-docs.test.js', 'documents crash recovery, the lock policy, and owner intervention'],
+      ['tests/operator-docs.test.js', 'states the absence of every bypass, and no operator file contradicts it'],
+      ['tests/operator-docs.test.js', 'shows no authority command the CLI would reject'],
+      ['tests/operator-docs.test.js', 'documents the accepted PTY-relay residual'],
+    ],
+  },
   'recovery lock policy': {
     implementation: ['continuity/internal/restore/recovery.js', 'classifyLockLiveness'],
     evidence: [
@@ -202,7 +217,7 @@ async function read(relative) {
 }
 
 describe('SEC-05 Phase 4C Task 10 — conformance gate', () => {
-  it('binds all fourteen normative properties to evidence', () => {
+  it('binds all fifteen normative properties to evidence', () => {
     assert.deepEqual(Object.keys(CONFORMANCE).sort(), [
       'CLI boundary',
       'append-only generations',
@@ -212,6 +227,7 @@ describe('SEC-05 Phase 4C Task 10 — conformance gate', () => {
       'crash recovery reachability',
       'irreversible format-1 retirement',
       'migration',
+      'operator documentation',
       'package boundary',
       'platform boundary',
       'receipt semantics',

@@ -75,6 +75,7 @@ jobs:
           tests/restore-recovery-cli.test.js
           tests/restore-receipt.test.js
           tests/restore-boundary.test.js
+          tests/operator-docs.test.js
           tests/trust-api-boundary.test.js
           tests/phase4c-conformance.test.js
 
