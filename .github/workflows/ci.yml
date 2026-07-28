@@ -60,7 +60,7 @@ jobs:
       - if: matrix.package == 'noosphere-mcp'
         name: SEC-05 Phase 4C trust and restore
         run: >-
-          node --test --test-concurrency=1 --test-timeout=600000
+          node --test --test-concurrency=1 --test-timeout=1800000
           tests/trust-domain-separation.test.js
           tests/trust-phase4c-cutover.test.js
           tests/trust-revocation.test.js

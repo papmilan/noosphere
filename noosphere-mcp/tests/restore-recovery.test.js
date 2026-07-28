@@ -149,7 +149,7 @@ describe('SEC-05 Phase 4C — authenticated restore recovery', () => {
           CRASH_CANDIDATE: context.candidateId,
           CRASH_AT: boundary,
         },
-        timeout: 30000,
+        timeout: 300000,
         killSignal: 'SIGKILL',
       });
       assert.equal(result.error, undefined,

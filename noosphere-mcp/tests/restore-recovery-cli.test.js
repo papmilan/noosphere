@@ -74,7 +74,7 @@ function cli(context, args) {
     env: { ...process.env, ...context.env, NOOSPHERE_PROJECT_DIR: context.projectRoot },
     encoding: 'utf8',
     input: '',
-    timeout: 60000,
+    timeout: 300000,
   });
 }
 
@@ -89,7 +89,7 @@ function crash(context, boundary) {
       CRASH_CANDIDATE: context.candidateId,
       CRASH_AT: boundary,
     },
-    timeout: 60000,
+    timeout: 300000,
     killSignal: 'SIGKILL',
   });
   assert.equal(result.error, undefined, `crash child errored: ${result.error?.message}`);

@@ -1,8 +1,8 @@
 # SEC-05 Phase 4C — Conformance Verification Record
 
-Status: **not released.** Findings 1 and 2 from the first audit round are closed
-in the product path. Release is blocked on **Finding 4** — `restore apply` cannot
-succeed on Windows for any real repository file — and on an independent hostile
+Status: **not released.** Findings 1, 2, 3, 4 and 6 are closed; 4 was verified on
+a real Windows runner. Release is blocked on a green Windows job (Finding 7 —
+latency, harness budgets raised and re-run pending) and on an independent hostile
 review at the exact head, submitted by someone other than the implementer.
 
 This document is the traceable requirement-to-test matrix for SEC-05 Phase 4C,
@@ -485,60 +485,79 @@ asked. The harness was wrong, not the ceremony. It now waits for each prompt, an
 the discard behaviour is pinned by its own test so a refactor to one shared stdin
 reader would fail loudly instead of silently weakening the ceremony.
 
-### Finding 4 — Windows job fails: owner-only ACL semantics applied to a repository destination — **OPEN, RELEASE BLOCKER**
+### Finding 4 — owner-only ACL semantics applied to a repository destination — **FIXED, verified on Windows**
 
-The Windows job ran. It failed, and the failure is a product defect, not a
-harness artifact.
-
-`inspectOwnerOnlyDestination` — the observation the restore final barrier and
-recovery both take of the destination file — applies **owner-only** ACL
-semantics on Windows:
-
-```js
-// noosphere-secure-fs/index.js
-if (platform !== 'win32' && (Number(info.mode) & 0o022) !== 0) throw 'state-file-unsafe-mode';
-if (platform === 'win32') verifyOwnerOnlyWindows(resolved.file, options);
-```
-
-The two branches are not equivalent:
+`inspectOwnerOnlyDestination` asked two different questions on the two platforms:
 
 | Platform | Refuses when | A normal repository file |
 |---|---|---|
 | POSIX | group or other has **write** (`mode & 0o022`) | 0644 passes |
-| Windows | the DACL is anything other than exactly `{SYSTEM, Administrators, owner}` with no inherited ACEs | **fails** — `state-acl-broad` |
+| Windows | the DACL is anything other than exactly `{SYSTEM, Administrators, owner}` with no inherited ACEs | **failed** — `state-acl-broad` |
 
-The restore destination is a **repository** file (`.noosphere/master-prompt.md`,
-`.noosphere/instructions.md`, `.noosphere/baseline.md`), not owner-only state.
-`atomicRepositoryWrite` confirms the intent: on Windows it *copies the
-destination's existing DACL* forward and on POSIX it carries the mode forward —
-repository files deliberately keep repository permissions. Every real
-`.noosphere/*.md` on Windows therefore carries inherited ACEs and is rejected.
+The restore destination is a **repository** file. `atomicRepositoryWrite`
+confirms the intent: on Windows it copies the destination's existing DACL
+forward, on POSIX it carries the mode forward. Every real `.noosphere/*.md`
+carries inherited ACEs, so `noosphere restore apply` could not succeed on Windows
+at all — `ERR_RESTORE_FINAL_BARRIER: state-acl-broad`, 6 of 8 `restore-apply` and
+all 11 `restore-recovery` cases.
 
-Consequence: **`noosphere restore apply` cannot succeed on Windows for any real
-repository file.** It fails at the final barrier with
-`ERR_RESTORE_FINAL_BARRIER: restore destination validation failed:
-state-acl-broad`, and `restore recover` fails the same way for the same reason.
-Observed in CI job
-[90309910778](https://github.com/papmilan/noosphere/actions/runs/30369668285/job/90309910778):
-6 of 8 `restore-apply` cases and all 11 `restore-recovery` cases fail with that
-exact error. At head `1dd5466` the same defect accounts for all 34 Windows
-failures, directly or as a consequence (see §12).
+**Fixed in `db164e3`.** Windows now asks the POSIX question. A new `write-sids`
+helper action reports facts only — the owner SID, then every distinct SID holding
+a write-ish right (`WriteData`, `AppendData`, `WriteAttributes`,
+`WriteExtendedAttributes`, `Delete`, `DeleteSubdirectoriesAndFiles`,
+`ChangePermissions`, `TakeOwnership`) through an **Allow** ACE. Deny ACEs are
+skipped, since a Deny can only remove access. Inherited ACEs are included:
+inheritance was never the hazard, foreign write is. `verifyNoForeignWriteWindows`
+holds the policy in JavaScript, where it is testable without a Windows host —
+every reported writer must be the owner, SYSTEM, or Administrators. The two
+built-ins are permitted for the same reason POSIX ignores root: they can take
+ownership regardless. Anything unparseable is `state-acl-readback-failed`,
+because an unreadable answer is an unanswered question rather than an absence of
+foreign writers.
 
-This fails **closed** — no destination is written, no authority is granted — so
-it is an availability defect on Windows, not an authority defect. It is still a
-release blocker: the feature does not work on a supported platform.
+This did **not** relax owner-only state. `verifyOwnerOnlyWindows` had exactly one
+caller — this destination inspector — and owner-local state gets its exact
+protected DACL from the helper's own `write`/`read`/`repair` actions, unchanged.
+The restore temporary is still written and verified by
+`writeOwnerOnlyFileExclusive` with the exact owner-only DACL; it passes the new
+check trivially.
 
-The fix is to make the Windows destination check mirror the POSIX one: refuse
-when a principal other than the owner, SYSTEM, or Administrators holds **write**
-access, and allow read. That requires new PowerShell to enumerate write-capable
-ACEs in `noosphere-secure-fs/windows-owner-only.ps1`, in the security-critical
-Windows path.
+**Verified on the `windows-latest` runner** (CI run 30384491181, head `db164e3`):
+`state-acl-broad` appears **zero** times, and no destination was refused as
+`state-destination-foreign-write`. Restore-apply cases that previously failed now
+pass, including `detects a destination race after the barrier before creating the
+temporary file`. The PowerShell `write-sids` action executed on a real Windows
+host without error.
 
-**It has deliberately not been attempted in this round.** No Windows machine is
-available here, the change alters ACL semantics in the module both the relayer
-and the MCP package depend on, and writing it blind and then reporting it as
-verified is precisely what this record exists to prevent. It needs an
-implementer with a Windows runner in the loop.
+That run still fails, but on a different cause — see Finding 7.
+
+### Finding 7 — Windows restore apply is ~80 s per operation — **OPEN (performance)**
+
+With Finding 4 fixed, the Windows restore path runs to completion for the first
+time — and one `restore apply` takes about **80 seconds** on a CI runner
+(`detects a destination race after the barrier before creating the temporary
+file`: `duration_ms: 79460`, **passing**).
+
+The cost is `powershell.exe` process startup. Every owner-only observation —
+`inspectOwnerOnlyDestination`, every owner-only read and write — spawns the
+helper script, and a single apply performs several: destination observation,
+final-barrier re-observation, prepared destination, prepared temporary,
+revalidation, commit. Cold-starting PowerShell on a Windows runner costs seconds
+each. This is pre-existing Windows behaviour of the secure-fs helper, not
+something the Finding 4 fix introduced; the fix merely made the path reachable
+so the cost became visible.
+
+Correctness is unaffected — the cases that complete pass. The failures it caused
+were harness budgets: a 60 s crash-child `spawnSync` timeout and the 600 s
+per-file node budget against eight ~80 s cases. Both were raised.
+
+Not a release blocker: the feature works and fails closed. It is a real
+user-facing Windows latency worth reducing. The obvious reduction is that
+`inspectOwnerOnlyDestination` re-verifies the ACL of a temporary file that
+`writeOwnerOnlyFileExclusive` created and verified microseconds earlier in its
+own PowerShell invocation — a redundant spawn per replacement. Deliberately not
+changed here: it is an optimisation to the security path and belongs in its own
+review, not bundled into a correctness fix.
 
 ### Finding 5 — Windows PTY ceremony unverifiable — **OPEN (accepted residual)**
 
@@ -570,9 +589,9 @@ Release remains blocked until every one of these is true:
 - [x] Finding 2 documented and tested
 - [x] Linux job passes
 - [x] macOS job passes
-- [ ] **Windows job passes — currently FAILS, see Finding 4**
+- [x] Finding 4 fixed and verified on a real Windows runner
+- [ ] **Windows job passes — see Finding 7 (harness budgets raised, re-run pending)**
 - [ ] Windows-native cases actually execute rather than skip
-- [ ] Finding 4 fixed by an implementer with a Windows runner
 - [ ] Finding 5 either closed or accepted as a documented residual
 - [ ] Independent hostile review at the exact head finds no unresolved authority,
       recovery, replay, or destructive restore defect
