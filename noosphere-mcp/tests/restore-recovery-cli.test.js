@@ -15,7 +15,11 @@ import { after, describe, it } from 'node:test';
 
 import { readApplyJournal } from '../continuity/internal/restore/apply-journal.js';
 import { readCandidateState, stageRestoreCandidate } from '../continuity/internal/restore/candidate-store.js';
-import { classifyLockLiveness } from '../continuity/internal/restore/recovery.js';
+import {
+  classifyLockLiveness,
+  reclaimAbandonedLock,
+} from '../continuity/internal/restore/recovery.js';
+import { stripComments } from './helpers/writer-surface.js';
 import { createFormatV2Store } from '../continuity/internal/trust-format-v2.js';
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -246,70 +250,65 @@ describe('SEC-05 Phase 4C — crash recovery through the production CLI', () => 
 describe('SEC-05 Phase 4C — restore recovery lock policy', () => {
   // MUTATION TARGET: "delete a held lock unconditionally". Age is never a
   // reason; ownership and liveness are the only reasons.
-  it('classifies liveness by ownership and process state, never by age', () => {
-    const base = { pid: process.pid, startedAt: new Date().toISOString() };
-    // This process is alive.
-    assert.equal(classifyLockLiveness(base, { uptimeSeconds: 86400 }), 'live');
+  it('classifies liveness by process state alone, never by age or clock', () => {
+    const live = { pid: process.pid, startedAt: new Date().toISOString() };
+    assert.equal(classifyLockLiveness(live), 'live');
     // A PID that cannot exist is gone.
-    assert.equal(
-      classifyLockLiveness({ ...base, pid: 0x7ffffff }, { uptimeSeconds: 86400 }),
-      'abandoned',
-    );
-    // A lock older than the machine's uptime predates this boot: its PID cannot
-    // still be the writer, even though this PID is live right now.
-    assert.equal(
-      classifyLockLiveness(
-        { ...base, startedAt: new Date(Date.now() - 7200_000).toISOString() },
-        { uptimeSeconds: 60 },
-      ),
-      'abandoned',
-    );
-    // …and a merely OLD lock whose process is still running stays live. Age
-    // alone must never reclaim.
-    assert.equal(
-      classifyLockLiveness(
-        { ...base, startedAt: new Date(Date.now() - 365 * 86400_000).toISOString() },
-        { uptimeSeconds: 400 * 86400 },
-      ),
-      'live',
-    );
-    // Unprovable shapes are ambiguous, never abandoned.
-    for (const broken of [
-      {},
-      { ...base, pid: undefined },
-      { ...base, pid: -1 },
-      { ...base, pid: 1.5 },
-      { ...base, pid: '1234' },
-      { ...base, startedAt: undefined },
-      { ...base, startedAt: 'not-a-date' },
+    assert.equal(classifyLockLiveness({ ...live, pid: 0x7ffffff }), 'abandoned');
+
+    // HOSTILE REVIEW, finding 2: a lock whose startedAt is arbitrarily old, or
+    // arbitrarily in the future, must not move the verdict at all. The previous
+    // implementation declared a lock older than the machine's uptime abandoned,
+    // which a forward clock jump turns into reclaiming a LIVE lock.
+    for (const startedAt of [
+      new Date(0).toISOString(),
+      new Date(Date.now() - 365 * 86400_000).toISOString(),
+      new Date(Date.now() + 365 * 86400_000).toISOString(),
+      undefined,
+      'not-a-date',
     ]) {
-      assert.equal(classifyLockLiveness(broken, { uptimeSeconds: 86400 }), 'ambiguous',
+      assert.equal(
+        classifyLockLiveness({ ...live, startedAt }),
+        'live',
+        `startedAt=${startedAt} changed a LIVE verdict`,
+      );
+    }
+
+    // Only the PID shape can make it ambiguous.
+    for (const broken of [{}, { pid: undefined }, { pid: -1 }, { pid: 0 }, { pid: 1.5 }, { pid: '1234' }]) {
+      assert.equal(classifyLockLiveness(broken), 'ambiguous',
         `${JSON.stringify(broken)} must be ambiguous`);
     }
   });
 
-  // A clock a caller can move forward would turn a live lock into an
-  // "abandoned" one through the pre-boot signal. The recovery path must not
-  // forward its own injectable `now` into the liveness decision.
-  it('does not let an injected clock steer the liveness decision', async () => {
-    const source = await fs.readFile(
+  // HOSTILE REVIEW, finding 3: os.uptime() throws EPERM under some sandboxes
+  // and container profiles. The classifier must not depend on it — or on any
+  // other host call that can refuse.
+  it('depends on no host call that can refuse', async () => {
+    const source = stripComments(await fs.readFile(
       path.join(packageRoot, 'continuity/internal/restore/recovery.js'), 'utf8',
-    );
-    // Exactly two mentions: the declaration, and one call with no options.
-    const mentions = [...source.matchAll(/classifyLockLiveness\s*\(/g)];
-    assert.equal(mentions.length, 2, 'unexpected classifyLockLiveness call sites');
-    assert.match(source, /export function classifyLockLiveness\(/);
-    assert.match(source, /const liveness = classifyLockLiveness\(lock\);/,
-      'recovery passes a caller-controlled clock into the liveness decision');
+    ));
+    assert.equal(/\bos\.uptime\s*\(/.test(source), false,
+      'recovery reads os.uptime(), which throws EPERM under some sandboxes');
+    assert.equal(/from 'node:os'/.test(source), false,
+      'recovery imports node:os again — the liveness verdict must not depend on host state');
+    // The classifier takes no options at all now, so nothing can steer it.
+    assert.equal(classifyLockLiveness.length, 1, 'classifyLockLiveness regained a steerable parameter');
+  });
 
-    // The seam still exists for this file's own unit test, and it is the only
-    // thing that can move the verdict.
+  // HOSTILE REVIEW, finding 2: the liveness decision must not be steerable by a
+  // caller-supplied clock, and there must be no clock in it to steer.
+  it('exposes no clock or host seam the caller can steer', async () => {
+    const source = stripComments(await fs.readFile(
+      path.join(packageRoot, 'continuity/internal/restore/recovery.js'), 'utf8',
+    ));
+    const mentions = [...source.matchAll(/classifyLockLiveness\s*\(/g)];
+    assert.equal(mentions.length, 3, 'unexpected classifyLockLiveness call sites');
+    assert.equal(/classifyLockLiveness\([a-zA-Z]+,/.test(source), false,
+      'a second argument was reintroduced to the liveness verdict');
     const live = { pid: process.pid, startedAt: new Date().toISOString() };
-    assert.equal(classifyLockLiveness(live), 'live');
-    assert.equal(
-      classifyLockLiveness(live, { now: () => new Date(Date.now() + 400 * 86400_000) }),
-      'abandoned',
-    );
+    assert.equal(classifyLockLiveness(live, { now: () => new Date(Date.now() + 4e10) }), 'live',
+      'an injected clock changed the verdict');
   });
 
   it('refuses to reclaim a lock held by a live process', async () => {
@@ -360,6 +359,124 @@ describe('SEC-05 Phase 4C — restore recovery lock policy', () => {
       assert.notEqual(await fs.readFile(lockFile, 'utf8').catch(() => null), null,
         `${name}: recovery removed a lock it could not authenticate`);
     }
+  });
+
+  // HOSTILE REVIEW, finding 1: reclaiming by path alone lets recovery delete a
+  // LIVE competitor's lock if that competitor cleared the dead one and took the
+  // slot between the verdict and the removal. The reclaim must re-identify the
+  // exact file it authenticated.
+  it('refuses to reclaim a lock that was replaced after the verdict', async () => {
+    const context = await fixture();
+    crash(context, 'destination-replaced');
+    const store = createFormatV2Store({ env: context.env });
+    const binding = await store.readProjectBinding(context.projectRoot);
+    const lockFile = store.lockPath(binding, 'baseline');
+
+    // The dead lock is authenticated and abandoned...
+    const dead = await store.inspectLock(binding, 'baseline');
+    assert.equal(classifyLockLiveness(dead), 'abandoned');
+
+    // ...and then a competitor replaces it with its own live lock, exactly as it
+    // would in the verdict-to-removal window.
+    await fs.rm(lockFile, { force: true });
+    const competitor = await store.acquireLock(binding, 'baseline');
+    const held = await store.inspectLock(binding, 'baseline');
+    assert.equal(classifyLockLiveness(held), 'live', 'the competitor lock must be live');
+    assert.notEqual(held.transactionId, dead.transactionId);
+
+    const result = cli(context, ['recover']);
+    assert.equal(result.status, 4, `expected a security refusal, got ${result.status}`);
+    // The competitor's lock survives byte-for-byte.
+    const survived = await store.inspectLock(binding, 'baseline');
+    assert.notEqual(survived, null, 'recovery deleted a live competitor lock');
+    assert.equal(survived.transactionId, held.transactionId);
+    assert.equal(survived.mac, held.mac);
+    await competitor.release();
+  });
+
+  // HOSTILE REVIEW, finding 1 — the reclamation race, isolated.
+  //
+  // The enclosing barrier rejects a foreign transactionId BEFORE the reclaim, so
+  // driving this through the CLI cannot reach the window. This drives the
+  // reclaim directly with a stale expectation, which is exactly the state the
+  // barrier hands it when a competitor moves in the meantime.
+  it('refuses to remove a lock that was replaced after the verdict', async () => {
+    const context = await fixture();
+    crash(context, 'destination-replaced');
+    const store = createFormatV2Store({ env: context.env });
+    const binding = await store.readProjectBinding(context.projectRoot);
+    const lockFile = store.lockPath(binding, 'baseline');
+
+    // What the barrier authenticated: a dead lock, plus its file identity.
+    const dead = await store.inspectLock(binding, 'baseline');
+    assert.equal(classifyLockLiveness(dead), 'abandoned');
+    const deadStat = await fs.lstat(lockFile);
+    const expected = {
+      lock: dead,
+      identity: { ino: deadStat.ino, dev: deadStat.dev, size: deadStat.size },
+    };
+
+    // A competitor clears the dead lock and takes the slot — the race window.
+    await fs.rm(lockFile, { force: true });
+    const competitor = await store.acquireLock(binding, 'baseline');
+    const held = await store.inspectLock(binding, 'baseline');
+    assert.equal(classifyLockLiveness(held), 'live');
+    assert.notEqual(held.transactionId, dead.transactionId);
+
+    await assert.rejects(
+      reclaimAbandonedLock(store, binding, 'baseline', expected),
+      (error) => error.code === 'ERR_RESTORE_OWNER_INTERVENTION_REQUIRED',
+      'the reclaim removed a live competitor lock',
+    );
+    const survived = await store.inspectLock(binding, 'baseline');
+    assert.notEqual(survived, null, 'a live competitor lock was deleted');
+    assert.equal(survived.mac, held.mac);
+    await competitor.release();
+  });
+
+  it('removes only the exact authenticated file, and reports an already-cleared lock', async () => {
+    const context = await fixture();
+    crash(context, 'destination-replaced');
+    const store = createFormatV2Store({ env: context.env });
+    const binding = await store.readProjectBinding(context.projectRoot);
+    const lockFile = store.lockPath(binding, 'baseline');
+    const dead = await store.inspectLock(binding, 'baseline');
+    const stat = await fs.lstat(lockFile);
+    const expected = {
+      lock: dead,
+      identity: { ino: stat.ino, dev: stat.dev, size: stat.size },
+    };
+
+    // A lock file recreated with identical BYTES but a new inode is still not
+    // the file that was authenticated.
+    const bytes = await fs.readFile(lockFile);
+    await fs.rm(lockFile);
+    await fs.writeFile(lockFile, bytes, { mode: 0o600 });
+    await assert.rejects(
+      reclaimAbandonedLock(store, binding, 'baseline', expected),
+      (error) => error.code === 'ERR_RESTORE_OWNER_INTERVENTION_REQUIRED',
+      'the reclaim accepted a different file with the same bytes',
+    );
+
+    // Cleared by someone else: nothing to remove, and no refusal either.
+    await fs.rm(lockFile, { force: true });
+    assert.equal(await reclaimAbandonedLock(store, binding, 'baseline', expected), false);
+
+    // The genuine case still works.
+    const fresh = await fixture();
+    crash(fresh, 'destination-replaced');
+    const freshStore = createFormatV2Store({ env: fresh.env });
+    const freshBinding = await freshStore.readProjectBinding(fresh.projectRoot);
+    const freshLock = await freshStore.inspectLock(freshBinding, 'baseline');
+    const freshStat = await fs.lstat(freshStore.lockPath(freshBinding, 'baseline'));
+    assert.equal(
+      await reclaimAbandonedLock(freshStore, freshBinding, 'baseline', {
+        lock: freshLock,
+        identity: { ino: freshStat.ino, dev: freshStat.dev, size: freshStat.size },
+      }),
+      true,
+    );
+    assert.equal(await freshStore.inspectLock(freshBinding, 'baseline'), null);
   });
 
   it('does not touch a lock belonging to a different transaction', async () => {

@@ -354,12 +354,18 @@ discarding its temporary file and marking the candidate failed.
 
 A crash leaves the slot lock held. Recovery reclaims that lock only when it can
 prove the lock is this project's own, for this transaction, under this owner
-scope and machine key — and that the process that wrote it is gone, either
-because the lock predates the machine's current boot or because the PID no
-longer exists. **A lock is never reclaimed because it is old.** A lock held by a
-live process, a malformed lock, a lock whose MAC does not verify, a lock from
-another project or owner, and a lock whose ownership cannot be proven are all
-left exactly as found.
+scope and machine key — and that the process that wrote it no longer exists.
+**A lock is never reclaimed because it is old**, and no clock or uptime reading
+takes part in the decision. A lock held by a live process, a malformed lock, a
+lock whose MAC does not verify, a lock from another project or owner, and a lock
+whose ownership cannot be proven are all left exactly as found.
+
+One consequence worth knowing: after a reboot, the dead transaction's process ID
+may have been reused by an unrelated running process. Recovery then reports the
+lock as live and refuses, indefinitely. That is deliberate — the alternative was
+a clock-based heuristic that could reclaim a lock from a *running* transaction —
+and it is visible rather than silent: you get exit 4 naming the process ID, and
+can remove the lock yourself once you have confirmed it is stale.
 
 #### Owner intervention required
 

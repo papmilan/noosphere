@@ -193,7 +193,11 @@ const CONFORMANCE = Object.freeze({
   'recovery lock policy': {
     implementation: ['continuity/internal/restore/recovery.js', 'classifyLockLiveness'],
     evidence: [
-      ['tests/restore-recovery-cli.test.js', 'classifies liveness by ownership and process state, never by age'],
+      ['tests/restore-recovery-cli.test.js', 'classifies liveness by process state alone, never by age or clock'],
+      ['tests/restore-recovery-cli.test.js', 'depends on no host call that can refuse'],
+      ['tests/restore-recovery-cli.test.js', 'exposes no clock or host seam the caller can steer'],
+      ['tests/restore-recovery-cli.test.js', 'refuses to remove a lock that was replaced after the verdict'],
+      ['tests/restore-recovery-cli.test.js', 'removes only the exact authenticated file, and reports an already-cleared lock'],
       ['tests/restore-recovery-cli.test.js', 'refuses to reclaim a lock held by a live process'],
       ['tests/restore-recovery-cli.test.js', 'fails closed on a malformed, unauthenticated, or foreign lock'],
       ['tests/restore-recovery-cli.test.js', 'does not touch a lock belonging to a different transaction'],

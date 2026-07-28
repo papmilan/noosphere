@@ -54,7 +54,7 @@ export const WRITER_MODULES = Object.freeze({
   }),
   recovery: Object.freeze({
     module: 'continuity/internal/restore/recovery.js',
-    writers: Object.freeze(['recoverRestoreTransactions']),
+    writers: Object.freeze(['reclaimAbandonedLock', 'recoverRestoreTransactions']),
   }),
   journal: Object.freeze({
     module: 'continuity/internal/restore/apply-journal.js',

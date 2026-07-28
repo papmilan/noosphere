@@ -1,9 +1,11 @@
 # SEC-05 Phase 4C — Conformance Verification Record
 
-Status: **not released.** Findings 1, 2, 3, 4 and 6 are closed; 4 was verified on
-a real Windows runner. Release is blocked on a green Windows job (Finding 7 —
-latency, harness budgets raised and re-run pending) and on an independent hostile
-review at the exact head, submitted by someone other than the implementer.
+Status: **not released.** Findings 1, 2, 3, 4, 6, 8, 9 and 10 are closed. An
+independent hostile review at head `3f23c7b` returned REQUEST CHANGES; its three
+named POSIX-independent findings are fixed here. Release is blocked on: the
+reviewer's four further unnamed findings, a re-review at the new head, a green
+Windows job (Finding 7 — latency, deferred by the owner), and an approving review
+from someone other than the implementer.
 
 This document is the traceable requirement-to-test matrix for SEC-05 Phase 4C,
 plus the exact evidence produced while verifying it. Nothing here is inferred: a
@@ -137,55 +139,66 @@ Reachability facts, all asserted:
 ## 5. Lock recovery policy
 
 A crash leaves the slot lock held. Before this round, recovery required the lock
-to be absent, so a SIGKILLed process's lock hid its transaction permanently —
-the precise failure mode requirement 2 names. The policy now distinguishes three
-outcomes, and only one of them permits a reclaim.
+to be absent, so a SIGKILLed process's lock hid its transaction permanently. The
+policy now distinguishes three outcomes, and only one permits a reclaim.
 
-**Step 1 — ownership, or refusal.** `store.inspectLock` is unchanged and still
-throws for a lock that is not a regular file, cannot be securely read, is not
-JSON, has a malformed token/MAC/field set, fails MAC verification over the
-slot-lock domain, or belongs to another project identity, identity digest, owner
-scope, machine key, or slot. Every one of those becomes
-`ERR_RESTORE_OWNER_INTERVENTION_REQUIRED`, and the lock file is left on disk
-exactly as found.
+**Step 1 — ownership, or refusal.** `store.inspectLock` is unchanged: it throws
+for a lock that is not a regular file, cannot be securely read, is not JSON, has
+a malformed token/MAC/field set, fails MAC verification over the slot-lock
+domain, or belongs to another project identity, identity digest, owner scope,
+machine key, or slot. Every one becomes
+`ERR_RESTORE_OWNER_INTERVENTION_REQUIRED`, and the file is left exactly as found.
 
 **Step 2 — the lock must be this transaction's.** An authenticated lock whose
-`transactionId` differs from the journal being recovered is refused. Another
-transaction's lock is never collateral.
+`transactionId` differs from the journal being recovered is refused.
 
-**Step 3 — liveness, by `classifyLockLiveness`.** Two independent signals;
-abandonment needs only one, and abandonment is the only verdict that permits a
-reclaim.
+**Step 3 — liveness, by `classifyLockLiveness`.** Exactly one signal:
 
-| Observation | Verdict | Effect |
+| `kill(pid, 0)` | Verdict | Effect |
 |---|---|---|
-| `pid` not a positive integer, or `startedAt` not a parseable timestamp | `ambiguous` | refuse |
-| `startedAt` older than the machine's current uptime | `abandoned` | reclaim |
-| `kill(pid, 0)` succeeds | `live` | refuse |
-| `kill(pid, 0)` throws `EPERM` (process exists, other user) | `live` | refuse |
-| `kill(pid, 0)` throws `ESRCH` | `abandoned` | reclaim |
-| `kill(pid, 0)` throws any other errno | `ambiguous` | refuse |
+| `pid` not a positive integer | `ambiguous` | refuse |
+| succeeds | `live` | refuse |
+| throws `EPERM` (exists, other user) | `live` | refuse |
+| throws `ESRCH` | `abandoned` | reclaim |
+| any other errno | `ambiguous` | refuse |
 
-The uptime signal exists so that a post-reboot PID collision cannot pin a dead
-transaction forever: a lock written before the current boot cannot still be held
-by that PID, whatever `kill` reports now. It is used **only** to declare
-abandonment, never liveness, so a skewed or backwards clock can cost at most a
-fail-closed refusal.
+**There is no clock- or uptime-derived signal, by correction.** An earlier
+version of this round also treated "the lock predates the machine's current
+boot" as abandonment, on the stated reasoning that a wall clock could only cost
+a fail-closed refusal. **That reasoning was wrong**, and hostile review caught
+it. A clock that jumps *forward* — NTP correction, VM resume, a container
+inheriting a skewed host clock — makes a **live** lock's `startedAt` older than
+uptime, so it was declared abandoned and reclaimed out from under a running
+transaction. That is fail-open. No wall-clock-derived boot identity avoids it: a
+forward jump moves the derived boot time by the same amount. The signal was
+removed rather than patched, which also removed the `os.uptime()` call that
+throws `EPERM` under some sandbox and container profiles (21 failures in the
+reviewer's run).
 
-**Age is never a reason.** There is no timeout, no staleness window, and no
-mtime comparison anywhere in the policy. A lock whose process is still running is
-`live` no matter how old it is — asserted directly by
-`classifies liveness by ownership and process state, never by age`.
+The accepted cost: after a reboot, a dead transaction's PID may be reused by an
+unrelated live process, and recovery then reports `live` indefinitely. That is
+fail-closed and visible — exit 4 naming the PID, and the owner can clear the lock
+once they have confirmed it stale. Matching the Phase 4A stance: never reclaim on
+a guess.
 
-**Step 4 — reclaim and re-acquire.** The reclaim removes exactly the lock file
-the barrier authenticated, with `force: false`, so a lock that moved between the
-barrier and the removal raises rather than silently succeeding. Recovery then
-acquires its own lock; if another process took the slot in between, that process
-is live by definition and the outcome is owner intervention, not a repair.
+**Age is never a reason.** No timeout, no staleness window, no mtime comparison.
+
+**Step 4 — identity-checked reclaim.** Removing by path alone was a race: between
+the verdict and the removal, a competitor can clear the dead lock and take its
+own, and a path-based `rm` would delete a **live** lock while its owner believes
+it holds one. `reclaimAbandonedLock` re-identifies the file immediately before
+removal — same inode, device and size, same authenticated bytes, same
+transaction, still abandoned — and anything else fails closed. A lock already
+cleared by someone else returns `false` rather than refusing.
+
+*Residual, stated rather than hidden:* Node offers no `funlinkat`, so a window
+remains between the final check and `unlink`. It is far smaller than the
+verdict-to-removal window it replaces, and a competitor that loses this way still
+detects it: `release()` compares lock tokens and refuses with
+`trust-lock-not-owner` rather than continuing silently.
 
 **Step 5 — re-read under the lock.** The journal is re-read after the lock is
-held, and recovery refuses if it advanced while recovery was starting. Nothing
-advances on an observation taken before mutual exclusion.
+held, and recovery refuses if it advanced while recovery was starting.
 
 ## 6. CLI recovery behaviour
 
@@ -547,6 +560,39 @@ temporary file`. The PowerShell `write-sids` action executed on a real Windows
 host without error.
 
 That run still fails, but on a different cause — see Finding 7.
+
+### Findings 8, 9, 10 — hostile review of the lock policy — **CLOSED**
+
+An independent hostile review at head `3f23c7b` returned REQUEST CHANGES with
+three POSIX-independent findings against the recovery lock policy introduced in
+this round. All three were confirmed and fixed; none was a false positive.
+
+**Finding 8 — path-based lock-reclamation race.** The reclaim removed the lock by
+path. Between the liveness verdict and the `rm`, a competitor could clear the
+dead lock and acquire its own, and the reclaim would then delete a **live** lock
+while its owner believed it held one. Fixed by `reclaimAbandonedLock`, which
+re-identifies the file (inode, device, size, authenticated bytes, transaction,
+liveness) immediately before removal. The remaining sub-`unlink` window is stated
+in §5 rather than papered over.
+
+*Note on the regression:* driving this through the CLI does **not** reach the
+race — the barrier rejects a foreign `transactionId` first, so a path-based
+reclaim still passed every CLI-level test. `reclaimAbandonedLock` is therefore
+exported and tested directly. Without that, the fix would have looked verified
+and been untested.
+
+**Finding 9 — forward-clock live-lock misclassification.** The uptime signal was
+documented as fail-closed-only. It was not: a forward clock jump makes a live
+lock read as abandoned. Signal removed entirely; see §5.
+
+**Finding 10 — unhandled `os.uptime()` failure.** `uv_uptime` returns `EPERM`
+under some sandbox and container profiles, and the call sat in a default
+parameter, so it threw inside the classifier (21 failures in the reviewer's run).
+Removed with Finding 9. The classifier now makes no host call that can refuse
+other than `kill(pid, 0)`, whose every unexpected errno is already `ambiguous`.
+
+Mutation-checked: reintroducing the path-based reclaim kills 2 tests;
+reintroducing the uptime signal kills 3.
 
 ### Finding 7 — Windows restore apply is ~80 s per operation — **OPEN (performance)**
 
