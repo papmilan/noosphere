@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true, Position = 0)]
-  [ValidateSet('write', 'read', 'repair', 'verify', 'sid', 'copy-acl')]
+  [ValidateSet('write', 'read', 'repair', 'verify', 'write-sids', 'sid', 'copy-acl')]
   [string]$Action,
 
   [Parameter(Mandatory = $false, Position = 1)]
@@ -102,6 +102,60 @@ function Verify-ExactOwnerOnlyAcl([string]$Path) {
   }
 }
 
+# SEC-05 Phase 4C Finding 4 — the Windows mirror of the POSIX `mode & 0o022`
+# destination check.
+#
+# A restore destination is a REPOSITORY file, not owner-only state: it inherits
+# the repository's ACL by design, exactly as a POSIX repository file keeps its
+# 0644 mode. Verify-ExactOwnerOnlyAcl is the wrong question for it — it refuses
+# every inherited ACE, so it refuses every real repository file.
+#
+# The right question is the POSIX one: can any principal OTHER than the file's
+# owner modify it? So this action reports facts and leaves the policy to the
+# caller — the owner SID, then one line per distinct SID holding a write-ish
+# right through an Allow ACE. Inherited ACEs are included; inheritance is not
+# the hazard, foreign write is.
+#
+# Deny ACEs are skipped because a Deny can only remove access, never grant it.
+$WriteMask =
+  [int][System.Security.AccessControl.FileSystemRights]::WriteData -bor
+  [int][System.Security.AccessControl.FileSystemRights]::AppendData -bor
+  [int][System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+  [int][System.Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+  [int][System.Security.AccessControl.FileSystemRights]::Delete -bor
+  [int][System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+  [int][System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+  [int][System.Security.AccessControl.FileSystemRights]::TakeOwnership
+
+function Report-WriteSids([string]$Path) {
+  try {
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add('owner:' + (Current-UserSid).Value)
+
+    $security = [System.IO.File]::GetAccessControl(
+      $Path,
+      [System.Security.AccessControl.AccessControlSections]::Access
+    )
+    $rules = @($security.GetAccessRules(
+      $true,
+      $true,
+      [System.Security.Principal.SecurityIdentifier]
+    ))
+
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($rule in $rules) {
+      if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+      if ((([int]$rule.FileSystemRights) -band $WriteMask) -eq 0) { continue }
+      $sid = ([System.Security.Principal.SecurityIdentifier]$rule.IdentityReference).Value
+      if ($seen.Add($sid)) { $lines.Add('write:' + $sid) }
+    }
+    return $lines
+  } catch {
+    if ($_.Exception.Message -like 'NOOSPHERE_ACL_ERROR:*') { throw }
+    Fail 'state-acl-readback-failed' $_.Exception.Message
+  }
+}
+
 if ($Action -eq 'sid') {
   [Console]::Out.Write((Current-UserSid).Value)
   exit 0
@@ -183,6 +237,12 @@ try {
   if ($Action -eq 'verify') {
     $verified = Verify-ExactOwnerOnlyAcl $LiteralPath
     [Console]::Out.Write((@($verified) | Sort-Object) -join "`n")
+    exit 0
+  }
+
+  if ($Action -eq 'write-sids') {
+    $reported = Report-WriteSids $LiteralPath
+    [Console]::Out.Write((@($reported)) -join "`n")
     exit 0
   }
 } catch {

@@ -323,7 +323,13 @@ export async function inspectOwnerOnlyDestination(file, options = {}) {
       `destination is writable by group or other: ${resolved.file}`,
     );
   }
-  if (platform === 'win32') verifyOwnerOnlyWindows(resolved.file, options);
+  // The POSIX branch above asks "can group or other WRITE this?"; this asks the
+  // same question of Windows. It is not verifyOwnerOnlyWindows: this function
+  // observes restore DESTINATIONS, which are repository files with inherited
+  // ACLs, and the owner-only DACL that owner-local state carries is enforced
+  // where that state is written (the helper's write/read/repair actions), not
+  // here. See SEC-05 Phase 4C Finding 4.
+  if (platform === 'win32') verifyNoForeignWriteWindows(resolved.file, options);
   const maxBytes = options.maxBytes ?? 1_048_576;
   const bytes = await readBoundedRegularFile(resolved.file, {
     ...options,
@@ -1213,6 +1219,57 @@ export function currentWindowsSid(options = {}) {
     throw new PathBoundaryError('state-acl-sid-failed', 'Windows token SID resolution returned an invalid SID');
   }
   return sid;
+}
+
+// SEC-05 Phase 4C Finding 4. The Windows counterpart of the POSIX
+// `mode & 0o022` destination check, and deliberately NOT the owner-only check:
+// a restore destination is a repository file that inherits the repository's
+// ACL, so demanding an exact protected `{owner, SYSTEM, Administrators}` DACL
+// refuses every real one. What must be refused is the same thing POSIX refuses
+// — a principal other than the owner being able to modify the file.
+//
+// The helper reports facts (the owner SID, then every SID holding a write-ish
+// right); the policy lives here, where it is testable without a Windows host.
+// SYSTEM and Administrators are permitted for the same reason POSIX ignores
+// root: they can take ownership regardless, so refusing them would be theatre.
+const WINDOWS_PRIVILEGED_SIDS = Object.freeze(['S-1-5-18', 'S-1-5-32-544']);
+const WINDOWS_WRITE_SID_LINE = /^(owner|write):S-1-(?:\d+-)+\d+$/;
+
+export function verifyNoForeignWriteWindows(file, options = {}) {
+  if ((options.platform ?? process.platform) !== 'win32') return [];
+  assertFinalNotReparseSync(file);
+  const output = (options.windowsAction ?? defaultWindowsAction)({
+    action: 'write-sids', file: path.resolve(file), input: null,
+  });
+  const lines = buffer(output).toString('utf8').split(/\r?\n/)
+    .map((value) => value.trim()).filter(Boolean);
+  // Fail closed on anything unexpected: an unparseable answer is not "no
+  // foreign writer", it is an unanswered question.
+  if (lines.length === 0 || lines.some((line) => !WINDOWS_WRITE_SID_LINE.test(line))) {
+    throw new PathBoundaryError(
+      'state-acl-readback-failed',
+      'Windows write-ACE enumeration returned an invalid response',
+    );
+  }
+  const owners = lines.filter((line) => line.startsWith('owner:')).map((line) => line.slice(6));
+  if (owners.length !== 1) {
+    throw new PathBoundaryError(
+      'state-acl-readback-failed',
+      'Windows write-ACE enumeration did not report exactly one owner SID',
+    );
+  }
+  const writers = [...new Set(
+    lines.filter((line) => line.startsWith('write:')).map((line) => line.slice(6)),
+  )].sort();
+  const permitted = new Set([owners[0], ...WINDOWS_PRIVILEGED_SIDS]);
+  const foreign = writers.filter((sid) => !permitted.has(sid));
+  if (foreign.length > 0) {
+    throw new PathBoundaryError(
+      'state-destination-foreign-write',
+      `destination is writable by a principal other than its owner: ${foreign.join(', ')}`,
+    );
+  }
+  return writers;
 }
 
 export function verifyOwnerOnlyWindows(file, options = {}) {

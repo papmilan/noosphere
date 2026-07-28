@@ -7,6 +7,7 @@ import { after, describe, it } from 'node:test';
 import {
   commitOwnerOnlyReplacement,
   discardOwnerOnlyReplacement,
+  inspectOwnerOnlyDestination,
   prepareOwnerOnlyReplacement,
 } from '../index.js';
 
@@ -189,7 +190,7 @@ describe('two-phase owner-only replacement', () => {
     );
   });
 
-  it('fails closed when simulated Windows DACL verification is unsafe', async () => {
+  it('fails closed when the simulated Windows ACL answer is unreadable', async () => {
     const context = await fixture();
     await fs.writeFile(context.destination, 'windows destination');
     await assert.rejects(
@@ -197,12 +198,64 @@ describe('two-phase owner-only replacement', () => {
         root: context.root,
         platform: 'win32',
         windowsAction: ({ action }) => {
-          if (action === 'verify') return Buffer.from('S-1-5-18\n');
+          if (action === 'write-sids') return Buffer.from('S-1-5-18\n');
           throw new Error(`unexpected Windows action: ${action}`);
         },
       }),
       error => error.code === 'state-acl-readback-failed',
     );
+  });
+
+  // SEC-05 Phase 4C Finding 4. The destination is a repository file, so an
+  // inherited repository ACL must be accepted and only foreign WRITE refused.
+  it('accepts an inherited repository DACL on the simulated Windows destination', async () => {
+    const context = await fixture();
+    await fs.writeFile(context.destination, 'windows destination');
+    const OWNER = 'S-1-5-21-1-2-3-1001';
+    const windowsAction = ({ action }) => {
+      // Every ACE inherited, exactly what a real repository file carries.
+      if (action === 'write-sids') {
+        return Buffer.from([
+          `owner:${OWNER}`,
+          `write:${OWNER}`,
+          'write:S-1-5-18',
+          'write:S-1-5-32-544',
+        ].join('\n'));
+      }
+      throw new Error(`unexpected Windows action: ${action}`);
+    };
+    const observed = await inspectOwnerOnlyDestination(context.destination, {
+      root: context.root,
+      platform: 'win32',
+      windowsAction,
+    });
+    assert.equal(observed.state, 'present');
+    assert.equal(observed.byteLength, 'windows destination'.length);
+  });
+
+  it('refuses a simulated Windows destination a foreign principal can write', async () => {
+    const context = await fixture();
+    await fs.writeFile(context.destination, 'windows destination');
+    const OWNER = 'S-1-5-21-1-2-3-1001';
+    await assert.rejects(
+      prepareOwnerOnlyReplacement(context.destination, 'replacement', {
+        root: context.root,
+        platform: 'win32',
+        windowsAction: ({ action }) => {
+          if (action === 'write-sids') {
+            return Buffer.from([
+              `owner:${OWNER}`,
+              `write:${OWNER}`,
+              'write:S-1-5-32-545', // Users — a foreign principal with write
+            ].join('\n'));
+          }
+          throw new Error(`unexpected Windows action: ${action}`);
+        },
+      }),
+      error => error.code === 'state-destination-foreign-write',
+    );
+    // The destination is untouched by the refusal.
+    assert.equal(await fs.readFile(context.destination, 'utf8'), 'windows destination');
   });
 
   it('preserves the destination on rename failure and reports post-rename fsync failure', async () => {
