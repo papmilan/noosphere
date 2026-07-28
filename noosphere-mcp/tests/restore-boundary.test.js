@@ -243,6 +243,69 @@ describe('SEC-05 Phase 4C Task 9 — authority-writer surface audit', () => {
     }
   });
 
+  // ------------------- Finding 1 remediation: recovery is production-reachable
+
+  it('gives recoverRestoreTransactions at least one real non-test caller', async () => {
+    const importers = await importersOf(['continuity/internal/restore/recovery.js']);
+    assert.deepEqual(importers, [CLI_ENTRY_MODULE]);
+    const cli = await readPackageFile(CLI_ENTRY_MODULE);
+    const sites = callSites(cli, 'recoverRestoreTransactions');
+    assert.equal(sites.length, 2, 'expected exactly the apply pre-pass and the recover verb');
+    for (const site of sites) assert.equal(site.enclosing, 'restoreFromCli');
+  });
+
+  // MUTATION TARGET: "remove the production recovery call" and "move recovery
+  // after new transaction creation" both die here. The apply verb must call
+  // recovery strictly before applyRestoreCandidate, in source order, inside the
+  // same handler — an apply that starts a transaction first has already
+  // stacked a second journal on an unresolved one.
+  it('runs recovery before a new apply transaction can begin', async () => {
+    const handler = functionBody(await readPackageFile(CLI_ENTRY_MODULE), 'restoreFromCli');
+    const recoverIndex = handler.lastIndexOf('recoverRestoreTransactions(');
+    const applyIndex = handler.indexOf('applyRestoreCandidate(');
+    assert.notEqual(recoverIndex, -1, 'restoreFromCli no longer calls recovery');
+    assert.notEqual(applyIndex, -1, 'restoreFromCli no longer calls apply');
+    assert.ok(
+      recoverIndex < applyIndex,
+      'recovery must run before applyRestoreCandidate, not after',
+    );
+    // Nothing may sit between them that could create state: the pre-pass is the
+    // immediately preceding statement.
+    const between = handler.slice(
+      handler.indexOf(';', recoverIndex) + 1,
+      handler.lastIndexOf('\n', applyIndex),
+    );
+    assert.equal(
+      /\b(await|=)\b/.test(between.replace(/\/\/.*$/gm, '')),
+      false,
+      `an operation was inserted between recovery and apply: ${between.trim()}`,
+    );
+  });
+
+  it('keeps the recover verb non-destructive and unable to start a transaction', async () => {
+    const handler = functionBody(await readPackageFile(CLI_ENTRY_MODULE), 'restoreFromCli');
+    const branch = handler.slice(
+      handler.indexOf("if (parsed.verb === 'recover')"),
+      handler.indexOf("if (parsed.verb === 'list')"),
+    );
+    assert.ok(branch.includes('recoverRestoreTransactions('), 'the recover verb does not recover');
+    for (const forbidden of [
+      'stageRestoreCandidate',
+      'applyRestoreCandidate',
+      'approveSlot',
+      'revokeSlot',
+      'migrateTrustInventory',
+    ]) {
+      assert.equal(branch.includes(forbidden), false, `restore recover can call ${forbidden}`);
+    }
+    // It takes no argument, so it cannot select or target a transaction.
+    const { parseRestoreArgs } = await import('../continuity/internal/restore/cli.js');
+    assert.deepEqual({ ...parseRestoreArgs(['recover']) }, { verb: 'recover' });
+    for (const args of [['recover', 'baseline'], ['recover', 'x'], ['recover', '--all']]) {
+      assert.throws(() => parseRestoreArgs(args), (error) => error?.code === 'ERR_CLI_USAGE');
+    }
+  });
+
   it('requirement 8 — routes exactly two subcommands into the mutation handlers', async () => {
     const cli = await readPackageFile(CLI_ENTRY_MODULE);
     const dispatch = [...cli.matchAll(/case '([a-z-]+)':\s*\n\s*await (\w+)\(/g)]

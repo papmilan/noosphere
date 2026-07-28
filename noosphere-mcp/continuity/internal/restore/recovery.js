@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 import * as defaultSecureFs from '../../secure-fs.js';
@@ -32,6 +33,52 @@ function ownerIntervention(message) {
 
 function requireEvidence(condition, message) {
   if (!condition) throw ownerIntervention(message);
+}
+
+/**
+ * Classifies an already-authenticated slot lock as `abandoned`, `live`, or
+ * `ambiguous`. Only `abandoned` may be reclaimed.
+ *
+ * The input must already have come back from `store.inspectLock`, which is what
+ * proves ownership: MAC over the slot-lock domain, this project identity and
+ * identity digest, this owner scope, this machine key, this slot. A malformed,
+ * unauthenticated, foreign, or unsafe lock never reaches this function — it
+ * throws inside inspectLock and becomes owner intervention. So the only
+ * question left here is liveness, and the only two answers that are not
+ * "abandoned" both fail closed.
+ *
+ * Two independent signals, and abandonment needs only one of them:
+ *
+ *   - The lock predates this boot. `startedAt` older than the machine's uptime
+ *     means the process that wrote it cannot still be running under that PID,
+ *     whatever `kill(pid, 0)` says now — this is what stops a post-reboot PID
+ *     collision from pinning a dead transaction behind a permanently held lock.
+ *     Used only to declare abandonment, never liveness, so a skewed or
+ *     backwards clock can only cost a fail-closed refusal.
+ *   - `kill(pid, 0)`. ESRCH means gone. Success means running. EPERM means the
+ *     process exists but belongs to another user, which is existence, so it is
+ *     live. Every other errno is unclassifiable and therefore ambiguous.
+ *
+ * Age alone is never a reason. A lock is not reclaimed because it is old.
+ */
+export function classifyLockLiveness(lock, { uptimeSeconds = os.uptime(), now = () => new Date() } = {}) {
+  if (!Number.isInteger(lock?.pid) || lock.pid <= 0) return 'ambiguous';
+  const startedAt = Date.parse(lock?.startedAt ?? '');
+  if (!Number.isFinite(startedAt)) return 'ambiguous';
+
+  const age = now().getTime() - startedAt;
+  if (Number.isFinite(uptimeSeconds) && uptimeSeconds >= 0 && age > uptimeSeconds * 1000) {
+    return 'abandoned';
+  }
+
+  try {
+    process.kill(lock.pid, 0);
+    return 'live';
+  } catch (error) {
+    if (error?.code === 'ESRCH') return 'abandoned';
+    if (error?.code === 'EPERM') return 'live';
+    return 'ambiguous';
+  }
 }
 
 /**
@@ -138,16 +185,30 @@ async function assertCompleteChain(journal, input) {
       confirmation.stateEventHash === journal.confirmationEventHash,
     'restore confirmation was not spent by the recovering transaction',
   );
-  // Fail closed on any present slot lock: Phase 4A/4B never auto-reclaim a lock,
-  // so a lock left by a killed process is owner-intervention territory.
+  // A lock left behind by a SIGKILLed process must not hide the transaction
+  // forever, but it is also the only thing standing between recovery and a
+  // genuinely live competitor. inspectLock proves ownership or throws; only
+  // then may liveness decide, and only `abandoned` may be reclaimed.
   let lock;
   try {
     lock = await store.inspectLock(binding, journal.slot);
   } catch (error) {
     throw ownerIntervention(`restore slot lock is unusable: ${error.code ?? 'invalid'}`);
   }
-  requireEvidence(lock === null, 'restore slot lock is still held');
-  return { store, binding };
+  if (lock === null) return { store, binding, staleLockPath: null };
+
+  requireEvidence(
+    lock.transactionId === journal.transactionId,
+    'restore slot lock belongs to a different transaction',
+  );
+  const liveness = classifyLockLiveness(lock, { now: input.now });
+  requireEvidence(
+    liveness === 'abandoned',
+    liveness === 'live'
+      ? `restore slot lock is held by a live process (pid ${lock.pid})`
+      : 'restore slot lock ownership could not be proven abandoned',
+  );
+  return { store, binding, staleLockPath: store.lockPath(binding, journal.slot) };
 }
 
 async function advance(journal, input, { store, binding }) {
@@ -254,8 +315,23 @@ async function advance(journal, input, { store, binding }) {
 
 async function recoverOne(journal, input) {
   const context = await assertCompleteChain(journal, input);
-  const { store, binding } = context;
-  const lock = await store.acquireLock(binding, journal.slot);
+  const { store, binding, staleLockPath } = context;
+  // Reclaim only the exact lock file the barrier authenticated and proved
+  // abandoned. `force: false` so a lock that vanished between the barrier and
+  // here — meaning something else moved — raises rather than silently
+  // succeeding, and the transaction stays for the owner.
+  if (staleLockPath !== null) await fs.rm(staleLockPath, { force: false });
+  let lock;
+  try {
+    lock = await store.acquireLock(binding, journal.slot);
+  } catch (error) {
+    // Another process took the slot between the barrier and the acquire. That
+    // process is live by definition, so this is the live-competitor outcome,
+    // not a repair opportunity.
+    throw ownerIntervention(
+      `restore slot lock could not be acquired for recovery: ${error.code ?? 'invalid'}`,
+    );
+  }
   try {
     // Re-read under the lock: nothing may advance on an observation taken
     // before mutual exclusion was held.

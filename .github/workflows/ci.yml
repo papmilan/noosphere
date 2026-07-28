@@ -72,6 +72,7 @@ jobs:
           tests/restore-confirmation.test.js
           tests/restore-apply.test.js
           tests/restore-recovery.test.js
+          tests/restore-recovery-cli.test.js
           tests/restore-receipt.test.js
           tests/restore-boundary.test.js
           tests/trust-api-boundary.test.js

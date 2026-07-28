@@ -76,6 +76,7 @@ import {
   stageRestoreCandidate,
 } from './internal/restore/candidate-store.js';
 import { applyRestoreCandidate } from './internal/restore/apply-service.js';
+import { recoverRestoreTransactions } from './internal/restore/recovery.js';
 import { parseRestoreArgs } from './internal/restore/cli.js';
 import { recallRestoreSourceHttp } from './internal/restore/recall.js';
 import {
@@ -2165,6 +2166,23 @@ async function restoreFromCli(root, args) {
     console.log('Project files and authority state were not changed.');
     return;
   }
+  if (parsed.verb === 'recover') {
+    // Completes transactions that already exist. It cannot stage, approve,
+    // revoke, or start a transaction, and it takes no candidate argument, so
+    // there is nothing for it to select. Non-destructive by construction: every
+    // write it performs is one an authenticated journal already committed to.
+    const recovered = await recoverRestoreTransactions({ projectRoot: root });
+    const outstanding = recovered.filter((entry) => entry.status !== 'complete');
+    if (outstanding.length === 0) {
+      console.log('No restore transaction needed recovery.');
+      return;
+    }
+    for (const entry of outstanding) {
+      console.log(`${entry.transactionId}  ${entry.status}`);
+    }
+    console.log('Recovered transactions are complete; no destination was replaced twice.');
+    return;
+  }
   if (parsed.verb === 'list') {
     const candidates = await listRestoreCandidates({ projectRoot: root });
     if (candidates.length === 0) {
@@ -2202,6 +2220,13 @@ async function restoreFromCli(root, args) {
     }));
     return;
   }
+  // SEC-05 Phase 4C: no new apply transaction may begin while an earlier one is
+  // unresolved. Recovery runs FIRST — before the TTY prompt, before the
+  // candidate is looked up, before any journal is created — so a crashed
+  // transaction is converged, not stacked underneath a second one. It fails
+  // closed on a live competitor or an unprovable lock, which refuses the apply
+  // outright rather than racing it.
+  await recoverRestoreTransactions({ projectRoot: root });
   const result = await applyRestoreCandidate({
     projectRoot: root,
     candidateId: parsed.candidateId,

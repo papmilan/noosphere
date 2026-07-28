@@ -50,6 +50,7 @@ export const PHASE4C_SHARD = Object.freeze([
   'tests/restore-confirmation.test.js',
   'tests/restore-apply.test.js',
   'tests/restore-recovery.test.js',
+  'tests/restore-recovery-cli.test.js',
   'tests/restore-receipt.test.js',
   'tests/restore-boundary.test.js',
   'tests/trust-api-boundary.test.js',
@@ -131,9 +132,30 @@ const CONFORMANCE = Object.freeze({
     implementation: ['continuity/internal/restore/recovery.js', 'recoverRestoreTransactions'],
     evidence: [
       ['tests/restore-recovery.test.js', 'recovers idempotently after ${state} without repeating replacement'],
-      ['tests/restore-recovery.test.js', 'fails closed on the held lock, then converges'],
+      ['tests/restore-recovery.test.js', 'reclaims the abandoned lock and converges'],
       ['tests/restore-recovery.test.js', 'requires owner intervention when post-rename destination bytes changed'],
       ['tests/trust-crash.test.js', 'rejects a well-formed foreign-owner lock during recovery (fail-closed, no reclaim)'],
+    ],
+  },
+  // Finding 1 remediation. Behaviour alone was never the gap — reachability was.
+  'crash recovery reachability': {
+    implementation: ['continuity/index.js', 'recoverRestoreTransactions'],
+    evidence: [
+      ['tests/restore-boundary.test.js', 'gives recoverRestoreTransactions at least one real non-test caller'],
+      ['tests/restore-boundary.test.js', 'runs recovery before a new apply transaction can begin'],
+      ['tests/restore-boundary.test.js', 'keeps the recover verb non-destructive and unable to start a transaction'],
+      ['tests/restore-recovery-cli.test.js', 'converges a SIGKILL at ${boundary} before a new apply may begin'],
+      ['tests/restore-recovery-cli.test.js', 'never repeats a destination replacement across repeated CLI recovery'],
+      ['tests/restore-recovery-cli.test.js', 'leaves a destination changed after the committed replacement untouched'],
+    ],
+  },
+  'recovery lock policy': {
+    implementation: ['continuity/internal/restore/recovery.js', 'classifyLockLiveness'],
+    evidence: [
+      ['tests/restore-recovery-cli.test.js', 'classifies liveness by ownership and process state, never by age'],
+      ['tests/restore-recovery-cli.test.js', 'refuses to reclaim a lock held by a live process'],
+      ['tests/restore-recovery-cli.test.js', 'fails closed on a malformed, unauthenticated, or foreign lock'],
+      ['tests/restore-recovery-cli.test.js', 'does not touch a lock belonging to a different transaction'],
     ],
   },
   'package boundary': {
@@ -180,18 +202,20 @@ async function read(relative) {
 }
 
 describe('SEC-05 Phase 4C Task 10 — conformance gate', () => {
-  it('binds all twelve normative properties to evidence', () => {
+  it('binds all fourteen normative properties to evidence', () => {
     assert.deepEqual(Object.keys(CONFORMANCE).sort(), [
       'CLI boundary',
       'append-only generations',
       'authenticated tombstones',
       'consumed replay prevention',
       'crash recovery',
+      'crash recovery reachability',
       'irreversible format-1 retirement',
       'migration',
       'package boundary',
       'platform boundary',
       'receipt semantics',
+      'recovery lock policy',
       'restore apply',
       'restore staging',
     ]);
@@ -286,12 +310,13 @@ describe('SEC-05 Phase 4C Task 10 — conformance gate', () => {
     // interactive handlers.
     assert.deepEqual([...CLI_MUTATION_SUBCOMMANDS].sort(), [
       'cli:restore apply',
+      'cli:restore recover',
       'cli:restore stage',
       'cli:trust approve',
       'cli:trust migrate',
       'cli:trust revoke',
     ]);
-    assert.equal(MUTATION_ENTRY_MODULES.length, 5);
+    assert.equal(MUTATION_ENTRY_MODULES.length, 6);
   });
 
   it('fails if any --yes path appears', async () => {

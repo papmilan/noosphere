@@ -69,7 +69,9 @@ export function parseRestoreArgs(args) {
       Object.hasOwn(RESTORE_SLOTS, value)) {
     return Object.freeze({ verb, slot: value });
   }
-  if (verb === 'list' && args.length === 1) {
+  // `recover` takes no argument on purpose: it completes transactions that
+  // already exist and cannot select, create, or target one.
+  if ((verb === 'list' || verb === 'recover') && args.length === 1) {
     return Object.freeze({ verb });
   }
   if ((verb === 'show' || verb === 'apply') && args.length === 2) {

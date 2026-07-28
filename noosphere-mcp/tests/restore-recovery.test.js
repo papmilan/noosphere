@@ -10,7 +10,7 @@ import { after, describe, it } from 'node:test';
 import { applyRestoreCandidate } from '../continuity/internal/restore/apply-service.js';
 import { readCandidateState, stageRestoreCandidate } from '../continuity/internal/restore/candidate-store.js';
 import { readApplyJournal } from '../continuity/internal/restore/apply-journal.js';
-import { recoverRestoreTransactions } from '../continuity/internal/restore/recovery.js';
+import { classifyLockLiveness, recoverRestoreTransactions } from '../continuity/internal/restore/recovery.js';
 import { classifyRestoreReceipt } from '../continuity/internal/restore/receipt-store.js';
 import { createFormatV2Store } from '../continuity/internal/trust-format-v2.js';
 
@@ -137,7 +137,7 @@ describe('SEC-05 Phase 4C — authenticated restore recovery', () => {
     'receipt-committed',
     'consumed-marker-committed',
   ]) {
-    it(`SIGKILL at ${boundary}: fails closed on the held lock, then converges`, async () => {
+    it(`SIGKILL at ${boundary}: reclaims the abandoned lock and converges`, async () => {
       const context = await fixture();
       const replaced = !['prepared', 'temporary-written'].includes(boundary);
       const result = spawnSync(process.execPath, [CHILD], {
@@ -158,20 +158,16 @@ describe('SEC-05 Phase 4C — authenticated restore recovery', () => {
         `child must be forcibly terminated (signal=${result.signal}, status=${result.status})`);
       if (process.platform !== 'win32') assert.equal(result.signal, 'SIGKILL');
 
-      // A real crash leaves the slot lock held. Recovery never reclaims it.
+      // A real crash leaves the slot lock held. Phase 4C recovery reclaims it,
+      // but only because inspectLock authenticates it as this project's own
+      // lock for this transaction AND the writing PID is provably gone. The
+      // lock is not removed by hand and not removed by age.
       const store = createFormatV2Store({ env: context.env });
       const binding = await store.readProjectBinding(context.projectRoot);
-      assert.notEqual(await store.inspectLock(binding, 'baseline'), null);
-      await assert.rejects(
-        recoverRestoreTransactions({
-          projectRoot: context.projectRoot,
-          env: context.env,
-        }),
-        error => error.code === 'ERR_RESTORE_OWNER_INTERVENTION_REQUIRED',
-      );
+      const heldLock = await store.inspectLock(binding, 'baseline');
+      assert.notEqual(heldLock, null);
+      assert.equal(classifyLockLiveness(heldLock), 'abandoned');
 
-      // Owner intervention: remove the stale lock, then recover idempotently.
-      await fs.rm(store.lockPath(binding, 'baseline'), { force: true });
       await recoverRestoreTransactions({
         projectRoot: context.projectRoot,
         env: context.env,

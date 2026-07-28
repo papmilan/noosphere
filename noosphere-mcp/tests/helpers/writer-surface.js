@@ -100,7 +100,9 @@ export const READ_ONLY_EXPORTS = Object.freeze({
     'readConsumedMarker',
     'readRestoreReceipt',
   ]),
-  'continuity/internal/restore/recovery.js': Object.freeze([]),
+  // classifyLockLiveness is a pure classifier over an already-authenticated
+  // lock: it reads no file, mutates nothing, and returns one of three verdicts.
+  'continuity/internal/restore/recovery.js': Object.freeze(['classifyLockLiveness']),
   'continuity/internal/restore/apply-journal.js': Object.freeze([
     'APPLY_JOURNAL_STATES',
     'APPLY_TRANSITIONS',
@@ -171,6 +173,9 @@ export const MUTATION_ENTRY_MODULES = Object.freeze([
   'continuity/internal/migration-service.js',
   'continuity/internal/restore/apply-service.js',
   'continuity/internal/restore/candidate-store.js',
+  // Phase 4C remediation: recovery is a production entry point now — the apply
+  // verb runs it before every transaction, and `restore recover` runs it alone.
+  'continuity/internal/restore/recovery.js',
   'continuity/internal/revocation-service.js',
 ]);
 
@@ -209,6 +214,7 @@ export const CLI_ENTRY_MODULE = 'continuity/index.js';
 export const CLI_MUTATION_FUNCTIONS = Object.freeze(['restoreFromCli', 'trustFromCli']);
 export const CLI_MUTATION_SUBCOMMANDS = Object.freeze([
   'cli:restore apply',
+  'cli:restore recover',
   'cli:restore stage',
   'cli:trust approve',
   'cli:trust migrate',
