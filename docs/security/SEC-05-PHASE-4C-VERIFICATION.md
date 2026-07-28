@@ -19,7 +19,7 @@ case.
 | Commit range | `d2992c3..f8c8689` — 18 Phase 4C commits on top of `origin/main` |
 | Merge base | `d2992c3f1ac3fd10bbd0abb9e1192bdc7193a016` |
 | Pull request | [#34](https://github.com/papmilan/noosphere/pull/34) — **draft, do not merge** |
-| CI run | [30373372871](https://github.com/papmilan/noosphere/actions/runs/30373372871) |
+| CI run | [30377401209](https://github.com/papmilan/noosphere/actions/runs/30377401209) — head `1dd5466` |
 | Node | v24.12.0 local, 22.23.1 on CI |
 | npm | 11.6.2 |
 | Local verification host | macOS 26.5.2, arm64 |
@@ -45,8 +45,8 @@ asserts every cell mechanically: if an implementation symbol or an evidence case
 name disappears, the gate fails.
 
 Platform columns record whether that platform's runner executed the shard
-containing the evidence. `L`/`M` are the Linux and macOS jobs of CI run
-30373372871; `W` is the Windows job of the same run.
+containing the evidence. `L`/`M`/`W` are the Linux, macOS and Windows jobs of CI
+run 30377401209 at head `1dd5466`.
 
 | Spec section | Invariant | Implementation | Test evidence | L | M | W |
 |---|---|---|---|---|---|---|
@@ -374,9 +374,9 @@ Exit 3 was produced through a real PTY, not a simulated TTY.
 
 | Job | `npm run check` | `npm run test:security` | Phase 4C shard | Verdict |
 |---|---|---|---|---|
-| noosphere-mcp / ubuntu-latest | 720 tests, 717 pass, 0 fail, 3 skip | 133 tests, 129 pass, 0 fail, 4 skip | 182 tests, 182 pass, 0 fail, 0 skip | **pass** |
-| noosphere-mcp / macos-latest | 720 tests, 716 pass, 0 fail, 4 skip | 133 tests, 129 pass, 0 fail, 4 skip | 182 tests, 181 pass, 0 fail, 1 skip | **pass** |
-| noosphere-mcp / windows-latest | **fail** — see Finding 4 | — | — | **fail** |
+| noosphere-mcp / ubuntu-latest | 721 tests, 718 pass, 0 fail, 3 skip | 133 tests, 129 pass, 0 fail, 4 skip | 183 tests, 183 pass, 0 fail, 0 skip | **pass** |
+| noosphere-mcp / macos-latest | 721 tests, 717 pass, 0 fail, 4 skip | 133 tests, 129 pass, 0 fail, 4 skip | 183 tests, 182 pass, 0 fail, 1 skip | **pass** |
+| noosphere-mcp / windows-latest | **721 tests, 675 pass, 34 fail, 12 skip** | **not reached** | **not reached** | **fail — Finding 4** |
 | noosphere-relayer / ubuntu, macos, windows | — | — | — | pass |
 
 Every skip on Linux and macOS is named and platform-inapplicable:
@@ -393,18 +393,51 @@ sandbox-degraded.
 
 ### Windows: executed, and failing
 
-The Windows job ran and **failed**. **No Windows cell in §2 may be read as
-passing.** The failures reduce to exactly three causes, all identified:
+The Windows job ran to completion at head `1dd5466` and **failed**: 721 tests,
+675 pass, **34 fail**, 12 skip. **No Windows cell in §2 may be read as passing.**
 
-1. `state-acl-broad` on the restore destination — **product defect**, Finding 4.
-   6 of 8 `restore-apply` cases and all 11 `restore-recovery` cases.
-2. `spawn script ENOENT` in the genuine-PTY migration test — no PTY allocator on
-   Windows, Finding 5, now an explicit named skip.
-3. `ERR_UNSUPPORTED_ESM_URL_SCHEME` in the boundary suite — test defect,
-   Finding 6, fixed.
+Findings 5 and 6 are confirmed closed by this run: `spawn script ENOENT` and
+`ERR_UNSUPPORTED_ESM_URL_SCHEME` no longer appear at all, and the genuine-PTY
+test reports the named skip `not applicable: no PTY allocator on Windows
+runners`.
 
-Because the job aborts at those failures, these Windows-native cases still have
-**not** executed on this branch:
+**Every one of the 34 failures is Finding 4 or a consequence of it.** They fall
+in exactly three files — `restore-apply`, `restore-recovery`, and
+`restore-recovery-cli` — with four error strings:
+
+| Error | Count | Relationship to Finding 4 |
+|---|---|---|
+| `restore destination validation failed: state-acl-broad` | 3 | Finding 4 directly |
+| `restore apply journal is missing` | 6 | the crash child cannot complete an apply, so no journal is ever written |
+| `a real crash must leave the slot lock held` | 5 | same — no apply means no lock |
+| `Expected "actual" to be strictly unequal to: null` | 5 | the same absent lock, asserted from the other direction |
+
+What **does** pass on Windows, and is therefore genuinely verified there:
+
+- the whole writer-surface boundary suite, including the export map, every
+  deep-import refusal, and the packed-tarball check;
+- the conformance gate, all fifteen properties;
+- the operator-documentation suite;
+- the trust cutover, revocation, migration, crash, project-binding, restore CLI
+  grammar, restore staging, and confirmation suites;
+- the three `WINDOWS ACL:` exact-SID DACL cases — these **executed and passed**,
+  they did not skip.
+
+Because the job aborts inside `npm run check` with exit 1, the later
+`npm run test:security` step and the Phase 4C shard **never ran**. Of the six
+Windows-native cases release requires:
+
+| Case | Status |
+|---|---|
+| exact SID DACL handling | **executed, pass** (3 cases in `tests/windows-acl.test.js`) |
+| protected-DACL preservation | **not reached** — lives in `noosphere-secure-fs`, only run by `test:security` |
+| rename over an open destination | **not reached** |
+| sharing violation | **not reached** |
+| durable replacement | **not reached** |
+| reparse-point refusal | **not reached** |
+
+The five unreached cases are unreached because an earlier step fails, not because
+they skipped:
 
 - exact SID DACL handling on ACP, execution, sync, and CSP writes
 - protected-DACL preservation across a replacement
@@ -414,11 +447,12 @@ Because the job aborts at those failures, these Windows-native cases still have
 - reparse-point refusal
 
 Windows verification is **not** complete if those tests skip rather than run, and
-it is not complete now: they have neither run nor been reported. The
+it is not complete now: five of the six have neither run nor been reported. The
 `test:security` shard is the gate that forces them to execute on
 `windows-latest`; a Windows job that reports them as `# SKIP` is a failed
-verification, not a pass — and a Windows job that fails before reaching them, as
-this one does, is not evidence of anything.
+verification, not a pass — and a Windows job that aborts before reaching them, as
+this one does, is not evidence of anything. Fixing Finding 4 is what unblocks
+their execution.
 
 ## 13. Findings
 
@@ -487,7 +521,8 @@ state-acl-broad`, and `restore recover` fails the same way for the same reason.
 Observed in CI job
 [90309910778](https://github.com/papmilan/noosphere/actions/runs/30369668285/job/90309910778):
 6 of 8 `restore-apply` cases and all 11 `restore-recovery` cases fail with that
-exact error.
+exact error. At head `1dd5466` the same defect accounts for all 34 Windows
+failures, directly or as a consequence (see §12).
 
 This fails **closed** — no destination is written, no authority is granted — so
 it is an availability defect on Windows, not an authority defect. It is still a
@@ -505,7 +540,7 @@ and the MCP package depend on, and writing it blind and then reporting it as
 verified is precisely what this record exists to prevent. It needs an
 implementer with a Windows runner in the loop.
 
-### Finding 5 — Windows PTY ceremony unverifiable — **OPEN**
+### Finding 5 — Windows PTY ceremony unverifiable — **OPEN (accepted residual)**
 
 `requires distinct confirmations through a genuine PTY for two eligible slots`
 previously failed on Windows with `spawn script ENOENT`. Windows runners have
@@ -513,18 +548,19 @@ neither `script(1)` nor `expect`, and Node cannot allocate a pseudo-terminal
 without a native addon.
 
 The test now skips on Windows with the named reason
-`not applicable: no PTY allocator on Windows runners`, so the job reports the
-gap instead of a spurious red. **The migration ceremony's behaviour under a real
+`not applicable: no PTY allocator on Windows runners`, confirmed in CI run
+30377401209, so the job reports the gap instead of a spurious red. **The migration ceremony's behaviour under a real
 Windows terminal is unverified.** The TTY *refusal* is verified on every
 platform by `checks both TTY streams before inventory or mutation`; what is not
 verified is the interactive accept path on Windows.
 
-### Finding 6 — boundary suite used an absolute path as an ESM specifier — **CLOSED**
+### Finding 6 — boundary suite used an absolute path as an ESM specifier — **CLOSED, confirmed on Windows**
 
 `classifies every export of every writer module` imported each writer module by
 absolute path. On Windows Node reads `D:\...` as a URL with scheme `d:` and
-throws `ERR_UNSUPPORTED_ESM_URL_SCHEME`. Now uses `pathToFileURL`. A test-only
-defect, introduced in this workstream and caught by the first Windows run.
+throws `ERR_UNSUPPORTED_ESM_URL_SCHEME`. Now uses `pathToFileURL`. A test-only defect,
+introduced in this workstream and caught by the first Windows run; the whole
+boundary suite now passes on `windows-latest`.
 
 ## 14. Release gate
 
