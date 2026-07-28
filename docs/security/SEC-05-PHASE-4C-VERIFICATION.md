@@ -15,8 +15,8 @@ case.
 | Field | Value |
 |---|---|
 | Branch | `codex/sec-05-phase-4c1` |
-| Head | `0941df1` — `fix(restore): keep the liveness verdict off the injectable clock` |
-| Commit range | `d2992c3..0941df1` — 18 Phase 4C commits on top of `origin/main` |
+| Head | `f8c8689` — `fix(restore): keep the liveness verdict off the injectable clock` |
+| Commit range | `d2992c3..f8c8689` — 18 Phase 4C commits on top of `origin/main` |
 | Merge base | `d2992c3f1ac3fd10bbd0abb9e1192bdc7193a016` |
 | Pull request | [#34](https://github.com/papmilan/noosphere/pull/34) — **draft, do not merge** |
 | CI run | [30373372871](https://github.com/papmilan/noosphere/actions/runs/30373372871) |
@@ -35,7 +35,7 @@ case.
 | `f35f0f8` | docs(security): document the owner authority commands |
 | `80dcf16` | test(security): drive migration through the PTY prompt, not ahead of it |
 | `fbd940b` | docs(security): record the phase 4c remediation evidence |
-| `0941df1` | fix(restore): keep the liveness verdict off the injectable clock |
+| `f8c8689` | fix(restore): keep the liveness verdict off the injectable clock |
 
 ## 2. Conformance matrix
 
@@ -548,7 +548,7 @@ The reviewer should be given:
 
 1. The Phase 4C specification and the implementation plan
    (`docs/superpowers/plans/2026-07-27-sec-05-phase-4c.md`).
-2. The complete commit range `d2992c3..0941df1` (18 commits), and PR
+2. The complete commit range `d2992c3..f8c8689` (18 commits), and PR
    [#34](https://github.com/papmilan/noosphere/pull/34).
 3. This conformance matrix, the production recovery call graph (§4), the lock
    policy (§5), and the boundary and export inventories (§8–§9).
