@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -70,8 +70,8 @@ set result [wait]
 exit [lindex $result 3]
 `;
 
-async function runMigrationInGenuinePty(context) {
-  const phrases = [
+function migrationPhrases() {
+  return [
     confirmationPhrase(
       'master-prompt',
       crypto.createHash('sha256').update(MASTER).digest('hex'),
@@ -81,6 +81,26 @@ async function runMigrationInGenuinePty(context) {
       crypto.createHash('sha256').update(INSTRUCTIONS).digest('hex'),
     ),
   ];
+}
+
+// Emitted once per slot, immediately before that slot's prompt. Counting these
+// is how the driver knows a prompt is on screen.
+const PROMPT_MARKER = 'to approve, anything else to abort.';
+
+/**
+ * Drives `noosphere trust migrate` through a real PTY, sending each slot's
+ * phrase only AFTER that slot's prompt has been displayed — which is the only
+ * way a human can answer, and the only way the ceremony accepts an answer.
+ *
+ * Writing both phrases up front does NOT work, and must not: each prompt reads
+ * from a fresh reader, so input typed before a prompt was shown is discarded
+ * with it. See the type-ahead test below, which pins that as a property.
+ *
+ * Linux drives `script` from Node so no `expect` binary is required on the
+ * runner; macOS keeps the expect driver because its `script` takes a different
+ * command form.
+ */
+async function runMigrationInGenuinePty(context, { phrases = migrationPhrases() } = {}) {
   const command = [
     process.execPath,
     CLI,
@@ -89,28 +109,69 @@ async function runMigrationInGenuinePty(context) {
     '--path',
     context.project,
   ];
-  const executable = process.platform === 'darwin' ? '/usr/bin/expect' : 'script';
-  const scriptArgs = process.platform === 'darwin'
-    ? ['-c', MACOS_MIGRATION_PTY_DRIVER]
-    : ['-q', '-e', '-c', command.map(shellQuote).join(' '), '/dev/null'];
-  const child = execFileAsync(executable, scriptArgs, {
-    cwd: context.project,
-    env: {
-      ...process.env,
-      ...context.env,
-      ...(process.platform === 'darwin' ? {
+  if (process.platform === 'darwin') {
+    const child = execFileAsync('/usr/bin/expect', ['-c', MACOS_MIGRATION_PTY_DRIVER], {
+      cwd: context.project,
+      env: {
+        ...process.env,
+        ...context.env,
         TEST_PTY_NODE: process.execPath,
         TEST_PTY_CLI: CLI,
         TEST_PTY_PROJECT: context.project,
         TEST_PTY_CONFIRMATION_1: phrases[0],
         TEST_PTY_CONFIRMATION_2: phrases[1],
-      } : {}),
-    },
+      },
+    });
+    child.child.stdin.end('');
+    return child;
+  }
+  return driveLinuxPty(context, command, (transcript, sent) =>
+    countOccurrences(transcript, PROMPT_MARKER) > sent ? phrases[sent] : null);
+}
+
+function countOccurrences(haystack, needle) {
+  let count = 0;
+  let index = haystack.indexOf(needle);
+  while (index !== -1) {
+    count += 1;
+    index = haystack.indexOf(needle, index + needle.length);
+  }
+  return count;
+}
+
+/**
+ * Runs `command` under `script(1)` and feeds stdin from `next(transcript, sent)`,
+ * which returns the string to send or null to keep waiting. Resolves
+ * `{ stdout, code }`; rejects like execFile on a non-zero exit.
+ */
+function driveLinuxPty(context, command, next, expected = 2) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('script', ['-q', '-e', '-c', command.map(shellQuote).join(' '), '/dev/null'], {
+      cwd: context.project,
+      env: { ...process.env, ...context.env },
+    });
+    let transcript = '';
+    let sent = 0;
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      transcript += chunk;
+      for (;;) {
+        const line = next(transcript, sent);
+        if (line === null) break;
+        child.stdin.write(`${line}\n`);
+        sent += 1;
+        // script(1) blocks reading its own stdin after the child exits, so the
+        // pipe must be closed once there is nothing left to type.
+        if (sent === expected) child.stdin.end();
+      }
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      child.stdin.destroy();
+      if (code === 0) resolve({ stdout: transcript, code });
+      else reject(Object.assign(new Error(`migrate exited ${code}`), { code, stdout: transcript }));
+    });
   });
-  child.child.stdin.end(process.platform === 'darwin'
-    ? ''
-    : `${phrases.join('\n')}\n`);
-  return child;
 }
 
 describe('SEC-05 Phase 4C — fresh per-slot migration approval', () => {
@@ -130,6 +191,45 @@ describe('SEC-05 Phase 4C — fresh per-slot migration approval', () => {
       rawBytes: INSTRUCTIONS,
       env: context.env,
     }), true);
+  });
+
+  // Found by a Linux-only CI failure of the test above: the previous driver
+  // wrote both phrases before the ceremony started, and only the first slot was
+  // approved. That is correct behaviour, not a bug — a phrase typed before its
+  // prompt was displayed answers a question the owner has not yet been asked,
+  // and each prompt reads from a fresh reader, so pre-typed input is discarded
+  // with the previous one. Pinned here so a future refactor to a single shared
+  // stdin reader (which would make type-ahead work) fails loudly.
+  it('discards input typed before its prompt was displayed', async function () {
+    if (process.platform !== 'linux') return this.skip('needs script(1) with -c');
+    const context = await fixture();
+    const phrases = migrationPhrases();
+    const command = [process.execPath, CLI, 'trust', 'migrate', '--path', context.project];
+
+    // Send BOTH phrases immediately, before either prompt exists.
+    const failure = await driveLinuxPty(context, command, (_transcript, sent) =>
+      (sent < phrases.length ? phrases[sent] : null)).then(
+      () => null,
+      (error) => error,
+    );
+
+    assert.notEqual(failure, null, 'type-ahead approved a prompt the owner never saw');
+    assert.equal(failure.code, 3, 'expected the owner-refusal exit code');
+    assert.match(failure.stdout, /approval was not confirmed/);
+    // The first slot — whose prompt WAS displayed before its phrase was read —
+    // committed. The second did not.
+    assert.equal(await isSlotAuthoritative({
+      projectRoot: context.project,
+      slot: 'master-prompt',
+      rawBytes: MASTER,
+      env: context.env,
+    }), true);
+    assert.equal(await isSlotAuthoritative({
+      projectRoot: context.project,
+      slot: 'instructions',
+      rawBytes: INSTRUCTIONS,
+      env: context.env,
+    }), false);
   });
 
   it('requires a distinct normal approval for every eligible slot', async () => {
