@@ -120,9 +120,23 @@ describe('SEC-05 Phase 4C — operator documentation', () => {
         `${REFERENCE} has no exit-code row for ${code}`,
       );
     }
+    // HOSTILE REVIEW, finding D: the reference used to claim exit 4 changed
+    // nothing, while `restore apply` deliberately runs mutating recovery before
+    // its terminal check. The claim must match the code.
+    assert.equal(
+      /Exit 3 and exit 4 both mean nothing was changed/.test(reference),
+      false,
+      'the reference still claims exit 4 never changes anything',
+    );
     assert.ok(
-      /nothing was changed/i.test(reference),
-      'the reference does not say that a refusal changed nothing',
+      /runs crash recovery \*\*before\*\* it checks for a terminal/.test(reference),
+      'the reference does not disclose that a refused apply may already have recovered',
+    );
+    const cli = await fs.readFile(path.join(packageRoot, 'continuity/index.js'), 'utf8');
+    const handler = functionBody(cli, 'restoreFromCli');
+    assert.ok(
+      handler.lastIndexOf('recoverRestoreTransactions(') < handler.indexOf('applyRestoreCandidate('),
+      'the documented ordering no longer matches the code',
     );
   });
 

@@ -425,6 +425,67 @@ export async function stageRestoreCandidate({
   );
 }
 
+/**
+ * Every candidate currently marked `apply-in-progress`, whatever its expiry.
+ *
+ * listRestoreCandidates deliberately returns only ACTIVE, unexpired candidates —
+ * it answers "what can the owner apply?". Recovery needs the opposite question:
+ * a crash between markApplyInProgress and createApplyJournal leaves a candidate
+ * mid-apply with a spent confirmation and NO journal, which is invisible to
+ * every other listing and can never be applied or restaged again. Read-only.
+ */
+export async function listApplyInProgressCandidates({
+  projectRoot,
+  env = process.env,
+  secureFileOptions = {},
+} = {}) {
+  const store = createFormatV2Store({ env, secureFileOptions });
+  let binding;
+  try {
+    binding = await store.readProjectBinding(projectRoot);
+  } catch (error) {
+    if (error.code === 'binding-invalid') return Object.freeze([]);
+    throw error;
+  }
+  const root = store.pathFor(binding, path.join('restore', 'candidates'));
+  const safeRoot = await assertContainedChain(store.pathFor(binding, ''), root)
+    .catch(error => {
+      throw restoreError(
+        'restore-candidate-unsafe',
+        `restore candidate root is unsafe: ${error.code ?? 'invalid'}`,
+      );
+    });
+  if (safeRoot === null) return Object.freeze([]);
+  const entries = await fs.readdir(root, { withFileTypes: true })
+    .catch(error => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    });
+  const stranded = [];
+  for (const entry of entries) {
+    if (!/^[a-z2-7]{52}$/.test(entry.name)) continue;
+    decodeCanonicalCandidateId(entry.name);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw restoreError(
+        'restore-candidate-unsafe',
+        'candidate-shaped staging entry is unsafe',
+      );
+    }
+    const candidate = await readCandidate({
+      projectRoot, env, secureFileOptions, candidateId: entry.name,
+    });
+    if (candidate.candidateState.state !== 'apply-in-progress') continue;
+    stranded.push(Object.freeze({
+      candidateId: entry.name,
+      slot: candidate.slot,
+      payloadHash: candidate.payloadHash,
+      candidateState: candidate.candidateState,
+    }));
+  }
+  stranded.sort((left, right) => left.candidateId.localeCompare(right.candidateId));
+  return Object.freeze(stranded);
+}
+
 export async function listRestoreCandidates({
   projectRoot,
   env = process.env,

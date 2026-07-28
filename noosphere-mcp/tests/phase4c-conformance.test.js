@@ -174,6 +174,11 @@ const CONFORMANCE = Object.freeze({
       ['tests/restore-recovery-cli.test.js', 'converges a SIGKILL at ${boundary} before a new apply may begin'],
       ['tests/restore-recovery-cli.test.js', 'never repeats a destination replacement across repeated CLI recovery'],
       ['tests/restore-recovery-cli.test.js', 'leaves a destination changed after the committed replacement untouched'],
+      ['tests/restore-recovery-cli.test.js', 'converges a rename that committed before its journal event'],
+      ['tests/restore-recovery-cli.test.js', 'requires owner intervention when the destination is neither pre-state nor replacement'],
+      ['tests/restore-recovery-cli.test.js', 'releases a candidate stranded mid-apply with no journal'],
+      ['tests/restore-recovery-cli.test.js', 'cannot strand a candidate that does not own its spent confirmation'],
+      ['tests/restore-recovery-cli.test.js', 'requires owner intervention when the manifest moved after confirmation'],
     ],
   },
   // Finding 2 remediation. Documentation about a boundary is a claim an

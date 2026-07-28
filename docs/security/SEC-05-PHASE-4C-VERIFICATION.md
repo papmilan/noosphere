@@ -1,11 +1,11 @@
 # SEC-05 Phase 4C — Conformance Verification Record
 
-Status: **not released.** Findings 1, 2, 3, 4, 6, 8, 9 and 10 are closed. An
-independent hostile review at head `3f23c7b` returned REQUEST CHANGES; its three
-named POSIX-independent findings are fixed here. Release is blocked on: the
-reviewer's four further unnamed findings, a re-review at the new head, a green
-Windows job (Finding 7 — latency, deferred by the owner), and an approving review
-from someone other than the implementer.
+Status: **not released.** Findings 1, 2, 3, 4, 6, and 8 through 14 are closed. An
+independent hostile review at head `3f23c7b` returned REQUEST CHANGES with seven
+POSIX-independent findings across two passes; all seven are fixed here, each with
+a dedicated mutation-checked regression. Release is blocked on: a re-review at
+the new head, a green Windows job (Finding 7 — latency, deferred by the owner),
+and an approving review from someone other than the implementer.
 
 This document is the traceable requirement-to-test matrix for SEC-05 Phase 4C,
 plus the exact evidence produced while verifying it. Nothing here is inferred: a
@@ -593,6 +593,58 @@ other than `kill(pid, 0)`, whose every unexpected errno is already `ambiguous`.
 
 Mutation-checked: reintroducing the path-based reclaim kills 2 tests;
 reintroducing the uptime signal kills 3.
+
+### Findings 11–14 — continued hostile review, recovery semantics — **CLOSED**
+
+The reviewer's continued POSIX-only pass reproduced four further defects with
+standalone owner-local probes. All four were confirmed and fixed.
+
+**Finding 11 — a committed rename with no journal event was recorded as failed.**
+The atomic destination rename and the `destination-replaced` journal event are
+two steps. A crash between them left the journal at `temporary-written` while the
+destination already held the replacement. Recovery labelled the transaction
+`discarded`, committed outcome `failed`, and consumed the candidate as failed —
+telling the owner nothing happened while the new bytes sat on disk, and leaving
+the audit record contradicting the filesystem.
+
+Recovery now observes the destination at `prepared`/`temporary-written` and
+requires it to be exactly one of the two states the journal authenticated: the
+recorded pre-state, or the replacement it committed to. If it holds the
+replacement and the deterministic temporary is gone, the rename committed and
+recovery converges forward through `destination-replaced`. Anything else is owner
+intervention. This is not destination bytes selecting a permissive branch — both
+branches are authenticated, and a third value refuses.
+
+**Finding 12 — candidates stranded with no journal.** `applyRestoreCandidate`
+spends the confirmation, marks the candidate `apply-in-progress`, and only then
+creates the journal. A crash in that window left a candidate that no listing
+enumerated: `listRestoreCandidates` returns only ACTIVE candidates and recovery
+walked only journals, so the candidate could never be applied and never restaged.
+`listApplyInProgressCandidates` (read-only) now enumerates them and
+`releaseStrandedCandidate` consumes them as failed — after authenticating that
+the confirmation is spent *by that transaction* and bound to that candidate and
+payload. No journal means no destination was ever touched, so nothing else is
+undone.
+
+**Finding 13 — the recovery barrier ignored a moved manifest.** A transaction
+confirmed against `pristine-unapproved` completed after the slot had been
+approved: the owner authorised a replacement in one authority state and it landed
+in another. `assertCompleteChain` now recomputes the manifest binding and refuses
+unless it is canonically identical to the one the journal recorded.
+
+**Finding 14 — the operator reference contradicted the product.** It claimed exit
+3 and exit 4 both mean nothing was changed, while `restore apply` deliberately
+runs mutating recovery *before* its terminal check — so a piped-stdin apply can
+converge a crashed transaction and then exit 4. The reference now states that
+explicitly, and `documents exit codes 0 through 4 exactly as the code maps them`
+asserts both the disclosure and the code ordering it describes.
+
+Mutation-checked: reverting Finding 11 kills 2 tests, Finding 12 kills 1, Finding
+13 kills 1. Finding 12's negative case turned out to be unconstructible through
+the production primitives — `markApplyInProgress` already refuses a transaction
+that did not spend the confirmation — so that invariant is asserted instead, and
+`releaseStrandedCandidate`'s own check is documented as defence in depth against
+hand-edited owner-local state.
 
 ### Finding 7 — Windows restore apply is ~80 s per operation — **OPEN (performance)**
 

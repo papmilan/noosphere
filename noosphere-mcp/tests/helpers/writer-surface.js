@@ -86,6 +86,7 @@ export const READ_ONLY_EXPORTS = Object.freeze({
   'continuity/internal/revocation-service.js': Object.freeze(['revocationPhrase']),
   'continuity/internal/migration-service.js': Object.freeze([]),
   'continuity/internal/restore/candidate-store.js': Object.freeze([
+    'listApplyInProgressCandidates',
     'listRestoreCandidates',
     'readCandidateState',
     'showRestoreCandidate',

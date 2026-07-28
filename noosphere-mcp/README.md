@@ -283,10 +283,21 @@ than followed.
 | 1 | unexpected defect |
 | 2 | usage error — unknown verb, wrong arity, unsupported slot, non-canonical candidate ID |
 | 3 | you declined — the confirmation phrase did not match, or input was too long |
-| 4 | security refusal — no terminal, unsafe path, failed authentication, stale state, owner intervention required |
+| 4 | security refusal — no terminal, unsafe path, failed authentication, stale state, owner intervention required. For `restore apply`, see the note below: recovery may already have run. |
 
-Exit 3 and exit 4 both mean nothing was changed. Only exit 0 means the operation
-committed.
+Exit 3 and exit 4 mean **the operation you asked for** did not commit. They do
+not mean the command wrote nothing, and one case matters:
+
+> `restore apply` runs crash recovery **before** it checks for a terminal. If an
+> earlier crashed transaction was outstanding, recovery converges it — writing a
+> receipt, a consumed marker, and possibly completing a destination replacement
+> that had already committed — and only then does the apply refuse with exit 4.
+> The exit code describes the apply, not the recovery that preceded it.
+
+That ordering is deliberate: no new transaction may begin while an earlier one is
+unresolved, and the ordering must not depend on whether the caller happens to
+have a terminal. Run `noosphere restore recover` first if you want the recovery
+and the apply to be separate, auditable steps.
 
 ### Terminal requirement
 
@@ -342,8 +353,10 @@ says the bytes remain untrusted and points you at `noosphere trust approve`.
 If a process dies mid-apply, the transaction is resolved before anything else
 can touch that slot:
 
-- Every `restore apply` runs recovery first, before the confirmation prompt and
-  before any new transaction exists.
+- Every `restore apply` runs recovery first, before the confirmation prompt,
+  before the terminal check, and before any new transaction exists. An apply
+  that is then refused — including with exit 4 for a missing terminal — has
+  still converged whatever recovery found.
 - `noosphere restore recover` runs the same pass on demand.
 
 Recovery is driven entirely by the authenticated apply journal, never by what

@@ -4,7 +4,7 @@ import path from 'node:path';
 import * as defaultSecureFs from '../../secure-fs.js';
 import { resolveSlotSource } from '../../slot-sources.js';
 import { isSlotAuthoritative } from '../../trust-store.js';
-import { TrustStoreError } from '../../trust-store-internal.js';
+import { TrustStoreError, canonicalize } from '../../trust-store-internal.js';
 import { createFormatV2Store } from '../trust-format-v2.js';
 import {
   appendApplyJournalState,
@@ -13,6 +13,7 @@ import {
 } from './apply-journal.js';
 import {
   consumeCandidate,
+  listApplyInProgressCandidates,
   showRestoreCandidate,
 } from './candidate-store.js';
 import { readConfirmation } from './confirmation-store.js';
@@ -172,6 +173,18 @@ async function discardTemporary(journal, { projectRoot, secureFs }) {
   return true;
 }
 
+/** Whether the transaction's deterministic temporary file still exists. */
+async function temporaryExists(journal, { projectRoot }) {
+  const temporaryPath = path.join(projectRoot, ...journal.temporaryPath.split('/'));
+  try {
+    await fs.lstat(temporaryPath);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw ownerIntervention(`restore apply temporary file is unreadable: ${error.code ?? 'invalid'}`);
+  }
+}
+
 async function ensureCandidateConsumed(journal, outcome, input) {
   const candidate = await showRestoreCandidate({
     projectRoot: input.projectRoot,
@@ -201,6 +214,21 @@ async function ensureCandidateConsumed(journal, outcome, input) {
     outcome,
     now: input.now,
   });
+}
+
+/** The manifest binding in exactly the shape the apply journal recorded. */
+async function currentManifestBinding(store, binding, slot) {
+  const state = await store.classifySlot({ binding, slot });
+  if (state.state === 'pristine-unapproved') {
+    return { state: 'pristine-unapproved', generation: { state: 'no-manifest' } };
+  }
+  if (state.state !== 'approved' && state.state !== 'revoked') {
+    throw ownerIntervention('restore manifest state is invalid during recovery');
+  }
+  return {
+    state: state.state,
+    generation: { state: 'present', value: state.generation },
+  };
 }
 
 async function assertCompleteChain(journal, input) {
@@ -243,6 +271,16 @@ async function assertCompleteChain(journal, input) {
       confirmation.candidatePayloadHash === journal.candidatePayloadHash &&
       confirmation.stateEventHash === journal.confirmationEventHash,
     'restore confirmation was not spent by the recovering transaction',
+  );
+  // HOSTILE REVIEW, finding C: the recovery barrier must refuse when the
+  // manifest has moved since the owner confirmed. Without this, a transaction
+  // confirmed against pristine-unapproved state completes after the slot has
+  // been approved — the owner authorised a replacement in one authority state
+  // and it lands in another.
+  const currentManifest = await currentManifestBinding(store, binding, journal.slot);
+  requireEvidence(
+    canonicalize(currentManifest) === canonicalize(journal.manifest),
+    'restore manifest state changed after the owner confirmed',
   );
   // A lock left behind by a SIGKILLed process must not hide the transaction
   // forever, but it is also the only thing standing between recovery and a
@@ -294,10 +332,49 @@ async function advance(journal, input, { store, binding }) {
 
   let state = journal.state;
   if (state === 'prepared' || state === 'temporary-written') {
-    await discardTemporary(journal, input);
-    await ensureCandidateConsumed(journal, 'failed', input);
-    await append('complete', 'failed');
-    return 'discarded';
+    // HOSTILE REVIEW, finding A: the atomic rename and the `destination-replaced`
+    // journal event are two steps. A crash between them leaves the journal at
+    // `temporary-written` while the destination ALREADY holds the replacement.
+    // Treating that as "nothing happened" consumed the candidate as failed and
+    // told the owner the apply did not occur — with the new bytes on disk.
+    //
+    // The destination is not being used to pick a permissive branch: recovery
+    // requires it to be exactly one of the two states the journal authenticated,
+    // the pre-state it recorded or the replacement it committed to, and anything
+    // else is owner intervention.
+    let observed;
+    try {
+      observed = await input.secureFs.inspectOwnerOnlyDestination(destinationPath, {
+        root: input.projectRoot,
+        maxBytes: AUTHORITY_PAYLOAD_BYTES,
+      });
+    } catch (error) {
+      throw ownerIntervention(`restore destination is unsafe: ${error.code ?? 'invalid'}`);
+    }
+    const matchesBefore = observed.state === 'absent'
+      ? journal.destinationBefore.state === 'absent'
+      : journal.destinationBefore.state === 'present' &&
+        observed.contentHash === journal.destinationBefore.rawHash;
+    const matchesAfter = observed.state === 'present' &&
+      observed.contentHash === journal.destinationAfterHash;
+    const temporaryPresent = await temporaryExists(journal, input);
+
+    // The rename committed if the destination holds the replacement and the
+    // temporary is gone. When the pre-state and the replacement hash to the same
+    // bytes the destination cannot distinguish them, so the temporary decides.
+    if (matchesAfter && (!matchesBefore || (state === 'temporary-written' && !temporaryPresent))) {
+      await append('destination-replaced');
+      state = 'destination-replaced';
+    } else {
+      requireEvidence(
+        matchesBefore,
+        'restore destination is neither the authenticated pre-state nor the authenticated replacement',
+      );
+      await discardTemporary(journal, input);
+      await ensureCandidateConsumed(journal, 'failed', input);
+      await append('complete', 'failed');
+      return 'discarded';
+    }
   }
 
   if (state === 'destination-replaced') {
@@ -421,6 +498,54 @@ async function recoverOne(journal, input) {
   }
 }
 
+/**
+ * Converges a candidate left `apply-in-progress` with no apply journal.
+ *
+ * No journal means no destination was ever touched: the journal is created
+ * before the temporary write and long before the rename, so the only state to
+ * undo is the candidate marker itself. The confirmation is still authenticated
+ * first — it must be spent BY THIS transaction and bound to this candidate and
+ * payload — so a candidate marked in-progress by anything other than a genuine
+ * crashed apply fails closed rather than being quietly consumed.
+ */
+async function releaseStrandedCandidate(stranded, input) {
+  const state = stranded.candidateState;
+  requireEvidence(
+    typeof state.transactionId === 'string' && typeof state.contextId === 'string',
+    'stranded restore candidate is not bound to a transaction',
+  );
+  let confirmation;
+  try {
+    confirmation = await readConfirmation({
+      projectRoot: input.projectRoot,
+      env: input.env,
+      secureFileOptions: input.secureFileOptions,
+      contextId: state.contextId,
+    });
+  } catch (error) {
+    throw ownerIntervention(
+      `stranded restore candidate has no readable confirmation: ${error.code ?? 'invalid'}`,
+    );
+  }
+  requireEvidence(
+    confirmation.state === 'spent' &&
+      confirmation.transactionId === state.transactionId &&
+      confirmation.candidateId === stranded.candidateId &&
+      confirmation.candidatePayloadHash === stranded.payloadHash,
+    'stranded restore candidate is not owned by a spent confirmation',
+  );
+  await consumeCandidate({
+    projectRoot: input.projectRoot,
+    env: input.env,
+    secureFileOptions: input.secureFileOptions,
+    candidateId: stranded.candidateId,
+    transactionId: state.transactionId,
+    outcome: 'failed',
+    now: input.now,
+  });
+  return 'released';
+}
+
 export async function recoverRestoreTransactions({
   projectRoot,
   env = process.env,
@@ -435,6 +560,7 @@ export async function recoverRestoreTransactions({
     secureFileOptions,
   });
   const recovered = [];
+  const journalled = new Set(journals.map((journal) => journal.candidateId));
   for (const journal of journals) {
     if (journal.state === 'complete') {
       recovered.push(Object.freeze({
@@ -457,6 +583,22 @@ export async function recoverRestoreTransactions({
     recovered.push(Object.freeze({
       transactionId: journal.transactionId,
       status,
+    }));
+  }
+
+  // HOSTILE REVIEW, finding B: a crash between markApplyInProgress and
+  // createApplyJournal leaves a candidate mid-apply with a spent confirmation
+  // and NO journal. Nothing enumerated it, so it could never be applied and
+  // never be restaged — stranded until someone deleted owner-local state by
+  // hand. Journals cannot see it; the candidate store is the only witness.
+  for (const stranded of await listApplyInProgressCandidates({
+    projectRoot, env, secureFileOptions,
+  })) {
+    if (journalled.has(stranded.candidateId)) continue;
+    recovered.push(Object.freeze({
+      transactionId: stranded.candidateState.transactionId ?? null,
+      candidateId: stranded.candidateId,
+      status: await releaseStrandedCandidate(stranded, input),
     }));
   }
   return Object.freeze(recovered);
