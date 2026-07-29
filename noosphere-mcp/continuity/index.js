@@ -81,6 +81,11 @@ import {
   ingestOrdinaryRecall,
   observeTypedMemory,
 } from './internal/replay/presentation.js';
+import { parseReplayArgs } from './internal/replay/cli.js';
+import {
+  listReplayEvidence,
+  readReplayStatus,
+} from './internal/replay/reader.js';
 import { applyRestoreCandidate } from './internal/restore/apply-service.js';
 import { recoverRestoreTransactions } from './internal/restore/recovery.js';
 import { parseRestoreArgs } from './internal/restore/cli.js';
@@ -263,6 +268,9 @@ try {
       break;
     case 'restore':
       await restoreFromCli(projectDir, process.argv.slice(3));
+      break;
+    case 'replay':
+      await replayFromCli(projectDir, process.argv.slice(3));
       break;
     case 'handoff':
       await handoffFromCli(projectDir);
@@ -2314,6 +2322,27 @@ async function restoreFromCli(root, args) {
   );
 }
 
+async function replayFromCli(root, args) {
+  const remaining = [...args];
+  const pathIndex = remaining.indexOf('--path');
+  if (pathIndex !== -1) {
+    if (pathIndex + 1 >= remaining.length ||
+        remaining.filter(value => value === '--path').length !== 1) {
+      throw usageError('--path requires exactly one value');
+    }
+    remaining.splice(pathIndex, 2);
+  }
+  const parsed = parseReplayArgs(remaining);
+  const result = parsed.verb === 'status'
+    ? await readReplayStatus({ projectRoot: root })
+    : await listReplayEvidence({
+        projectRoot: root,
+        slot: parsed.slot,
+        limit: parsed.limit,
+      });
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+}
+
 async function stateRemoteFromCli(root, mode) {
   if (mode === 'quarantine') {
     printSyncResult({ action: 'quarantine-list', actionable: false, entries: await listQuarantine(root) });
@@ -3492,6 +3521,10 @@ Commands:
               Authenticate and display one untrusted candidate.
   restore apply <candidate-id>
               Apply one candidate through the one-shot confirmation ceremony.
+  replay status
+              Inspect replay health and fixed bounds without recovering state.
+  replay list [--slot <slot>] [--limit <1..100>]
+              List bounded authenticated replay evidence read-only.
   ollama      Run any Ollama model with shared project memory
   protocol    Print the universal agent protocol
   state       Print or transition canonical CSP project state:

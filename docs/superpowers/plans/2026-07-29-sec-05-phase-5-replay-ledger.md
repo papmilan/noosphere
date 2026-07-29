@@ -181,13 +181,13 @@
 - Create: `noosphere-mcp/tests/replay-api-boundary.test.js`
 - Create: `noosphere-mcp/tests/replay-domain-separation.test.js`
 
-- [ ] RED-test exact `replay status`/`list` grammar and bounded projections.
-- [ ] Hash the replay root before/after readers, including incomplete journals, and require byte-for-byte equality.
-- [ ] RED-test absence of add/clear/reset/reinitialize/rotate/repair/recover/import/export across CLI, package, packed npm, MCP, HTTP, hooks, lifecycle, adapters, and relayer.
-- [ ] Implement readers that authenticate and report health without entering `withReplayOperation`.
-- [ ] Update syntax-check inputs without exposing writer exports.
-- [ ] Run package dry-run and installed-package deep-import checks.
-- [ ] Commit: `feat(security): expose bounded replay inspection`.
+- [x] RED-test exact `replay status`/`list` grammar and bounded projections.
+- [x] Hash the replay root before/after readers, including incomplete journals, and require byte-for-byte equality.
+- [x] RED-test absence of add/clear/reset/reinitialize/rotate/repair/recover/import/export across CLI, package, packed npm, MCP, HTTP, hooks, lifecycle, adapters, and relayer.
+- [x] Implement readers that authenticate and report health without entering `withReplayOperation`.
+- [x] Update syntax-check inputs without exposing writer exports.
+- [x] Run package dry-run and installed-package deep-import checks.
+- [x] Commit: `feat(security): expose bounded replay inspection`.
 
 ### Task 10: Mutation harness, conformance, docs, and exact-head gates
 

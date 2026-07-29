@@ -51,6 +51,18 @@ export function replayArtifactDigest(record) {
   ), 'utf8'));
 }
 
+export function replayRecordIndexDigest(records) {
+  const entries = [...records]
+    .sort((left, right) =>
+      left.replayIdentity.localeCompare(right.replayIdentity))
+    .map(record => [
+      record.replayIdentity,
+      record.recordGeneration,
+      record.mac,
+    ]);
+  return sha256(Buffer.from(canonicalize(entries), 'utf8'));
+}
+
 function digestSegment(value) {
   if (!SHA256_ID.test(value)) {
     throw storeError('replay-project-invalid', 'replay project identity is invalid');
