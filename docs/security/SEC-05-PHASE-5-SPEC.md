@@ -2,7 +2,7 @@
 
 **Status:** Proposed security specification
 **Phase:** 5 of 5 (final SEC-05 phase)
-**Implementation status:** No Phase 5 implementation is authorized by this document
+**Implementation status:** Approved for test-first implementation after this specification and its implementation plan are committed
 **Target baseline:** SEC-05 Phases 1–4C, including the reviewed Phase 4C remediation at `7004a3a`
 **Normative terms:** “MUST”, “MUST NOT”, “SHALL”, “SHALL NOT”, “SHOULD”, and “MAY” are normative.
 
@@ -45,11 +45,12 @@ In particular, it MUST NOT weaken:
 15. the accepted residual for wholesale owner-local security-store rollback.
 
 Phase 5 code MUST NOT modify the format-2 manifest schema, generation records,
-audit events, revocation tombstones, restore candidates, restore confirmations,
-apply journals, receipts, consumed markers, or their transition rules except
-for adding a read-only, non-authoritative replay identity reference to newly
-staged candidate metadata if the implementation plan proves that reference is
-needed. Existing Phase 4C artifacts MUST remain readable without migration.
+audit events, revocation tombstones, restore candidate envelopes or state,
+restore confirmations, apply journals, receipts, consumed markers, or their
+transition rules. Replay identity and candidate identity are completely
+separate: no replay artifact may persist a candidate identifier or path, and no
+candidate artifact may persist a replay identity, replay path, or replay
+reference. Existing Phase 4C artifacts MUST remain readable without migration.
 
 ## 3. Scope
 
@@ -66,7 +67,8 @@ Phase 5 SHALL:
 - label stale or time-unverifiable ordinary recall results;
 - preserve ordinary recall ordering and content evidence;
 - serialize concurrent replay observations;
-- recover interrupted replay-ledger updates idempotently;
+- recover interrupted replay-ledger updates idempotently through production
+  replay-observation paths;
 - expose bounded, read-only replay inspection;
 - close SEC-05 documentation and release tracking only after every gate passes.
 
@@ -88,6 +90,7 @@ Phase 5 SHALL NOT:
 - silently discard ordinary recalled information;
 - expose replay mutation through MCP, HTTP, package exports, hooks, lifecycle
   services, adapters, or the relayer.
+- expose replay-key reset, rotation, reinitialization, import, or repair.
 
 ## 4. Security invariants
 
@@ -168,6 +171,41 @@ Replay classification never removes an item from ordinary context recall.
 Every item returned by the bounded recall response remains represented in the
 same relative order.
 
+### RPL-I11 — identity separation
+
+Replay identity is a deterministic digest of project, trusted local slot, and
+normalized recalled bytes. Candidate identity remains the independently random
+canonical Phase 4C candidate ID. Neither identity may be derived from the other,
+and neither security store may persist a cross-reference to the other. A live
+typed-staging orchestrator may pass only the trusted local matching tuple
+`(projectIdentityDigest, localSlot, candidatePayloadHash)` between the two
+independently authenticated domains.
+
+### RPL-I12 — production-reachable recovery
+
+Replay-journal recovery MUST be reached automatically by every production
+operation that can mutate replay state, before that operation observes new
+content. Recovery MUST NOT exist only as a test helper or direct internal test
+entry point. Read-only inspection reports incomplete recovery state but never
+performs recovery.
+
+### RPL-I13 — global lock hierarchy
+
+Every replay and typed-restore duplicate-exclusion lock participates in the
+single rank order defined in §11. No code path may acquire a lower-ranked lock
+while holding a higher-ranked lock. Same-rank multi-lock acquisition uses
+canonical lexical lock-key order. Replay observation and candidate
+duplicate-exclusion locks MUST be released before restore apply or authority
+transaction locks are acquired.
+
+### RPL-I14 — no replay-key reinitialization
+
+Phase 5 provides no replay-key reinitialization, rotation, reset, recovery,
+import, or repair operation. First-use key creation is permitted only for a
+pristine replay root containing no replay catalog, project, record, journal, or
+checkpoint state. Key loss or replacement while any replay state survives fails
+replay closed and is never repaired automatically.
+
 ## 5. Trust-domain model
 
 Phase 5 introduces a fifth security domain:
@@ -236,9 +274,18 @@ unreadable paths fail replay closed.
 - never used to MAC authority or restore artifacts;
 - never used by authority readers.
 
-Key loss or replacement makes existing replay records unverifiable and replay
-detection unavailable until explicit owner-local reinitialization. It does not
-change authority.
+First-use key creation is allowed only when the replay root is pristine. If a
+catalog, project directory, record, manifest, journal, retention checkpoint, or
+other replay artifact survives without the original key, or is authenticated by
+a different key, replay fails closed. Recovery MUST NOT create a key, re-MAC old
+state, or discard state.
+
+Phase 5 intentionally provides no supported key reinitialization, rotation,
+reset, repair, backup, restore, or import path. Owner remediation is
+out-of-band. Wholesale deletion of the complete replay root is
+indistinguishable from a first installation; a later production use may create
+a new root and key. The resulting loss of replay history is an accepted
+rollback/deletion residual and has no authority effect.
 
 ### 5.3 One-way project identity dependency
 
@@ -511,9 +558,10 @@ Every replay observation is one transaction:
 1. validate and normalize the recalled content;
 2. derive project identity, slot, payload digest, replay identity, and recall
    identity without reading replay classification;
-3. acquire the project ledger lock;
-4. acquire the identity lock;
-5. recover any authenticated incomplete journal for that identity;
+3. enter the production replay-operation boundary;
+4. acquire the replay project lock and then each affected replay identity lock;
+5. recover every authenticated incomplete journal that can affect the locked
+   project/identities before observing the new event;
 6. re-read and authenticate catalog, manifest, retention checkpoint, and current
    record while both locks are held;
 7. compute the exact next record and exact next manifest;
@@ -529,8 +577,18 @@ Every replay observation is one transaction:
 
 No step calls an authority or restore writer.
 
-The project lock precedes the identity lock everywhere. Any reversed acquisition
-order is a test failure.
+For typed staging, the production orchestration boundary owns an opaque ranked
+lock scope. The replay observer commits inside ranks 20 and 30 without releasing
+that scope; orchestration then acquires rank 40 and invokes the restore
+match/create adapter. The adapter receives no replay identity. This preserves
+atomic duplicate exclusion without creating a replay-to-restore writer import.
+Non-staging observations release ranks 30 and 20 at step 14.
+
+Recovery is part of the production replay-operation boundary used by
+`restore stage`, structured ordinary recall, and typed context refresh. A
+test-only caller is insufficient. Recovery never runs from `replay status` or
+`replay list`; those readers are byte-for-byte read-only and report incomplete
+journals as unhealthy.
 
 ## 11. Concurrency
 
@@ -551,7 +609,42 @@ update may be lost.
 Concurrent typed staging of identical `(project, slot, normalized payload)` MUST
 create at most one active restore candidate.
 
-Lock files:
+### 11.1 Global replay–restore lock hierarchy
+
+Every participating lock has exactly one rank:
+
+| Rank | Lock | Canonical lock key |
+|---:|---|---|
+| 10 | replay catalog initialization lock | `replay-catalog` |
+| 20 | replay project/ledger lock | `replay-project:<projectIdentityDigest>` |
+| 30 | replay identity lock | `replay-identity:<projectIdentityDigest>:<replayIdentity>` |
+| 40 | restore candidate-index lock | `restore-candidate-index:<projectIdentityDigest>:<slot>:<candidatePayloadHash>` |
+| 50 | restore candidate-state lock, when required | `restore-candidate:<candidateId>` |
+| 60 | existing format-2 slot/authority transaction lock | existing canonical authority key |
+
+Acquisition is strictly ascending by rank. A caller holding a rank MUST NOT
+acquire any lower rank. Multiple locks at one rank are acquired in canonical
+lexical lock-key order and released in reverse order. Lock acquisition passes
+through one internal rank-checking helper; test and production code use the same
+helper.
+
+Live typed staging acquires ranks 20, 30, and 40 in that order and holds the
+candidate-index lock across authenticated match and exclusive candidate
+creation. Candidate-state locking, if needed, follows at rank 50. Replay,
+candidate-index, and candidate-state locks MUST all be released before any
+restore apply, confirmation-spend, receipt, consumed-marker, format-2 slot, or
+authority transaction at rank 60 begins. Authority and apply/recovery paths
+never acquire replay locks.
+
+The candidate-index lock belongs to the restore domain, is keyed by the trusted
+local matching tuple, and is independent of the randomly generated candidate
+ID. It prevents two concurrent staging operations from creating duplicate
+active candidates without making replay state authoritative for candidate
+lifecycle.
+
+### 11.2 Lock artifact policy
+
+Replay lock files:
 
 - use the replay key and `noosphere.replay.lock.v1` domain;
 - bind project identity and, for identity locks, replay identity;
@@ -560,8 +653,10 @@ Lock files:
 - are never automatically deleted based on PID age, timestamp, boot time, or
   presumed staleness.
 
-Every present or unusable replay lock requires owner intervention. Replay lock
-policy has no effect on authority locks.
+Candidate-index locks use a distinct restore-authenticated lock domain and
+strictly bind project identity, trusted local slot, and candidate payload hash.
+Every present or unusable replay or candidate-index lock requires owner
+intervention. Lock policy has no effect on authority locks.
 
 ## 12. Crash journal and recovery
 
@@ -608,6 +703,21 @@ Recovery:
 - never rewrites `firstSeen`;
 - never touches authority or restore state.
 
+Production reachability is mandatory:
+
+- `restore stage <slot>` invokes recovery before replay observation and before
+  candidate matching or creation;
+- structured ordinary recall invokes recovery before replay observation;
+- typed context refresh invokes recovery before replay observation;
+- a normal retry after process death reaches the same recovery code without
+  importing an internal recovery helper directly;
+- read-only replay inspection detects and reports incomplete journals but does
+  not recover them.
+
+Recovery can repair only an interrupted authenticated replay transaction. It
+cannot recreate a missing replay key, accept a replacement key, re-MAC prior
+state, create or consume a candidate, or mutate authority.
+
 Malformed, spliced, rolled-back, missing-required, conflicting, or
 noncanonical journals fail replay closed and require owner intervention.
 
@@ -621,14 +731,19 @@ After the existing recall response, action-type, UTF-8, size, and slot checks
 pass, but before creating a restore candidate:
 
 1. derive and commit the replay observation;
-2. under the replay project/identity locks, ask the existing authenticated
-   restore candidate store for candidates matching the exact local slot and
-   exact candidate payload hash;
+2. while respecting ranks 20 → 30 → 40, ask the independently authenticated
+   restore candidate store for candidates matching only the trusted local
+   `(projectIdentityDigest, slot, candidatePayloadHash)` tuple;
 3. the restore store—not the replay record—decides whether a matching candidate
    is active, apply-in-progress, or consumed.
 
-The replay record MUST NOT contain a candidate ID and MUST NOT select a restore
-candidate.
+Candidate IDs are generated randomly by the existing Phase 4C candidate store
+after duplicate matching. They MUST NOT be replay identities or deterministic
+derivatives of recalled content. Replay records, manifests, catalogs, journals,
+locks, and checkpoints MUST NOT contain candidate IDs or candidate paths.
+Candidate envelopes, payload metadata, state, receipts, and consumed markers
+MUST NOT contain replay identities, replay paths, or replay references. Neither
+store persists the ephemeral matching tuple as a cross-domain reference.
 
 ### 13.2 Duplicate outcomes
 
@@ -649,10 +764,11 @@ content authority.
 
 ### 13.3 Atomic duplicate exclusion
 
-The replay project/identity locks remain held through the restore-store
-match-and-create decision. Restore candidate creation continues to use the
-existing restore store and schemas. A new candidate, if created, is then
-re-read and authenticated before the replay locks are released.
+The replay project/identity locks and restore candidate-index lock remain held
+through the restore-store match-and-create decision. Restore candidate creation
+continues to use the existing restore store and schemas. A new candidate, if
+created, is then re-read and authenticated before locks are released in reverse
+rank order.
 
 An interrupted operation may leave a valid replay observation without a
 candidate. Retry may create the missing candidate after recovery. It MUST NOT
@@ -780,10 +896,11 @@ This bounded-memory trade-off is an accepted residual, not authority restoration
 | record/schema/MAC/domain invalid | refuse | `UNAVAILABLE` | unchanged |
 | journal invalid or ambiguous | refuse | `UNAVAILABLE` | unchanged |
 | replay lock present/unusable | refuse | `UNAVAILABLE` | unchanged |
+| candidate-index lock present/unusable | refuse before match/create | not applicable | unchanged |
 | identity unavailable | refuse | `UNAVAILABLE` | unchanged |
 | retention conflict/failure | refuse new candidate | `UNAVAILABLE`; content visible | unchanged |
 | local clock invalid | refuse typed observation | `TIME_UNVERIFIED`; content visible | unchanged |
-| complete replay root deleted | new replay root only through explicit local initialization; prior detection lost | items may become `NEW` | unchanged |
+| complete replay root deleted | next normal replay operation may perform pristine first-use creation; prior detection lost | items may become `NEW` | unchanged |
 
 Replay errors use a dedicated error family and MUST NOT be mapped to authority
 success, approval refusal, revocation success, restore success, or candidate
@@ -823,6 +940,9 @@ local capability already outside SEC-05.
 | replay identity collision attempt | exact canonical digest tests; SHA-256 collision remains cryptographic residual |
 | replay race | serialized count and one record/candidate |
 | replay journal corruption | no recovery mutation; owner intervention |
+| surviving replay state with missing/replaced key | no reinitialization or recovery mutation; replay unavailable |
+| replay/candidate cross-reference injection | strict schema failure in the affected independent domain |
+| descending or non-lexical lock request | fail before acquiring the invalid lock |
 | retention abuse | remote metadata cannot affect local retention inputs or constants |
 | replay metadata spoofing | metadata excluded from replay identity and authority |
 | replay-to-authority domain substitution | MAC/domain verification fails |
@@ -863,8 +983,9 @@ Expected responsibility boundaries:
 - `identity.js` — pure canonical replay/recall identity derivation;
 - `schema.js` — exact bounded replay schemas;
 - `store.js` — owner-only replay records/catalog/manifest;
-- `lock.js` — replay-only lock domain;
+- `lock.js` — replay locks plus common rank enforcement;
 - `journal.js` — replay transaction journal and recovery;
+- `operation.js` — the production mutation boundary that invokes recovery;
 - `retention.js` — deterministic bounded compaction;
 - `observe.js` — one internal observation transaction;
 - `classify.js` — pure state/classification mapping;
@@ -889,6 +1010,12 @@ the existing restore staging service as two bounded internal services. The
 replay service itself MUST NOT import or call restore apply, confirmation,
 receipt, consumed-marker, approval, revocation, audit, generation, or manifest
 writers.
+
+The restore candidate store MAY add an internal candidate-index lock adapter
+using a restore-only MAC domain. That adapter accepts only the trusted matching
+tuple, participates in the §11 rank hierarchy, and neither accepts nor returns
+a replay identity. Existing candidate envelope and state schemas remain
+unchanged.
 
 ### 19.3 Public readers
 
@@ -932,8 +1059,9 @@ noosphere replay list [--slot <slot>] [--limit <1..100>]
 `replay list` reports the bounded public projection, ordered by
 `(lastSeen.observedAt DESC, replayIdentity ASC)`.
 
-There is no replay CLI command for add, remove, clear, reset, repair, recover,
-compact, import, export, approve, revoke, restore, apply, consume, or mutate.
+There is no replay CLI command for add, remove, clear, reset, reinitialize,
+rotate-key, repair, recover, compact, import, export, approve, revoke, restore,
+apply, consume, or mutate.
 Automatic replay-journal recovery occurs only inside a normal replay operation.
 Inspection commands are read-only and fail without changing bytes.
 
@@ -960,6 +1088,11 @@ Documentation MUST state:
   lookup, not selected by replay records;
 - the exact 4,096-record and 90-day bounds;
 - complete replay-root deletion/rollback and post-retention replay residuals;
+- deliberate absence of replay-key reinitialization, rotation, reset, repair,
+  import, or recovery;
+- production mutation paths that automatically recover authenticated incomplete
+  replay journals;
+- complete replay/candidate identity separation and the global lock hierarchy;
 - replay failure does not change authority;
 - SEC-05 remains open until exact-head hostile review and tri-platform CI pass.
 
@@ -996,6 +1129,13 @@ Each test below is mandatory.
   noncanonical, oversized, invalid UTF-8, bad timestamp, bad enum, unsafe
   integer, and mismatched derived fields.
 - **RPL-T016:** no replay artifact contains recalled payload bytes.
+- **RPL-T017:** candidate IDs remain random canonical Phase 4C IDs and are never
+  replay identities or deterministic content derivatives.
+- **RPL-T018:** replay artifacts contain no candidate ID/path/reference, and
+  candidate artifacts contain no replay identity/path/reference.
+- **RPL-T019:** candidate matching crosses domains only through the ephemeral
+  trusted local `(projectIdentityDigest, slot, candidatePayloadHash)` tuple;
+  persisted artifacts have no cross-reference.
 
 ### 22.3 State and ordinary recall
 
@@ -1028,9 +1168,10 @@ Each test below is mandatory.
 - **RPL-T040:** N concurrent first observations produce one record, count N,
   immutable first event, and no lost last event.
 - **RPL-T041:** concurrent identical typed staging creates at most one candidate.
-- **RPL-T042:** lock acquisition order is project then identity.
+- **RPL-T042:** all participating operations enforce ranks 10 → 20 → 30 → 40
+  → 50 → 60; descending acquisition and non-lexical same-rank acquisition fail.
 - **RPL-T043:** live, malformed, foreign, and unusable replay locks are never
-  automatically removed.
+  automatically removed; the same holds for candidate-index locks.
 - **RPL-T044:** process death at every journal boundary recovers to exactly one
   committed count.
 - **RPL-T045:** recovery is idempotent across repeated processes.
@@ -1038,6 +1179,13 @@ Each test below is mandatory.
   recovery refuses without mutation.
 - **RPL-T047:** replay recovery never imports or calls any authority/restore
   writer.
+- **RPL-T048:** real child-process invocations of `restore stage`, structured
+  ordinary recall, and typed context refresh each recover an authenticated
+  interrupted journal before observing new content; tests do not call recovery
+  directly.
+- **RPL-T049:** `replay status` and `replay list` report incomplete journals
+  without byte changes, while a subsequent production mutation path performs
+  recovery.
 
 ### 22.6 Retention
 
@@ -1065,6 +1213,12 @@ Each test below is mandatory.
 - **RPL-T067:** replay CLI exposes only `status` and `list`, and both are
   byte-for-byte read-only.
 - **RPL-T068:** authority/restore writer import graph has no replay-writer edge.
+- **RPL-T069:** no CLI, MCP, HTTP, package export, hook, lifecycle service,
+  adapter, or relayer surface exposes replay-key reset, reinitialization,
+  rotation, repair, recovery, import, or export.
+- **RPL-T070:** pristine first use creates one key exclusively; key loss or
+  replacement with any surviving replay state fails closed without mutation,
+  while complete-root deletion has only the documented history-loss residual.
 
 ### 22.8 Mutation testing
 
@@ -1087,7 +1241,18 @@ The mutation harness MUST prove the suite fails when each mutation is applied:
 15. export a replay writer;
 16. add a mutating replay CLI verb;
 17. let replay failure alter `isSlotAuthoritative`;
-18. allow more than 4,096 records or non-deterministic eviction.
+18. allow more than 4,096 records or non-deterministic eviction;
+19. persist candidate ID/path in replay state or replay identity/path in
+    candidate state;
+20. derive candidate ID from replay identity or content;
+21. bypass the restore candidate-index lock;
+22. acquire any lock below the currently held rank or use non-lexical same-rank
+    ordering;
+23. make recovery reachable only through a direct test helper;
+24. let a read-only inspection command recover or otherwise mutate state;
+25. recreate or replace a missing replay key when replay artifacts survive;
+26. expose a replay-key reset, reinitialize, rotate, repair, import, or recovery
+    surface.
 
 Mutation testing SHOULD use repository-owned deterministic source transforms or
 dependency injection. It MUST NOT add a production runtime dependency.
@@ -1136,7 +1301,13 @@ head:
 12. diff and clean-tree checks;
 13. exact-head independent hostile security review;
 14. verification record pinned to the reviewed implementation head;
-15. no Critical or Important hostile-review findings.
+15. no Critical or Important hostile-review findings;
+16. child-process proof that every production replay mutation path reaches
+    recovery and both inspection commands remain byte-for-byte read-only;
+17. replay/candidate artifact scans and schema tests proving complete identity
+    separation;
+18. global lock-rank conformance and hostile concurrency tests;
+19. replay-key-loss and no-reinitialization surface tests.
 
 The Phase 4C Windows result may be explicitly deferred while designing Phase 5,
 but Phase 5 cannot merge without a green exact-head Windows gate.
@@ -1165,7 +1336,7 @@ Until then, SEC-05 remains open and the project remains not public-ready.
 | A13 cross-session replay | persistent replay records, monotonic state/count, ordinary labels, typed suppression |
 | replay flooding | fixed record/age/size bounds and deterministic compaction |
 | metadata spoofing | metadata excluded from replay identity, retention, and authority |
-| crash/race replay loss | identity/project locks plus authenticated exact-state journal recovery |
+| crash/race replay loss | global ranked locks plus production-reachable authenticated exact-state journal recovery |
 
 ## 27. Rejected alternatives
 
@@ -1198,3 +1369,16 @@ presented to an agent. Ordinary recall is labeled, not removed.
 
 Rejected because PID, clock, and pathname races cannot prove safe ownership.
 Replay failure is preferable to deleting a live lock.
+
+### 27.7 Persistent replay/candidate cross-references
+
+Rejected because either store could then influence or substitute identity in the
+other domain. The live orchestrator passes only a bounded trusted matching tuple;
+candidate identity remains random and replay identity remains deterministic.
+
+### 27.8 Replay-key reinitialization or rotation
+
+Consciously omitted from Phase 5. A supported reset or rotation path would need
+an additional authenticated owner ceremony, rollback model, migration journal,
+and recovery protocol. Phase 5 instead permits key creation only on pristine
+first use and fails replay closed when state survives key loss or replacement.
