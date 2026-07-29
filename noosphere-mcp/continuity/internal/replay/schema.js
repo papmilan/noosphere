@@ -43,6 +43,20 @@ const REPLAY_CATALOG_SCHEMA = Object.freeze({
   mac: is.hex64,
 });
 
+const REPLAY_MANIFEST_SCHEMA = Object.freeze({
+  domain: value => value === AUTH_DOMAINS.replayManifest,
+  schema: value => value === 'noosphere.replay-manifest',
+  version: value => value === 1,
+  projectIdentityDigest: isSha256Id,
+  recordCount: is.nonNegInt,
+  recordIndexDigest: isSha256Id,
+  retentionGeneration: is.nonNegInt,
+  retentionCheckpointDigest: is.nullable(isSha256Id),
+  lastRecoveredAt: is.nullable(isCanonicalTimestamp),
+  keyId: is.hex64,
+  mac: is.hex64,
+});
+
 function replayError(code, message) {
   return new TrustStoreError(code, message);
 }
@@ -206,4 +220,32 @@ export function parseReplayCatalog(raw, {
     );
   }
   return catalog;
+}
+
+export function parseReplayManifest(raw, {
+  key,
+  expectedProjectIdentityDigest,
+  expectedKeyId,
+}) {
+  const manifest = parseAuthenticatedRecord(raw, {
+    type: 'replay manifest',
+    maxBytes: REPLAY_METADATA_BYTES,
+    schema: REPLAY_MANIFEST_SCHEMA,
+  });
+  if (
+    manifest.projectIdentityDigest !== expectedProjectIdentityDigest ||
+    manifest.keyId !== expectedKeyId
+  ) {
+    throw replayError(
+      'replay-manifest-binding-invalid',
+      'replay manifest does not match its expected local binding',
+    );
+  }
+  if (!verifyRecord(key, AUTH_DOMAINS.replayManifest, manifest)) {
+    throw replayError(
+      'replay-manifest-mac-invalid',
+      'replay manifest authentication failed',
+    );
+  }
+  return manifest;
 }

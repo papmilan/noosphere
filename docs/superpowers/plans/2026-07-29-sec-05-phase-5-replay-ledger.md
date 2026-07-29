@@ -94,12 +94,12 @@
 - Create: `noosphere-mcp/tests/replay-store.test.js`
 - Create: `noosphere-mcp/tests/replay-state.test.js`
 
-- [ ] RED-test `NeverSeen → SeenOnce → Replayed`, exact counts, immutable first event, monotonic generations, metadata exclusion, and fail-closed corrupt state.
-- [ ] RED-test that deleting/corrupting replay files leaves authoritative and untrusted slot decisions byte-for-byte unchanged.
-- [ ] Implement catalog/project manifest/record authenticated reads and bounded atomic writes.
-- [ ] Implement pure classification mapping: first `NEW`, second ordinary `SEEN`, later `REPLAYED`, typed duplicates `SUPPRESSED` only after candidate matching.
-- [ ] Re-run focused replay and Phase 4C authority tests.
-- [ ] Commit: `feat(security): persist monotonic replay observations`.
+- [x] RED-test `NeverSeen → SeenOnce → Replayed`, exact counts, immutable first event, monotonic generations, metadata exclusion, and fail-closed corrupt state.
+- [x] RED-test that deleting/corrupting replay files leaves authoritative and untrusted slot decisions byte-for-byte unchanged.
+- [x] Implement catalog/project manifest/record authenticated reads and bounded atomic writes.
+- [x] Implement pure classification mapping: first `NEW`, second ordinary `SEEN`, later `REPLAYED`, typed duplicates `SUPPRESSED` only after candidate matching.
+- [x] Re-run focused replay and Phase 4C authority tests.
+- [x] Commit: `feat(security): persist monotonic replay observations`.
 
 ### Task 5: Authenticated journal and production-reachable recovery
 
