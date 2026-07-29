@@ -2,15 +2,10 @@ import { createHash } from 'node:crypto';
 
 import { normalizeUntrusted } from '../../memory-safety.js';
 import { canonicalize } from '../../trust-store-internal.js';
+import { REPLAY_SLOTS } from './constants.js';
 
 const PROJECT_IDENTITY_DIGEST = /^sha256:[0-9a-f]{64}$/;
-const REPLAY_SLOTS = new Set([
-  'baseline',
-  'followups',
-  'instructions',
-  'master-prompt',
-  'ordinary',
-]);
+const REPLAY_SLOT_SET = new Set(REPLAY_SLOTS);
 const INPUT_FIELDS = [
   'content',
   'projectIdentityDigest',
@@ -46,7 +41,7 @@ export function deriveReplayIdentity(input) {
   if (!PROJECT_IDENTITY_DIGEST.test(projectIdentityDigest)) {
     throw new TypeError('project identity digest is invalid');
   }
-  if (!REPLAY_SLOTS.has(slot)) {
+  if (!REPLAY_SLOT_SET.has(slot)) {
     throw new TypeError('replay slot is invalid');
   }
   if (typeof content !== 'string') {

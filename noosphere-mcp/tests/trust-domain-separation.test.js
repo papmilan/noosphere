@@ -60,7 +60,7 @@ describe('SEC-05 Phase 4C — authenticated record domains', () => {
 
   it('rejects every ordered cross-domain substitution', () => {
     const entries = Object.entries(AUTH_DOMAINS);
-    assert.equal(entries.length, 12);
+    assert.equal(entries.length, 18);
 
     for (const [sourceName, sourceDomain] of entries) {
       const sealed = sealRecord(KEY, sourceDomain, recordFor(sourceDomain));

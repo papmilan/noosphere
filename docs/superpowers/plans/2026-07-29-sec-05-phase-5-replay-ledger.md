@@ -38,13 +38,13 @@
 - Returns exactly `{ normalizedBytes, payloadDigest, replayIdentity }`; it accepts no candidate or remote metadata.
 - Slots are exactly `master-prompt`, `instructions`, `baseline`, `followups`, and `ordinary`.
 
-- [ ] Write tests that independently calculate the §6 golden vectors with `createHash`, `canonicalize`, and `normalizeUntrusted`.
-- [ ] Assert equal normalized content is stable across processes and metadata changes, while project/slot/content changes alter the identity.
-- [ ] Assert unknown fields, candidate-shaped fields, invalid project digests, invalid slots, non-string content, and inherited properties are rejected.
-- [ ] Run `cd noosphere-mcp && node --test --test-concurrency=1 tests/replay-identity.test.js`; verify an assertion failure because the production module is absent.
-- [ ] Implement only the pure identity function using existing canonicalization and normalization.
-- [ ] Re-run the focused test and `node --check continuity/internal/replay/identity.js`.
-- [ ] Commit: `feat(security): derive isolated replay identities`.
+- [x] Write tests that independently calculate the §6 golden vectors with `createHash`, `canonicalize`, and `normalizeUntrusted`.
+- [x] Assert equal normalized content is stable across processes and metadata changes, while project/slot/content changes alter the identity.
+- [x] Assert unknown fields, candidate-shaped fields, invalid project digests, invalid slots, non-string content, and inherited properties are rejected.
+- [x] Run `cd noosphere-mcp && node --test --test-concurrency=1 tests/replay-identity.test.js`; verify an assertion failure because the production module is absent.
+- [x] Implement only the pure identity function using existing canonicalization and normalization.
+- [x] Re-run the focused test and `node --check continuity/internal/replay/identity.js`.
+- [x] Commit: `feat(security): derive isolated replay identities`.
 
 ### Task 2: Replay schemas, domains, and deliberate key lifecycle
 
@@ -56,14 +56,14 @@
 - Create: `noosphere-mcp/tests/replay-schema.test.js`
 - Create: `noosphere-mcp/tests/replay-key-lifecycle.test.js`
 
-- [ ] RED-test exact fields, bounds, enums, canonical JSON, unknown fields, payload absence, and candidate/replay cross-reference rejection.
-- [ ] RED-test ordered replay-domain substitution against every authority and restore domain.
-- [ ] RED-test pristine exclusive key creation, concurrent first use, unsafe paths, surviving-state key loss/replacement, and complete-root deletion/new-install behavior.
-- [ ] Assert no exported reset/reinitialize/rotate/repair/import/recovery function exists.
-- [ ] Add replay-only domains for key metadata, catalog, manifest, record, journal, checkpoint, and lock.
-- [ ] Implement strict schema validators and replay-root state inventory before key creation.
-- [ ] Re-run focused tests plus `tests/trust-domain-separation.test.js`.
-- [ ] Commit: `feat(security): establish replay key and schema domains`.
+- [x] RED-test exact fields, bounds, enums, canonical JSON, unknown fields, payload absence, and candidate/replay cross-reference rejection.
+- [x] RED-test ordered replay-domain substitution against every authority and restore domain.
+- [x] RED-test pristine exclusive key creation, concurrent first use, unsafe paths, surviving-state key loss/replacement, and complete-root deletion/new-install behavior.
+- [x] Assert no exported reset/reinitialize/rotate/repair/import/recovery function exists.
+- [x] Add replay-only domains for catalog, manifest, record, journal, checkpoint, and lock; do not invent a persisted key-metadata artifact absent from the normative RFC.
+- [x] Implement strict schema validators and replay-root state inventory before key creation.
+- [x] Re-run focused tests plus `tests/trust-domain-separation.test.js`.
+- [x] Commit: `feat(security): establish replay key and schema domains`.
 
 ### Task 3: Ranked lock hierarchy and restore candidate-index lock
 

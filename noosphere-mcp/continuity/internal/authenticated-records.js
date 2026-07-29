@@ -15,6 +15,12 @@ export const AUTH_DOMAINS = Object.freeze({
   restoreApplyJournal: 'noosphere/sec05/v2/restore-apply-journal',
   restoreReceipt: 'noosphere/sec05/v2/restore-consumption-receipt',
   restoreConsumed: 'noosphere/sec05/v2/restore-consumed-candidate-marker',
+  replayCatalog: 'noosphere.replay.catalog.v1',
+  replayManifest: 'noosphere.replay.manifest.v1',
+  replayRecord: 'noosphere.replay.record.v1',
+  replayJournal: 'noosphere.replay.journal.v1',
+  replayCheckpoint: 'noosphere.replay.retention.v1',
+  replayLock: 'noosphere.replay.lock.v1',
 });
 
 function recordWithoutMac(record) {
