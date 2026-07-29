@@ -447,7 +447,7 @@ describe('SEC-05 Phase 4B — an unreadable master prompt still counts as existi
   });
 });
 
-describe('SEC-05 Phase 4B — one baseline derivation for local and restored content', () => {
+describe('SEC-05 Phase 4B/5 — one baseline derivation with typed replay labels', () => {
   const BASELINE_BODY = 'RESTORED BODY LINE';
   const BASELINE_FILE = `# Noosphere project baseline\n\n${BASELINE_BODY}\n`;
 
@@ -462,7 +462,7 @@ describe('SEC-05 Phase 4B — one baseline derivation for local and restored con
     return shared.slice(start, end === -1 ? undefined : end);
   }
 
-  it('renders identical bytes whether the baseline is local or restored from Walrus', async () => {
+  it('derives the same baseline body while labeling only recalled evidence', async () => {
     // Local: the file is present and carries its generated header.
     const local = await fresh(MASTER);
     const localServer = await stubRelayer(local.project, []);
@@ -480,10 +480,15 @@ describe('SEC-05 Phase 4B — one baseline derivation for local and restored con
 
       const localRendered = await renderedBaselineSection(local.project);
       const restoredRendered = await renderedBaselineSection(restored.project);
-      assert.equal(restoredRendered, localRendered);
-      // And the generated header is stripped in BOTH, exactly once.
+      assert.doesNotMatch(localRendered, /Replay:/);
+      assert.match(restoredRendered, /Replay: UNAVAILABLE/);
+      assert.match(restoredRendered, /Freshness: TIME_UNVERIFIED/);
+      // The generated header is stripped in BOTH, exactly once, and the same
+      // body reaches the existing quote-unless-authenticated sink.
+      assert.match(localRendered, /> RESTORED BODY LINE/);
+      assert.match(restoredRendered, /> RESTORED BODY LINE/);
+      assert.doesNotMatch(localRendered, /# Noosphere project baseline/);
       assert.doesNotMatch(restoredRendered, /# Noosphere project baseline/);
-      assert.match(restoredRendered, new RegExp(BASELINE_BODY));
     } finally {
       await new Promise((resolve) => localServer.close(resolve));
       await new Promise((resolve) => restoredServer.close(resolve));

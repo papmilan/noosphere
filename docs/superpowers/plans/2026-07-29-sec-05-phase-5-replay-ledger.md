@@ -201,8 +201,8 @@
 - Modify: `CHANGELOG.md`
 - Modify: `noosphere-relayer/SECURITY-FOLLOWUPS.md`
 
-- [ ] Implement all 26 deterministic mutations in §22.8 and prove each mutation makes the relevant test fail.
-- [ ] Add a conformance map for every RPL-I and RPL-T identifier.
+- [x] Implement all 26 deterministic mutations in §22.8 and prove each mutation makes the relevant test fail.
+- [x] Add a conformance map for every RPL-I and RPL-T identifier.
 - [ ] Run focused replay tests, full `npm run check`, secure-fs tests, package/CLI/API boundaries, and clean-tree checks.
 - [ ] Run exact-head Linux, macOS, and Windows CI; Windows is mandatory for Phase 5 even though the owner deferred the Phase 4C Windows wait.
 - [ ] Obtain exact-head hostile security review with no Critical or Important finding.
