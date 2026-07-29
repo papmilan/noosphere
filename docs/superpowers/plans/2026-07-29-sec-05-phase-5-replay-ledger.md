@@ -126,11 +126,11 @@
 - Create: `noosphere-mcp/tests/replay-retention.test.js`
 - Modify: `noosphere-mcp/continuity/internal/replay/operation.js`
 
-- [ ] RED-test the 4,096 live-record cap, 90-day age cap, lexical tie-break, 7-day/1,024 completed-journal bounds, incomplete-journal preservation, and exact compaction accumulator.
-- [ ] RED-test crash/recovery at every retention boundary and prove remote timestamps/rankings do not influence eviction.
-- [ ] Implement deterministic retention under rank 20 with authenticated checkpoint and journal.
-- [ ] Re-run retention, crash, and authority-independence tests.
-- [ ] Commit: `feat(security): bound replay evidence deterministically`.
+- [x] RED-test the 4,096 live-record cap, 90-day age cap, lexical tie-break, 7-day/1,024 completed-journal bounds, incomplete-journal preservation, and exact compaction accumulator.
+- [x] RED-test crash/recovery at every retention boundary and prove remote timestamps/rankings do not influence eviction.
+- [x] Implement deterministic retention under rank 20 with authenticated checkpoint and journal.
+- [x] Re-run retention, crash, and authority-independence tests.
+- [x] Commit: `feat(security): bound replay evidence deterministically`.
 
 ### Task 7: Typed restore duplicate suppression with zero identity cross-reference
 

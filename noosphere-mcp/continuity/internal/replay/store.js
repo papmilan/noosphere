@@ -257,6 +257,27 @@ export async function readReplayRecord({
   });
 }
 
+export async function listReplayRecords({
+  env = process.env,
+  key,
+  projectIdentityDigest,
+}) {
+  const paths = replayProjectPaths({ env, projectIdentityDigest });
+  const records = [];
+  for (const name of (await fs.readdir(paths.records)).sort()) {
+    if (!/^[0-9a-f]{64}\.json$/.test(name)) {
+      throw storeError('replay-record-entry-invalid', 'unsafe replay record entry');
+    }
+    records.push(await readReplayRecord({
+      env,
+      key,
+      projectIdentityDigest,
+      replayIdentity: `sha256:${name.slice(0, -5)}`,
+    }));
+  }
+  return Object.freeze(records);
+}
+
 export async function commitReplayRecord({
   env = process.env,
   key,

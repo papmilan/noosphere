@@ -11,11 +11,19 @@ import {
   ensureReplayProject,
   markReplayRecovery,
 } from './store.js';
+import {
+  applyReplayRetention,
+  listRetentionJournals,
+  planReplayRetention,
+  recoverRetentionJournal,
+} from './retention.js';
 
 export async function withReplayOperation({
   env = process.env,
   projectIdentityDigest,
   replayIdentity,
+  observedAt,
+  onStep,
 }, callback) {
   if (typeof callback !== 'function') {
     throw new TypeError('replay operation callback is required');
@@ -38,9 +46,25 @@ export async function withReplayOperation({
       key,
       projectIdentityDigest,
     });
+    const retentionPlan = await planReplayRetention({
+      env,
+      key,
+      projectIdentityDigest,
+      replayIdentity,
+      now: observedAt,
+    });
+    const retentionJournals = await listRetentionJournals({
+      env,
+      key,
+      projectIdentityDigest,
+    });
     const identities = [...new Set([
       replayIdentity,
       ...journals
+        .filter(chain => !chain.complete)
+        .map(chain => chain.latest.replayIdentity),
+      ...retentionPlan.evictions.map(item => item.record.replayIdentity),
+      ...retentionJournals
         .filter(chain => !chain.complete)
         .map(chain => chain.latest.replayIdentity),
     ])].sort();
@@ -63,6 +87,15 @@ export async function withReplayOperation({
         scope,
       }) || recovered;
     }
+    for (const chain of retentionJournals.filter(item => !item.complete)) {
+      recovered = await recoverRetentionJournal({
+        env,
+        key,
+        projectIdentityDigest,
+        chain,
+        scope,
+      }) || recovered;
+    }
     if (recovered) {
       await markReplayRecovery({
         env,
@@ -70,6 +103,15 @@ export async function withReplayOperation({
         projectIdentityDigest,
       });
     }
+    await applyReplayRetention({
+      env,
+      key,
+      projectIdentityDigest,
+      replayIdentity,
+      scope,
+      now: observedAt,
+      onStep,
+    });
     return await callback(Object.freeze({ env, key, paths, scope }));
   } finally {
     for (const lock of identityLocks.reverse()) await lock.release();

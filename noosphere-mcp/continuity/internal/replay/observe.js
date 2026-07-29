@@ -66,6 +66,8 @@ export async function observeReplay(input) {
     env,
     projectIdentityDigest,
     replayIdentity: identity.replayIdentity,
+    observedAt,
+    onStep,
   }, async ({ key, scope }) => {
     const prior = await readReplayRecord({
       env,
