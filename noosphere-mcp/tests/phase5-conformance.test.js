@@ -118,6 +118,33 @@ test('conformance map covers every normative Phase 5 identifier exactly', async 
   }
 });
 
+test('CI runs the complete focused Phase 5 shard on every matrix platform', async () => {
+  const workflow = await source('.github/workflows/ci.yml');
+  assert.match(workflow, /name: SEC-05 Phase 5 replay ledger/);
+  for (const file of [
+    'phase5-conformance.test.js',
+    'replay-api-boundary.test.js',
+    'replay-cli-boundary.test.js',
+    'replay-context-refresh.test.js',
+    'replay-crash.test.js',
+    'replay-domain-separation.test.js',
+    'replay-identity-separation.test.js',
+    'replay-identity.test.js',
+    'replay-key-lifecycle.test.js',
+    'replay-lock-hierarchy.test.js',
+    'replay-mutation.test.js',
+    'replay-ordinary-recall.test.js',
+    'replay-production-recovery.test.js',
+    'replay-restore-suppression.test.js',
+    'replay-retention.test.js',
+    'replay-schema.test.js',
+    'replay-state.test.js',
+    'replay-store.test.js',
+  ]) {
+    assert.match(workflow, new RegExp(`tests/${file.replaceAll('.', '\\.')}`));
+  }
+});
+
 test('identity, monotonic state, and artifact schemas retain their closed inputs', async () => {
   const identity = await source(
     'noosphere-mcp/continuity/internal/replay/identity.js',

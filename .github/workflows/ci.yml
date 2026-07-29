@@ -84,6 +84,32 @@ jobs:
           tests/trust-api-boundary.test.js
           tests/phase4c-conformance.test.js
 
+      # SEC-05 Phase 5: replay identity, recovery, retention, presentation,
+      # restore suppression, read-only boundaries, and all 26 deterministic
+      # mutants run as one explicit release shard on Linux, macOS, and Windows.
+      - if: matrix.package == 'noosphere-mcp'
+        name: SEC-05 Phase 5 replay ledger
+        run: >-
+          node --test --test-concurrency=1 --test-timeout=1800000
+          tests/phase5-conformance.test.js
+          tests/replay-api-boundary.test.js
+          tests/replay-cli-boundary.test.js
+          tests/replay-context-refresh.test.js
+          tests/replay-crash.test.js
+          tests/replay-domain-separation.test.js
+          tests/replay-identity-separation.test.js
+          tests/replay-identity.test.js
+          tests/replay-key-lifecycle.test.js
+          tests/replay-lock-hierarchy.test.js
+          tests/replay-mutation.test.js
+          tests/replay-ordinary-recall.test.js
+          tests/replay-production-recovery.test.js
+          tests/replay-restore-suppression.test.js
+          tests/replay-retention.test.js
+          tests/replay-schema.test.js
+          tests/replay-state.test.js
+          tests/replay-store.test.js
+
       - run: npm audit --audit-level=high
 
   project-memory-postgres:
