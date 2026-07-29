@@ -13,6 +13,7 @@ import {
   replayProjectPaths,
 } from '../continuity/internal/replay/store.js';
 import { createFormatV2Store } from '../continuity/internal/trust-format-v2.js';
+import { assertForciblyTerminated } from './helpers/child-crash.js';
 
 const temporary = [];
 const STRANDED_CONTENT = 'stranded before production entry';
@@ -58,7 +59,7 @@ function crash(context) {
       encoding: 'utf8',
     },
   );
-  assert.equal(child.signal, 'SIGKILL', child.stderr);
+  assertForciblyTerminated(child, { context: child.stderr });
 }
 
 async function performOwnerLockIntervention(context) {

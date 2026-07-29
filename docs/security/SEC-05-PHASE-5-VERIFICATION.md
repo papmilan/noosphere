@@ -49,6 +49,30 @@ labels on recalled typed content. The corrected test continues to prove identica
 baseline-body derivation and header stripping while also requiring labels only
 for recalled evidence.
 
+## Cross-platform CI remediation
+
+The first two exact-head runs — `71a6030` (run 30473921727) and `d157db9`
+(run 30479522052) — passed on `ubuntu-latest` and `macos-latest` and failed on
+`windows-latest` with 31 test failures and one file-level timeout inside
+`npm run check`. No failure was a production defect on Windows: three were
+POSIX-only assumptions in the new test scaffolding, one was a repository-wide
+checkout defect that silently disarmed mutation testing, and one was a runtime
+budget.
+
+| Windows failure | Cause | Fix |
+| --- | --- | --- |
+| 17 crash tests: `replay-crash` (9), `replay-production-recovery` (3), `replay-retention` (5) | The children self-terminate with `process.kill(pid, 'SIGKILL')`. Windows has no signals: Node maps SIGKILL onto `TerminateProcess`, so the parent sees `status !== 0, signal === null`, not `status === null, signal === 'SIGKILL'`. | One shared `tests/helpers/child-crash.js` assertion that accepts both forcible-termination shapes and still requires the exact uncatchable-signal shape on POSIX. `tests/child-crash.test.js` covers both platform shapes on every platform. |
+| 3 boundary tests: `replay-api-boundary` (2), `replay-cli-boundary` (1) | `new URL(import.meta.url).pathname` is `/D:/…` on Windows, and `path.resolve` turns that into `D:\D:\…`, so the package root did not exist and the CLI child never spawned. | Resolve the package root with `fileURLToPath`. |
+| `replay-key-lifecycle` pristine-key test | POSIX mode bits do not carry owner-only intent on Windows, where Node reports `0o666`. The key is written by `writeOwnerOnlyFileExclusive`, whose Windows path sets the exact SID DACL. | Assert through the existing `tests/file-security.js` `assertOwnerOnlyFile` helper; `tests/windows-acl.test.js` remains the DACL evidence. |
+| 9 of the 26 mutants in `replay-mutation` — exactly the 9 whose anchors span lines | `windows-latest` checks out with `core.autocrlf=true`. CRLF text cannot match an exact multi-line `\n` source anchor, so those mutants were reported as missing anchors rather than as killed mutants. | A repository `.gitattributes` pinning `* text=auto eol=lf`, so every platform checks out the bytes the digests, anchors, and mutants are written against. |
+| `restore-recovery.test.js` (Phase 4C) timed out at 1 800 s | Every crash boundary spawns real children and each owner-only ACL inspection costs an external process on Windows: 130–230 s per boundary there versus a few seconds on POSIX. Its ten boundaries all passed but summed to 1 777 s, overrunning the per-test budget for the file itself. | Raise the per-test timeout to 3 600 s in `check`, `test`, and both SEC-05 CI shards. |
+
+Residual watch item: `npm run check` alone took ~3.3 h on `windows-latest`, and
+the Phase 4C and Phase 5 shards re-run its heaviest child-process files. Total
+`noosphere-mcp / windows-latest` job time is the next gate to observe against
+GitHub's 6 h job ceiling; the cost driver is one spawned process per Windows
+owner-only ACL inspection, not the replay ledger.
+
 ## Normative traceability
 
 `noosphere-mcp/tests/phase5-conformance.test.js` maps every identifier from

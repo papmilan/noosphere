@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
+// fileURLToPath, not `new URL(...).pathname`: on Windows the URL path is
+// `/D:/...`, which path.resolve turns into `D:\D:\...`.
 const packageRoot = path.resolve(
-  path.dirname(new URL(import.meta.url).pathname),
+  path.dirname(fileURLToPath(import.meta.url)),
   '..',
 );
 

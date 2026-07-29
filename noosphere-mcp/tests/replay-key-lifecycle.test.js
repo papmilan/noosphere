@@ -9,6 +9,7 @@ import {
   AUTH_DOMAINS,
   verifyRecord,
 } from '../continuity/internal/authenticated-records.js';
+import { assertOwnerOnlyFile } from './file-security.js';
 
 const keyModule = await import(
   '../continuity/internal/replay/key.js'
@@ -56,7 +57,10 @@ test('pristine first use creates one replay-only key and authenticated catalog',
     expectedPaths.key,
     'utf8',
   ), `${key.toString('hex')}\n`);
-  assert.equal((await fs.stat(expectedPaths.key)).mode & 0o777, 0o600);
+  // Windows carries owner-only intent in the SID DACL that
+  // writeOwnerOnlyFileExclusive applies, not in POSIX mode bits (which Node
+  // reports as 0o666 there); windows-acl.test.js covers the DACL itself.
+  await assertOwnerOnlyFile(expectedPaths.key);
   assert.equal(
     await fs.stat(path.join(home, 'machine-key')).catch(() => null),
     null,

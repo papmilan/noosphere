@@ -15,6 +15,7 @@ import {
   replayProjectPaths,
 } from '../continuity/internal/replay/store.js';
 import { canonicalize } from '../continuity/trust-store-internal.js';
+import { assertForciblyTerminated } from './helpers/child-crash.js';
 
 const retentionModule = await import(
   '../continuity/internal/replay/retention.js'
@@ -258,8 +259,7 @@ for (const boundary of [
         encoding: 'utf8',
       },
     );
-    assert.equal(child.status, null, child.stderr);
-    assert.equal(child.signal, 'SIGKILL', child.stderr);
+    assertForciblyTerminated(child, { context: child.stderr });
 
     const paths = replayProjectPaths({ env, projectIdentityDigest });
     for (const name of await fs.readdir(paths.locks)) {

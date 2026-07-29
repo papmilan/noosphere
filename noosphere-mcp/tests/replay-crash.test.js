@@ -14,6 +14,7 @@ import {
   replayProjectPaths,
   writeReplayRecord,
 } from '../continuity/internal/replay/store.js';
+import { assertForciblyTerminated } from './helpers/child-crash.js';
 
 const PROJECT = `sha256:${'1'.repeat(64)}`;
 const RECALL = `sha256:${'2'.repeat(64)}`;
@@ -80,8 +81,7 @@ async function crashAt(home, boundary) {
       encoding: 'utf8',
     },
   );
-  assert.equal(child.status, null, child.stderr);
-  assert.equal(child.signal, 'SIGKILL', child.stderr);
+  assertForciblyTerminated(child, { context: child.stderr });
 }
 
 async function snapshotTree(root) {

@@ -54,13 +54,19 @@ jobs:
       # SEC-05 Phase 4C: the authority cutover, the restore state machines, and
       # the writer-surface boundary run as their own fail-fast shard on all
       # three platforms. `npm run check` runs these files too, but only after a
-      # 600 s-timeout full suite; a boundary breach must fail in seconds, and a
-      # platform cell in SEC-05-PHASE-4C-VERIFICATION.md is only evidence if the
-      # shard that produced it is named and reproducible.
+      # long full suite; a boundary breach must fail in seconds, and a platform
+      # cell in SEC-05-PHASE-4C-VERIFICATION.md is only evidence if the shard
+      # that produced it is named and reproducible.
+      #
+      # The per-test timeout is 3600 s because every restore apply and recovery
+      # spawns real children and, on windows-latest, each owner-only ACL
+      # inspection costs an external process: restore-recovery.test.js runs
+      # ~130-230 s per crash boundary there versus a few seconds on POSIX, and
+      # its ten boundaries overran the previous 1800 s budget for the file.
       - if: matrix.package == 'noosphere-mcp'
         name: SEC-05 Phase 4C trust and restore
         run: >-
-          node --test --test-concurrency=1 --test-timeout=1800000
+          node --test --test-concurrency=1 --test-timeout=3600000
           tests/trust-domain-separation.test.js
           tests/trust-record-splicing.test.js
           tests/trust-concurrency.test.js
@@ -90,7 +96,7 @@ jobs:
       - if: matrix.package == 'noosphere-mcp'
         name: SEC-05 Phase 5 replay ledger
         run: >-
-          node --test --test-concurrency=1 --test-timeout=1800000
+          node --test --test-concurrency=1 --test-timeout=3600000
           tests/phase5-conformance.test.js
           tests/replay-api-boundary.test.js
           tests/replay-cli-boundary.test.js

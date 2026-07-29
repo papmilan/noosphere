@@ -5,9 +5,17 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { observeReplay } from '../continuity/internal/replay/observe.js';
 import { createFormatV2Store } from '../continuity/internal/trust-format-v2.js';
+
+// fileURLToPath, not `new URL(...).pathname`: on Windows the URL path is
+// `/D:/...`, which path.resolve turns into `D:\D:\...`.
+const PACKAGE_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+);
 
 const cliModule = await import(
   '../continuity/internal/replay/cli.js'
@@ -158,7 +166,7 @@ test('status and list authenticate incomplete state without changing one byte', 
     process.execPath,
     ['continuity/index.js', 'replay', 'status', '--path', projectRoot],
     {
-      cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), '..'),
+      cwd: PACKAGE_ROOT,
       env: { ...process.env, ...env },
       encoding: 'utf8',
     },
