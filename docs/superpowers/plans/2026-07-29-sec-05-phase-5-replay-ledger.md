@@ -112,12 +112,12 @@
 - `withReplayOperation(input, callback)` acquires the ranked scope, recovers, then permits observation.
 - Direct recovery remains internal to `journal.js` and is not package-exported.
 
-- [ ] RED-test process death at prepared, record-committed, manifest-committed, and complete boundaries.
-- [ ] RED-test exact-before/exact-after recovery, idempotence, no double count, immutable first-seen, and third-state refusal.
-- [ ] Implement authenticated append-only journal transitions and exact-state recovery.
-- [ ] Require every replay observation primitive to receive a scope created by `withReplayOperation`; keep inspection paths outside it.
-- [ ] Re-run crash tests twice in fresh processes.
-- [ ] Commit: `feat(security): recover replay journals on production paths`.
+- [x] RED-test process death at prepared, record-committed, manifest-committed, and complete boundaries.
+- [x] RED-test exact-before/exact-after recovery, idempotence, no double count, immutable first-seen, and third-state refusal.
+- [x] Implement authenticated append-only journal transitions and exact-state recovery.
+- [x] Require every replay observation primitive to receive a scope created by `withReplayOperation`; keep inspection paths outside it.
+- [x] Re-run crash tests twice in fresh processes.
+- [x] Commit: `feat(security): recover replay journals on production paths`.
 
 ### Task 6: Deterministic bounded retention
 

@@ -4,14 +4,11 @@ import { TrustStoreError } from '../../trust-store-internal.js';
 import { AUTH_DOMAINS, sealRecord } from '../authenticated-records.js';
 import { classifyReplayObservation } from './classify.js';
 import { deriveReplayIdentity } from './identity.js';
+import { commitReplayJournalTransaction } from './journal.js';
+import { withReplayOperation } from './operation.js';
 import {
-  acquireReplayIdentityLock,
-  acquireReplayProjectLock,
-} from './lock.js';
-import { createRankedLockScope } from './lock-ranks.js';
-import {
-  commitReplayRecord,
-  ensureReplayProject,
+  buildNextReplayManifest,
+  readReplayManifest,
   readReplayRecord,
 } from './store.js';
 import { replayKeyId } from './key.js';
@@ -58,33 +55,35 @@ export async function observeReplay(input) {
     observedAt,
     eventId,
     duplicateCandidate,
+    onStep,
   } = normalizedInput;
   const identity = deriveReplayIdentity({
     projectIdentityDigest,
     slot,
     content,
   });
-  const { key } = await ensureReplayProject({ env, projectIdentityDigest });
-  const scope = createRankedLockScope();
-  const projectLock = await acquireReplayProjectLock({
-    scope,
+  return withReplayOperation({
     env,
-    key,
-    projectIdentityDigest,
-  });
-  const identityLock = await acquireReplayIdentityLock({
-    scope,
-    env,
-    key,
     projectIdentityDigest,
     replayIdentity: identity.replayIdentity,
-  });
-  try {
+  }, async ({ key, scope }) => {
     const prior = await readReplayRecord({
       env,
       key,
       projectIdentityDigest,
       replayIdentity: identity.replayIdentity,
+    });
+    if (prior?.lastSeen.eventId === eventId) {
+      return Object.freeze({
+        classification: prior.lastClassification,
+        record: prior,
+        recovered: true,
+      });
+    }
+    const priorManifest = await readReplayManifest({
+      env,
+      key,
+      projectIdentityDigest,
     });
     const next = classifyReplayObservation({
       priorCount: prior?.replayCount ?? 0,
@@ -118,18 +117,29 @@ export async function observeReplay(input) {
       keyId: replayKeyId(key),
     };
     const record = sealRecord(key, AUTH_DOMAINS.replayRecord, fields);
-    await commitReplayRecord({
+    const nextManifest = await buildNextReplayManifest({
       env,
       key,
       projectIdentityDigest,
       record,
     });
+    await commitReplayJournalTransaction({
+      env,
+      key,
+      projectIdentityDigest,
+      replayIdentity: identity.replayIdentity,
+      eventId,
+      observedAt,
+      priorRecord: prior,
+      priorManifest,
+      nextRecord: record,
+      nextManifest,
+      scope,
+      onStep,
+    });
     return Object.freeze({
       classification: next.classification,
       record,
     });
-  } finally {
-    await identityLock.release();
-    await projectLock.release();
-  }
+  });
 }

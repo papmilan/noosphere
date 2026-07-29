@@ -37,6 +37,35 @@ export function createRankedLockScope() {
   return scope;
 }
 
+export function assertReplayMutationScope(
+  scope,
+  { projectIdentityDigest, replayIdentity },
+) {
+  const state = scopeState(scope);
+  const expected = [
+    {
+      rank: LOCK_RANKS.replayProject,
+      key: `replay-project:${projectIdentityDigest}`,
+    },
+    {
+      rank: LOCK_RANKS.replayIdentity,
+      key: `replay-identity:${projectIdentityDigest}:${replayIdentity}`,
+    },
+  ];
+  if (
+    state.held.length < expected.length ||
+    state.held[0].rank !== expected[0].rank ||
+    state.held[0].key !== expected[0].key ||
+    !state.held.some(held =>
+      held.rank === expected[1].rank && held.key === expected[1].key)
+  ) {
+    throw lockOrderError(
+      'replay-mutation-scope-invalid',
+      'replay mutation requires its ranked project and identity locks',
+    );
+  }
+}
+
 function assertAcquisitionOrder(state, rank, key) {
   if (!VALID_RANKS.has(rank) || typeof key !== 'string' || key.length === 0) {
     throw lockOrderError(

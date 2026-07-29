@@ -45,6 +45,12 @@ function sha256(value) {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
 }
 
+export function replayArtifactDigest(record) {
+  return sha256(Buffer.from(canonicalize(
+    record === null ? ['noosphere.replay.absent.v1'] : record,
+  ), 'utf8'));
+}
+
 function digestSegment(value) {
   if (!SHA256_ID.test(value)) {
     throw storeError('replay-project-invalid', 'replay project identity is invalid');
@@ -93,6 +99,51 @@ async function writeAuthenticated(file, record, env) {
   await atomicOwnerOnlyWrite(file, canonicalize(record), {
     root: homeDir(env),
     maxBytes: REPLAY_METADATA_BYTES,
+  });
+}
+
+export async function writeReplayManifest({
+  env = process.env,
+  projectIdentityDigest,
+  manifest,
+}) {
+  const paths = replayProjectPaths({ env, projectIdentityDigest });
+  await writeAuthenticated(paths.manifest, manifest, env);
+}
+
+export async function markReplayRecovery({
+  env = process.env,
+  key,
+  projectIdentityDigest,
+  recoveredAt = new Date().toISOString(),
+}) {
+  const prior = await readReplayManifest({
+    env,
+    key,
+    projectIdentityDigest,
+  });
+  const manifest = sealRecord(key, AUTH_DOMAINS.replayManifest, {
+    ...prior,
+    lastRecoveredAt: recoveredAt,
+    mac: undefined,
+  });
+  await writeReplayManifest({ env, projectIdentityDigest, manifest });
+  return manifest;
+}
+
+export async function writeReplayRecord({
+  env = process.env,
+  projectIdentityDigest,
+  record,
+}) {
+  const paths = replayProjectPaths({ env, projectIdentityDigest });
+  const file = path.join(
+    paths.records,
+    `${digestSegment(record.replayIdentity)}.json`,
+  );
+  await atomicOwnerOnlyWrite(file, canonicalize(record), {
+    root: homeDir(env),
+    maxBytes: REPLAY_RECORD_BYTES,
   });
 }
 
@@ -212,32 +263,53 @@ export async function commitReplayRecord({
   projectIdentityDigest,
   record,
 }) {
-  const paths = replayProjectPaths({ env, projectIdentityDigest });
-  const file = path.join(
-    paths.records,
-    `${digestSegment(record.replayIdentity)}.json`,
-  );
-  await atomicOwnerOnlyWrite(file, canonicalize(record), {
-    root: homeDir(env),
-    maxBytes: REPLAY_RECORD_BYTES,
+  await writeReplayRecord({ env, projectIdentityDigest, record });
+  const manifest = await buildNextReplayManifest({
+    env,
+    key,
+    projectIdentityDigest,
+    record,
   });
+  await writeReplayManifest({ env, projectIdentityDigest, manifest });
+  return manifest;
+}
+
+export async function buildNextReplayManifest({
+  env = process.env,
+  key,
+  projectIdentityDigest,
+  record,
+}) {
+  const paths = replayProjectPaths({ env, projectIdentityDigest });
   const entries = [];
+  let included = false;
   for (const name of (await fs.readdir(paths.records)).sort()) {
     if (!/^[0-9a-f]{64}\.json$/.test(name)) {
       throw storeError('replay-record-entry-invalid', 'unsafe replay record entry');
     }
     const identity = `sha256:${name.slice(0, -5)}`;
-    const current = await readReplayRecord({
-      env,
-      key,
-      projectIdentityDigest,
-      replayIdentity: identity,
-    });
+    const current = identity === record.replayIdentity
+      ? record
+      : await readReplayRecord({
+        env,
+        key,
+        projectIdentityDigest,
+        replayIdentity: identity,
+      });
+    if (identity === record.replayIdentity) included = true;
     entries.push([
       current.replayIdentity,
       current.recordGeneration,
       current.mac,
     ]);
+  }
+  if (!included) {
+    entries.push([
+      record.replayIdentity,
+      record.recordGeneration,
+      record.mac,
+    ]);
+    entries.sort((left, right) => left[0].localeCompare(right[0]));
   }
   const prior = await readReplayManifest({
     env,
@@ -250,6 +322,5 @@ export async function commitReplayRecord({
     recordIndexDigest: sha256(Buffer.from(canonicalize(entries), 'utf8')),
     mac: undefined,
   });
-  await writeAuthenticated(paths.manifest, manifest, env);
   return manifest;
 }
