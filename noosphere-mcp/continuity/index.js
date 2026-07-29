@@ -1127,7 +1127,11 @@ async function recallTypedMemories(root, config, {
     });
   }
   if (followupsRes?.memories?.length > 0) {
-    result.followups = await Promise.all(followupsRes.memories.map(async m => {
+    // Every replay observation takes the same fail-fast project lock. Running
+    // these concurrently makes one item win and downgrades the rest to
+    // UNAVAILABLE with replay-lock-busy. Preserve the remote order and commit
+    // each bounded observation before starting the next one.
+    for (const m of followupsRes.memories) {
       const observed = await observeTypedMemory({
         env,
         projectRoot: root,
@@ -1135,7 +1139,7 @@ async function recallTypedMemories(root, config, {
         memory: m,
         now: now ?? (() => new Date()),
       });
-      return {
+      result.followups.push({
         timestamp: sanitizeMemoryText(String(m.timestamp || 'time unknown'), { maxLength: 64 }),
         source: sanitizeMemoryText(String(m.agent_id || 'walrus-restore'), { maxLength: 128 }),
         agent_id: sanitizeMemoryText(String(m.agent_id || 'walrus-restore'), { maxLength: 128 }),
@@ -1143,8 +1147,8 @@ async function recallTypedMemories(root, config, {
         content: observed.content,
         replayClassification: observed.replayClassification,
         freshness: observed.freshness,
-      };
-    }));
+      });
+    }
   }
   return result;
 }

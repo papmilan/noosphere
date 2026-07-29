@@ -299,6 +299,24 @@ unresolved, and the ordering must not depend on whether the caller happens to
 have a terminal. Run `noosphere restore recover` first if you want the recovery
 and the apply to be separate, auditable steps.
 
+### Replay inspection and crash locks
+
+`replay status` and `replay list` authenticate bounded replay evidence and never
+recover, clear, reset, or rewrite it. There is no replay unlock or replay-key
+repair command.
+
+A replay project or identity lock that survives process death requires owner
+intervention. A retry refuses it as `replay-lock-busy`; Noosphere never guesses
+that a lock is stale from a PID, timestamp, boot time, or pathname, and never
+deletes it automatically. After independently confirming that no replay
+operation is live and removing the surviving lock artifact, rerun the original
+production operation. That ordinary path authenticates and converges the
+incomplete replay journal before observing new content.
+
+Typed context refresh processes recalled follow-ups in response order. It does
+not launch replay observations concurrently, because every item participates
+in the same fail-fast replay project lock.
+
 ### Terminal requirement
 
 Trust mutations and `restore stage` require both TTY streams before reading or

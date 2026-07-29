@@ -187,7 +187,10 @@ Replay-journal recovery MUST be reached automatically by every production
 operation that can mutate replay state, before that operation observes new
 content. Recovery MUST NOT exist only as a test helper or direct internal test
 entry point. Read-only inspection reports incomplete recovery state but never
-performs recovery.
+performs recovery. If process death leaves a replay lock artifact, the first
+production retry MUST fail closed without deleting it. After the owner has
+independently established that no operation is live and removed the lock
+artifact, the next normal production retry MUST reach recovery automatically.
 
 ### RPL-I13 — global lock hierarchy
 
@@ -656,7 +659,10 @@ Replay lock files:
 Candidate-index locks use a distinct restore-authenticated lock domain and
 strictly bind project identity, trusted local slot, and candidate payload hash.
 Every present or unusable replay or candidate-index lock requires owner
-intervention. Lock policy has no effect on authority locks.
+intervention. A surviving crash lock therefore blocks journal recovery until
+the owner independently establishes that no operation is live and removes the
+lock artifact; the next production mutation then enters the ordinary recovery
+boundary. Lock policy has no effect on authority locks.
 
 ## 12. Crash journal and recovery
 
@@ -709,8 +715,10 @@ Production reachability is mandatory:
   candidate matching or creation;
 - structured ordinary recall invokes recovery before replay observation;
 - typed context refresh invokes recovery before replay observation;
-- a normal retry after process death reaches the same recovery code without
-  importing an internal recovery helper directly;
+- after process death, a retry with a surviving lock refuses without mutation;
+  after explicit owner lock intervention, a normal production retry reaches
+  the same recovery code without importing an internal recovery helper
+  directly;
 - read-only replay inspection detects and reports incomplete journals but does
   not recover them.
 
@@ -1180,9 +1188,10 @@ Each test below is mandatory.
 - **RPL-T047:** replay recovery never imports or calls any authority/restore
   writer.
 - **RPL-T048:** real child-process invocations of `restore stage`, structured
-  ordinary recall, and typed context refresh each recover an authenticated
-  interrupted journal before observing new content; tests do not call recovery
-  directly.
+  ordinary recall, and typed context refresh each refuse a surviving crash lock
+  without deleting it and, after explicit owner lock intervention, recover an
+  authenticated interrupted journal before observing new content; tests do not
+  call recovery directly.
 - **RPL-T049:** `replay status` and `replay list` report incomplete journals
   without byte changes, while a subsequent production mutation path performs
   recovery.
@@ -1302,8 +1311,9 @@ head:
 13. exact-head independent hostile security review;
 14. verification record pinned to the reviewed implementation head;
 15. no Critical or Important hostile-review findings;
-16. child-process proof that every production replay mutation path reaches
-    recovery and both inspection commands remain byte-for-byte read-only;
+16. child-process proof that every production replay mutation path refuses
+    surviving crash locks, reaches recovery after explicit owner lock
+    intervention, and leaves both inspection commands byte-for-byte read-only;
 17. replay/candidate artifact scans and schema tests proving complete identity
     separation;
 18. global lock-rank conformance and hostile concurrency tests;
@@ -1336,7 +1346,7 @@ Until then, SEC-05 remains open and the project remains not public-ready.
 | A13 cross-session replay | persistent replay records, monotonic state/count, ordinary labels, typed suppression |
 | replay flooding | fixed record/age/size bounds and deterministic compaction |
 | metadata spoofing | metadata excluded from replay identity, retention, and authority |
-| crash/race replay loss | global ranked locks plus production-reachable authenticated exact-state journal recovery |
+| crash/race replay loss | global ranked locks, fail-closed owner intervention for surviving crash locks, then production-reachable authenticated exact-state journal recovery |
 
 ## 27. Rejected alternatives
 

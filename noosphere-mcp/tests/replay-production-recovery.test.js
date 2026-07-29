@@ -61,7 +61,7 @@ function crash(context) {
   assert.equal(child.signal, 'SIGKILL', child.stderr);
 }
 
-async function clearLocks(context) {
+async function performOwnerLockIntervention(context) {
   const paths = replayProjectPaths({
     env: context.env,
     projectIdentityDigest: context.projectIdentityDigest,
@@ -72,19 +72,23 @@ async function clearLocks(context) {
   await fs.unlink(path.join(paths.project, 'ledger.lock'));
 }
 
-async function assertRecovered(context) {
+async function strandedRecord(context) {
   const key = await loadReplayKey({ env: context.env });
   const replayIdentity = deriveReplayIdentity({
     projectIdentityDigest: context.projectIdentityDigest,
     slot: 'ordinary',
     content: STRANDED_CONTENT,
   }).replayIdentity;
-  const record = await readReplayRecord({
+  return readReplayRecord({
     env: context.env,
     key,
     projectIdentityDigest: context.projectIdentityDigest,
     replayIdentity,
   });
+}
+
+async function assertRecovered(context) {
+  const record = await strandedRecord(context);
   assert.equal(record.replayCount, 1);
   assert.equal(record.firstSeen.eventId, STRANDED_EVENT);
 }
@@ -117,20 +121,30 @@ async function runEntry(context, mode) {
       stderr: Buffer.concat(stderr).toString('utf8'),
     }));
   });
-  assert.equal(result.status, 0, result.stderr || result.signal);
+  return result;
 }
 
 for (const mode of ['restore-stage', 'ordinary']) {
-  test(`${mode} production entry recovers a stranded journal first`, async () => {
+  test(`${mode} refuses a stranded crash lock, then recovers after owner intervention`, async () => {
     const context = await fixture(mode);
     crash(context);
-    await clearLocks(context);
-    await runEntry(context, mode);
+    const refused = await runEntry(context, mode);
+    if (mode === 'restore-stage') {
+      assert.notEqual(refused.status, 0);
+      assert.match(refused.stderr, /replay-lock-busy/);
+    } else {
+      assert.equal(refused.status, 0, refused.stderr || refused.signal);
+    }
+    assert.equal(await strandedRecord(context), null);
+
+    await performOwnerLockIntervention(context);
+    const recovered = await runEntry(context, mode);
+    assert.equal(recovered.status, 0, recovered.stderr || recovered.signal);
     await assertRecovered(context);
   });
 }
 
-test('typed context refresh production entry recovers a stranded journal first', async () => {
+test('typed context refresh refuses a crash lock, then recovers after owner intervention', async () => {
   const context = await fixture('context-refresh');
   await fs.writeFile(
     path.join(context.projectRoot, '.noosphere', 'master-prompt.md'),
@@ -170,8 +184,13 @@ test('typed context refresh production entry recovers a stranded journal first',
       }),
     );
     crash(context);
-    await clearLocks(context);
-    await runEntry(context, 'context-refresh');
+    const refused = await runEntry(context, 'context-refresh');
+    assert.equal(refused.status, 0, refused.stderr || refused.signal);
+    assert.equal(await strandedRecord(context), null);
+
+    await performOwnerLockIntervention(context);
+    const recovered = await runEntry(context, 'context-refresh');
+    assert.equal(recovered.status, 0, recovered.stderr || recovered.signal);
     await assertRecovered(context);
     const rendered = await fs.readFile(
       path.join(context.projectRoot, '.noosphere', 'context.md'),

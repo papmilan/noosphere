@@ -282,6 +282,12 @@ owner-local replay evidence without expanding authority:
   with no persisted cross-reference;
 - all replay/restore mutations follow the ranked lock hierarchy and recover
   authenticated incomplete replay journals before observing new content;
+- a replay lock surviving process death is never guessed stale or deleted
+  automatically: production retries fail closed until the owner independently
+  confirms no operation is live and removes that lock, after which the normal
+  production path performs authenticated journal recovery;
+- multi-item typed refresh commits replay observations in response order so its
+  fail-fast project lock cannot make the refresh contend with itself;
 - ordinary duplicates stay visible and receive informational replay/freshness
   labels; typed restore may suppress only an already-matching authenticated
   local candidate;

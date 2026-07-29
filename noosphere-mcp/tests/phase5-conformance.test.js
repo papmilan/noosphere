@@ -308,4 +308,30 @@ test('ordinary recall preserves every item and cannot silently deduplicate', asy
   );
   assert.match(presentation, /for \(const memory of response\.memories\) \{/);
   assert.doesNotMatch(presentation, /response\.memories\.slice\(0, 1\)/);
+
+  const orchestration = await source('noosphere-mcp/continuity/index.js');
+  assert.match(
+    orchestration,
+    /for \(const m of followupsRes\.memories\) \{/,
+  );
+  assert.doesNotMatch(
+    orchestration,
+    /Promise\.all\(followupsRes\.memories\.map/,
+  );
+});
+
+test('crash-lock policy and production recovery contract are coherent', async () => {
+  const specification = await fs.readFile(SPEC, 'utf8');
+  assert.match(
+    specification,
+    /retry with a surviving lock refuses without mutation/i,
+  );
+  assert.match(
+    specification,
+    /after explicit owner lock intervention, a normal production retry reaches/i,
+  );
+  assert.doesNotMatch(
+    specification,
+    /a normal retry after process death reaches the same recovery code without/,
+  );
 });

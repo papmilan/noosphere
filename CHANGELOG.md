@@ -24,9 +24,12 @@ Dates are npm publish dates. The format follows
   byte-for-byte read-only `replay status` and bounded `replay list`; package,
   MCP, HTTP, hook, lifecycle, adapter, and relayer surfaces expose no replay
   writer or replay-key reset/reinitialization operation. All 26 normative
-  mutants are killed and every RPL invariant/test identifier is mapped. This
-  entry does **not** close SEC-05: exact-head Linux/macOS/Windows CI and
-  independent hostile review remain mandatory.
+  mutants are killed and every RPL invariant/test identifier is mapped.
+  Multi-item typed refresh serializes replay observations to avoid self-lock
+  evidence loss, and crash-lock behavior now explicitly refuses until owner
+  intervention before production-path journal recovery. This entry does
+  **not** close SEC-05: exact-head Linux/macOS/Windows CI and independent
+  hostile review remain mandatory.
 - **SEC-03 (Windows owner-only persistence) — closes SEC-03.** The centralized
   `@noosphere/secure-fs` boundary now enforces an exact three-SID Windows DACL
   (token user SID, `S-1-5-18`, `S-1-5-32-544`) via a fixed PowerShell/.NET helper:
