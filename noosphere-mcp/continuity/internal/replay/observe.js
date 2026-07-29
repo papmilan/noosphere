@@ -39,12 +39,26 @@ function validateInput(input) {
   }
 }
 
-export async function observeReplay(input) {
+export function prepareReplayObservation(input) {
   const normalizedInput = {
     ...input,
     eventId: input.eventId ?? randomUUID(),
   };
   validateInput(normalizedInput);
+  const identity = deriveReplayIdentity({
+    projectIdentityDigest: normalizedInput.projectIdentityDigest,
+    slot: normalizedInput.slot,
+    content: normalizedInput.content,
+  });
+  return Object.freeze({ input: normalizedInput, identity });
+}
+
+export async function observeReplayInOperation(
+  prepared,
+  { key, scope },
+) {
+  const normalizedInput = prepared.input;
+  const identity = prepared.identity;
   const {
     env = process.env,
     projectIdentityDigest,
@@ -57,91 +71,96 @@ export async function observeReplay(input) {
     duplicateCandidate,
     onStep,
   } = normalizedInput;
-  const identity = deriveReplayIdentity({
+  const prior = await readReplayRecord({
+      env,
+      key,
+      projectIdentityDigest,
+      replayIdentity: identity.replayIdentity,
+  });
+  if (prior?.lastSeen.eventId === eventId) {
+    return Object.freeze({
+      classification: prior.lastClassification,
+      record: prior,
+      recovered: true,
+    });
+  }
+  const priorManifest = await readReplayManifest({
+    env,
+    key,
+    projectIdentityDigest,
+  });
+  const next = classifyReplayObservation({
+    priorCount: prior?.replayCount ?? 0,
+    duplicateCandidate,
+  });
+  const effectiveObservedAt =
+    prior && prior.lastSeen.observedAt > observedAt
+      ? prior.lastSeen.observedAt
+      : observedAt;
+  const seen = Object.freeze({
+    eventId,
+    observedAt: effectiveObservedAt,
+    recallIdentity,
+  });
+  const fields = {
+    domain: AUTH_DOMAINS.replayRecord,
+    schema: 'noosphere.replay-record',
+    version: 1,
+    replayIdentity: identity.replayIdentity,
     projectIdentityDigest,
     slot,
-    content,
+    payloadDigest: identity.payloadDigest,
+    recallIdentity,
+    firstSeen: prior?.firstSeen ?? seen,
+    lastSeen: seen,
+    replayCount: next.replayCount,
+    state: next.state,
+    lastClassification: next.classification,
+    origin,
+    recordGeneration: next.replayCount,
+    keyId: replayKeyId(key),
+  };
+  const record = sealRecord(key, AUTH_DOMAINS.replayRecord, fields);
+  const nextManifest = await buildNextReplayManifest({
+    env,
+    key,
+    projectIdentityDigest,
+    record,
   });
+  await commitReplayJournalTransaction({
+    env,
+    key,
+    projectIdentityDigest,
+    replayIdentity: identity.replayIdentity,
+    eventId,
+    observedAt,
+    priorRecord: prior,
+    priorManifest,
+    nextRecord: record,
+    nextManifest,
+    scope,
+    onStep,
+  });
+  return Object.freeze({
+    classification: next.classification,
+    record,
+  });
+}
+
+export async function observeReplay(input) {
+  const prepared = prepareReplayObservation(input);
+  const { input: normalizedInput, identity } = prepared;
+  const {
+    env = process.env,
+    projectIdentityDigest,
+    observedAt,
+    onStep,
+  } = normalizedInput;
   return withReplayOperation({
     env,
     projectIdentityDigest,
     replayIdentity: identity.replayIdentity,
     observedAt,
     onStep,
-  }, async ({ key, scope }) => {
-    const prior = await readReplayRecord({
-      env,
-      key,
-      projectIdentityDigest,
-      replayIdentity: identity.replayIdentity,
-    });
-    if (prior?.lastSeen.eventId === eventId) {
-      return Object.freeze({
-        classification: prior.lastClassification,
-        record: prior,
-        recovered: true,
-      });
-    }
-    const priorManifest = await readReplayManifest({
-      env,
-      key,
-      projectIdentityDigest,
-    });
-    const next = classifyReplayObservation({
-      priorCount: prior?.replayCount ?? 0,
-      duplicateCandidate,
-    });
-    const effectiveObservedAt =
-      prior && prior.lastSeen.observedAt > observedAt
-        ? prior.lastSeen.observedAt
-        : observedAt;
-    const seen = Object.freeze({
-      eventId,
-      observedAt: effectiveObservedAt,
-      recallIdentity,
-    });
-    const fields = {
-      domain: AUTH_DOMAINS.replayRecord,
-      schema: 'noosphere.replay-record',
-      version: 1,
-      replayIdentity: identity.replayIdentity,
-      projectIdentityDigest,
-      slot,
-      payloadDigest: identity.payloadDigest,
-      recallIdentity,
-      firstSeen: prior?.firstSeen ?? seen,
-      lastSeen: seen,
-      replayCount: next.replayCount,
-      state: next.state,
-      lastClassification: next.classification,
-      origin,
-      recordGeneration: next.replayCount,
-      keyId: replayKeyId(key),
-    };
-    const record = sealRecord(key, AUTH_DOMAINS.replayRecord, fields);
-    const nextManifest = await buildNextReplayManifest({
-      env,
-      key,
-      projectIdentityDigest,
-      record,
-    });
-    await commitReplayJournalTransaction({
-      env,
-      key,
-      projectIdentityDigest,
-      replayIdentity: identity.replayIdentity,
-      eventId,
-      observedAt,
-      priorRecord: prior,
-      priorManifest,
-      nextRecord: record,
-      nextManifest,
-      scope,
-      onStep,
-    });
-    return Object.freeze({
-      classification: next.classification,
-      record,
-    });
-  });
+  }, context => observeReplayInOperation(prepared, context));
 }

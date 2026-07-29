@@ -33,9 +33,14 @@ export const WRITER_MODULES = Object.freeze({
     writers: Object.freeze([
       'cleanupExpiredCandidates',
       'consumeCandidate',
+      'createRestoreCandidateFromSource',
       'markApplyInProgress',
       'stageRestoreCandidate',
     ]),
+  }),
+  replayRestoreStaging: Object.freeze({
+    module: 'continuity/internal/replay/restore-stage.js',
+    writers: Object.freeze(['stageReplayAwareRestoreCandidate']),
   }),
   restoreApply: Object.freeze({
     module: 'continuity/internal/restore/apply-service.js',
@@ -88,9 +93,11 @@ export const READ_ONLY_EXPORTS = Object.freeze({
   'continuity/internal/restore/candidate-store.js': Object.freeze([
     'listApplyInProgressCandidates',
     'listRestoreCandidates',
+    'matchRestoreCandidateByTuple',
     'readCandidateState',
     'showRestoreCandidate',
   ]),
+  'continuity/internal/replay/restore-stage.js': Object.freeze([]),
   'continuity/internal/restore/apply-service.js': Object.freeze([]),
   'continuity/internal/restore/confirmation-store.js': Object.freeze([
     'confirmationPhrase',
@@ -173,7 +180,7 @@ export const MUTATION_ENTRY_MODULES = Object.freeze([
   'continuity/internal/approval-service.js',
   'continuity/internal/migration-service.js',
   'continuity/internal/restore/apply-service.js',
-  'continuity/internal/restore/candidate-store.js',
+  'continuity/internal/replay/restore-stage.js',
   // Phase 4C remediation: recovery is a production entry point now — the apply
   // verb runs it before every transaction, and `restore recover` runs it alone.
   'continuity/internal/restore/recovery.js',

@@ -73,8 +73,10 @@ import { revokeSlot } from './internal/revocation-service.js';
 import {
   listRestoreCandidates,
   showRestoreCandidate,
-  stageRestoreCandidate,
 } from './internal/restore/candidate-store.js';
+import {
+  stageReplayAwareRestoreCandidate,
+} from './internal/replay/restore-stage.js';
 import { applyRestoreCandidate } from './internal/restore/apply-service.js';
 import { recoverRestoreTransactions } from './internal/restore/recovery.js';
 import { parseRestoreArgs } from './internal/restore/cli.js';
@@ -2148,7 +2150,7 @@ async function restoreFromCli(root, args) {
   }
   const parsed = parseRestoreArgs(remaining);
   if (parsed.verb === 'stage') {
-    const result = await stageRestoreCandidate({
+    const result = await stageReplayAwareRestoreCandidate({
       projectRoot: root,
       slot: parsed.slot,
       recallSource: async ({ slot }) => recallRestoreSourceHttp({
@@ -2160,9 +2162,25 @@ async function restoreFromCli(root, args) {
       console.log(`No restore candidate found for ${parsed.slot}.`);
       return;
     }
+    if (result.status === 'already-consumed') {
+      console.log(`Matching ${parsed.slot} candidate was already consumed.`);
+      console.log(`  candidate: ${result.candidateId}`);
+      console.log(`  outcome:   ${result.outcome}`);
+      console.log(`  replay:    ${result.replayClassification}`);
+      return;
+    }
+    if (result.status === 'suppressed') {
+      console.log(`Reused active untrusted ${parsed.slot} candidate.`);
+      console.log(`  candidate: ${result.candidate.candidateId}`);
+      console.log(`  payload:   ${result.candidate.payloadHash}`);
+      console.log(`  replay:    ${result.replayClassification}`);
+      console.log('Project files and authority state were not changed.');
+      return;
+    }
     console.log(`Staged untrusted ${parsed.slot} candidate.`);
     console.log(`  candidate: ${result.candidate.candidateId}`);
     console.log(`  payload:   ${result.candidate.payloadHash}`);
+    console.log(`  replay:    ${result.replayClassification}`);
     console.log('Project files and authority state were not changed.');
     return;
   }

@@ -312,31 +312,118 @@ async function readCandidate({
   });
 }
 
-export async function stageRestoreCandidate({
+export async function matchRestoreCandidateByTuple({
   projectRoot,
   slot,
+  candidatePayloadHash,
   env = process.env,
   secureFileOptions = {},
-  input = process.stdin,
-  output = process.stdout,
-  recall,
-  recallSource,
+  now = () => new Date(),
+} = {}) {
+  if (
+    !Object.hasOwn(RESTORE_SLOTS, slot) ||
+    typeof candidatePayloadHash !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(candidatePayloadHash)
+  ) {
+    throw restoreError(
+      'restore-candidate-match-invalid',
+      'restore candidate match tuple is invalid',
+    );
+  }
+  const store = createFormatV2Store({ env, secureFileOptions });
+  const binding = await store.readProjectBinding(projectRoot);
+  const root = store.pathFor(binding, path.join('restore', 'candidates'));
+  const safeRoot = await assertContainedChain(store.pathFor(binding, ''), root);
+  if (safeRoot === null) return Object.freeze({ status: 'absent' });
+  const observedNow = now();
+  if (!(observedNow instanceof Date) || Number.isNaN(observedNow.getTime())) {
+    throw restoreError('restore-clock-invalid', 'restore clock is invalid');
+  }
+  const matches = [];
+  for (const entry of (await fs.readdir(root, { withFileTypes: true }))
+    .sort((left, right) => left.name.localeCompare(right.name))) {
+    if (!/^[a-z2-7]{52}$/.test(entry.name)) continue;
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw restoreError(
+        'restore-candidate-unsafe',
+        'candidate-shaped staging entry is unsafe',
+      );
+    }
+    const candidate = await readCandidate({
+      projectRoot,
+      env,
+      secureFileOptions,
+      candidateId: entry.name,
+    });
+    if (
+      candidate.slot === slot &&
+      candidate.payloadHash === candidatePayloadHash
+    ) {
+      matches.push(candidate);
+    }
+  }
+  if (matches.length > 1) {
+    throw restoreError(
+      'restore-candidate-match-conflict',
+      'multiple authenticated restore candidates match the trusted tuple',
+    );
+  }
+  if (matches.length === 0) return Object.freeze({ status: 'absent' });
+  const candidate = matches[0];
+  if (candidate.candidateState.state === 'apply-in-progress') {
+    return Object.freeze({
+      status: 'apply-in-progress',
+      candidateId: candidate.candidateId,
+    });
+  }
+  if (candidate.candidateState.state === 'consumed') {
+    const { readConsumedMarker } = await import('./receipt-store.js');
+    const marker = await readConsumedMarker({
+      projectRoot,
+      env,
+      secureFileOptions,
+      candidateId: candidate.candidateId,
+    });
+    if (
+      marker.candidatePayloadHash !== candidatePayloadHash ||
+      marker.slot !== slot
+    ) {
+      throw restoreError(
+        'restore-candidate-match-conflict',
+        'consumed marker conflicts with its matching candidate',
+      );
+    }
+    return Object.freeze({
+      status: 'consumed',
+      candidateId: candidate.candidateId,
+      outcome: marker.outcome,
+    });
+  }
+  if (
+    candidate.candidateState.state !== 'active' ||
+    Date.parse(candidate.expiresAt) <= observedNow.getTime()
+  ) {
+    return Object.freeze({ status: 'absent' });
+  }
+  return Object.freeze({ status: 'active', candidate });
+}
+
+export async function createRestoreCandidateFromSource({
+  projectRoot,
+  slot,
+  source,
+  env = process.env,
+  secureFileOptions = {},
   randomBytes,
   now = () => new Date(),
 } = {}) {
-  if (!Object.hasOwn(RESTORE_SLOTS, slot)) {
-    throw restoreError('restore-slot-invalid', 'restore slot is invalid');
+  if (!Object.hasOwn(RESTORE_SLOTS, slot) ||
+      !source || !Buffer.isBuffer(source.content)) {
+    throw restoreError(
+      'restore-candidate-create-invalid',
+      'restore candidate creation input is invalid',
+    );
   }
-  assertInteractiveStreams({
-    input,
-    output,
-    code: 'restore-stage-requires-tty',
-    message: 'restore staging requires an interactive terminal',
-  });
-  const source = recallSource
-    ? await recallSource({ slot })
-    : await recallRestoreSource({ slot, recall });
-  if (source === null) return Object.freeze({ status: 'no-candidate' });
   const derivedSlotBytes = deriveSlotBytes(slot, source.content);
   const store = createFormatV2Store({ env, secureFileOptions });
   const binding = await store.createProjectBinding(projectRoot);
@@ -423,6 +510,42 @@ export async function stageRestoreCandidate({
     'restore-candidate-collision-limit',
     'restore candidate identifier collisions exceeded the fixed retry limit',
   );
+}
+
+export async function stageRestoreCandidate({
+  projectRoot,
+  slot,
+  env = process.env,
+  secureFileOptions = {},
+  input = process.stdin,
+  output = process.stdout,
+  recall,
+  recallSource,
+  randomBytes,
+  now = () => new Date(),
+} = {}) {
+  if (!Object.hasOwn(RESTORE_SLOTS, slot)) {
+    throw restoreError('restore-slot-invalid', 'restore slot is invalid');
+  }
+  assertInteractiveStreams({
+    input,
+    output,
+    code: 'restore-stage-requires-tty',
+    message: 'restore staging requires an interactive terminal',
+  });
+  const source = recallSource
+    ? await recallSource({ slot })
+    : await recallRestoreSource({ slot, recall });
+  if (source === null) return Object.freeze({ status: 'no-candidate' });
+  return createRestoreCandidateFromSource({
+    projectRoot,
+    slot,
+    source,
+    env,
+    secureFileOptions,
+    randomBytes,
+    now,
+  });
 }
 
 /**

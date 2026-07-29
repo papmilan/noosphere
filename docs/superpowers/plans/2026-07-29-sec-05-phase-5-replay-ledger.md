@@ -141,14 +141,14 @@
 - Create: `noosphere-mcp/tests/replay-restore-suppression.test.js`
 - Create: `noosphere-mcp/tests/replay-identity-separation.test.js`
 
-- [ ] RED-test active, apply-in-progress, consumed, conflicting, malformed, and absent candidate outcomes.
-- [ ] RED-test N concurrent identical staging calls create one random candidate, while different slots/content create independent random candidates.
-- [ ] Snapshot/scan every replay and candidate artifact and assert neither domain persists the other identity/path/reference.
-- [ ] Add authenticated candidate lookup by trusted tuple under rank 40 without changing candidate envelopes/state.
-- [ ] Add live orchestration that retains ranks 20/30, acquires rank 40, observes replay, then matches/creates and releases in reverse.
-- [ ] Ensure replay recovery never creates/selects/consumes a candidate and retry can fill only a missing candidate.
-- [ ] Re-run all restore stage/apply/recovery tests.
-- [ ] Commit: `feat(security): suppress duplicate restore candidates`.
+- [x] RED-test active, apply-in-progress, consumed, conflicting, malformed, and absent candidate outcomes.
+- [x] RED-test N concurrent identical staging calls create one random candidate, while different slots/content create independent random candidates.
+- [x] Snapshot/scan every replay and candidate artifact and assert neither domain persists the other identity/path/reference.
+- [x] Add authenticated candidate lookup by trusted tuple under rank 40 without changing candidate envelopes/state.
+- [x] Add live orchestration that retains ranks 20/30, acquires rank 40, observes replay, then matches/creates and releases in reverse.
+- [x] Ensure replay recovery never creates/selects/consumes a candidate and retry can fill only a missing candidate.
+- [x] Re-run all restore stage/apply/recovery tests.
+- [x] Commit: `feat(security): suppress duplicate restore candidates`.
 
 ### Task 8: Structured ordinary recall and typed context labels
 

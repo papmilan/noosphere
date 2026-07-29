@@ -12,6 +12,12 @@ const INPUT_FIELDS = [
   'slot',
 ];
 const INPUT_FIELD_SET = new Set(INPUT_FIELDS);
+const RECALL_INPUT_FIELDS = new Set([
+  'actionId',
+  'blobId',
+  'payloadDigest',
+]);
+const AUDIT_METADATA_BYTES = 4_096;
 
 function sha256(value) {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -62,4 +68,36 @@ export function deriveReplayIdentity(input) {
     payloadDigest,
     replayIdentity,
   });
+}
+
+function boundedAuditValue(value) {
+  return typeof value === 'string' &&
+    Buffer.byteLength(value, 'utf8') <= AUDIT_METADATA_BYTES
+    ? value
+    : null;
+}
+
+export function deriveRecallIdentity(input) {
+  const keys = input && typeof input === 'object'
+    ? Reflect.ownKeys(input)
+    : [];
+  if (
+    !input ||
+    typeof input !== 'object' ||
+    Array.isArray(input) ||
+    Object.getPrototypeOf(input) !== Object.prototype ||
+    keys.length !== RECALL_INPUT_FIELDS.size ||
+    !keys.every(key =>
+      typeof key === 'string' && RECALL_INPUT_FIELDS.has(key)) ||
+    typeof input.payloadDigest !== 'string' ||
+    !PROJECT_IDENTITY_DIGEST.test(input.payloadDigest)
+  ) {
+    throw new TypeError('recall identity input is invalid');
+  }
+  return sha256(Buffer.from(canonicalize([
+    'noosphere.remote-recall-identity.v1',
+    boundedAuditValue(input.actionId),
+    boundedAuditValue(input.blobId),
+    input.payloadDigest,
+  ]), 'utf8'));
 }

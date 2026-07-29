@@ -87,6 +87,7 @@ describe('SEC-05 Phase 4C Task 9 — authority-writer surface audit', () => {
       'restore apply': [
         ...WRITER_MODULES.restoreApply.writers,
         ...WRITER_MODULES.restoreStaging.writers,
+        ...WRITER_MODULES.replayRestoreStaging.writers,
       ],
       receipt: ['commitRestoreReceipt'],
       'consumed marker': ['commitConsumedMarker'],
@@ -230,7 +231,7 @@ describe('SEC-05 Phase 4C Task 9 — authority-writer surface audit', () => {
       'approveSlot',
       'revokeSlot',
       'migrateTrustInventory',
-      'stageRestoreCandidate',
+      'stageReplayAwareRestoreCandidate',
       'applyRestoreCandidate',
     ];
     for (const name of entryPoints) {
