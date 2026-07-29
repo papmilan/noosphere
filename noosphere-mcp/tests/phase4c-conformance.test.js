@@ -329,6 +329,38 @@ describe('SEC-05 Phase 4C Task 10 — conformance gate', () => {
     }
   });
 
+  it('rejects stale Phase 4C verification head, lock policy, and CI claims', async () => {
+    const record = await fs.readFile(
+      path.join(repoRoot, 'docs/security/SEC-05-PHASE-4C-VERIFICATION.md'), 'utf8',
+    );
+    const normalized = record.replace(/\s+/g, ' ');
+    for (const stale of ['f8c8689', '30377401209', '30373372871', 'reclaims the abandoned lock']) {
+      assert.equal(record.includes(stale), false, `verification record retains stale claim: ${stale}`);
+    }
+    assert.equal(/non-destructive recover verb/i.test(normalized), false,
+      'verification record falsely claims that journal-less recovery cannot mutate owner-local state');
+    for (const required of [
+      'runtime remediation head `cbbef81`',
+      'test-shard head `a8552d3`',
+      'live `git rev-parse HEAD` is the review target',
+      '119/119',
+      '27/27',
+      '63/63',
+      '30405130395',
+      'old head `324f658`',
+      '13 passing checks and one failing Windows MCP check',
+      '12 slow recovery CLI cases passed',
+      '1,800-second wrapper timeout',
+      '5/8/6/8',
+      'new exact-head runner',
+      'Release remains blocked on a new exact-head tri-platform CI run',
+    ]) {
+      assert.ok(normalized.includes(required), `verification record omits: ${required}`);
+    }
+    assert.equal(/Windows[^\n]*\bpass\b/i.test(record), false,
+      'verification record marks Windows as passing before an exact-head runner');
+  });
+
   // ------------------------------------------------ the seven fail conditions
 
   it('fails if any authority mutation path becomes public', async () => {

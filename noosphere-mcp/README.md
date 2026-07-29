@@ -301,14 +301,21 @@ and the apply to be separate, auditable steps.
 
 ### Terminal requirement
 
-`trust migrate`, `trust approve`, `trust revoke`, `restore stage`, and
-`restore apply` refuse unless **both** stdin and stdout are a terminal. Piped
-stdin, redirected stdout, CI runners, and agent-driven shells are refused with
-exit 4 before any state is created or read.
+Trust mutations and `restore stage` require both TTY streams before reading or
+mutating their operation state. Piped stdin, redirected stdout, CI runners, and
+agent-driven shells are refused with exit 4 before those commands read or
+change their operation state.
+
+`restore apply` runs recovery before its TTY check. Its exit 4 can therefore
+follow reads or mutations made by recovery, but
+it creates no new apply transaction for the refused request. After recovery,
+apply still requires **both** stdin and stdout to be terminals before it reads
+the requested candidate or begins its own transaction.
 
 `restore list`, `restore show`, and `restore recover` do not require a terminal:
-the first two only read, and `recover` only completes transactions that an
-authenticated journal already committed to.
+the first two only read. `recover` may converge authenticated journal
+transactions or the narrow authenticated pre-journal window described below; it
+cannot stage, approve, revoke, or start a new apply transaction.
 
 There is **no** `--yes`, `--force`, `--non-interactive`, or `--batch` flag; no
 environment variable that skips a confirmation; no configuration key that grants
@@ -350,40 +357,39 @@ says the bytes remain untrusted and points you at `noosphere trust approve`.
 
 ### Crash recovery
 
-If a process dies mid-apply, the transaction is resolved before anything else
-can touch that slot:
+If a process dies mid-apply, recovery resolves only authenticated evidence
+before anything else can touch that slot:
 
 - Every `restore apply` runs recovery first, before the confirmation prompt,
   before the terminal check, and before any new transaction exists. An apply
-  that is then refused — including with exit 4 for a missing terminal — has
-  still converged whatever recovery found.
+  that is then refused — including with exit 4 for a missing terminal — can
+  have converged recovery, but it creates no new apply transaction.
 - `noosphere restore recover` runs the same pass on demand.
 
-Recovery is driven entirely by the authenticated apply journal, never by what
-the destination file currently contains. **A destination is never replaced
-twice.** A transaction that had already committed its replacement converges by
-finishing its receipt and consumed marker; one that had not converges by
-discarding its temporary file and marking the candidate failed.
+`restore recover` may converge authenticated apply-journal transactions. It may
+also converge the narrow pre-journal crash window represented by an
+authenticated spent confirmation plus a matching `apply-in-progress` candidate,
+but only after observing no slot lock and rechecking that no journal appeared.
+Recovery is never driven by destination bytes alone. **A destination is never
+replaced twice.**
 
-A crash leaves the slot lock held. Recovery reclaims that lock only when it can
-prove the lock is this project's own, for this transaction, under this owner
-scope and machine key — and that the process that wrote it no longer exists.
-**A lock is never reclaimed because it is old**, and no clock or uptime reading
-takes part in the decision. A lock held by a live process, a malformed lock, a
-lock whose MAC does not verify, a lock from another project or owner, and a lock
-whose ownership cannot be proven are all left exactly as found.
+A present slot lock requires owner intervention, including one whose PID is
+gone. Recovery never deletes a slot lock automatically. The owner may remove it
+only after independently confirming no transaction is live, then rerun
+recovery. This is intentionally fail-closed: a malformed, unauthenticated,
+foreign, conflicting, or merely present lock is left exactly as found.
 
-One consequence worth knowing: after a reboot, the dead transaction's process ID
-may have been reused by an unrelated running process. Recovery then reports the
-lock as live and refuses, indefinitely. That is deliberate — the alternative was
-a clock-based heuristic that could reclaim a lock from a *running* transaction —
-and it is visible rather than silent: you get exit 4 naming the process ID, and
-can remove the lock yourself once you have confirmed it is stale.
+A `prepared` journal never implies a rename. An exact authenticated temporary
+may be discarded and the candidate failed; an unexpected destination
+requires owner intervention. A later authenticated journal state may finish its
+receipt and consumed marker, but never performs a second destination
+replacement. The complete final recovery barrier is repeated while holding the
+slot lock before any mutation.
 
 #### Owner intervention required
 
-Recovery exits 4 with `ERR_RESTORE_OWNER_INTERVENTION_REQUIRED` and changes
-nothing when the evidence conflicts. The most important case:
+Recovery exits 4 with `ERR_RESTORE_OWNER_INTERVENTION_REQUIRED` when the
+evidence conflicts. The most important case:
 
 > **The destination changed after the replacement committed.** Recovery will not
 > touch it. Your file is left exactly as it is; inspect it and decide yourself.

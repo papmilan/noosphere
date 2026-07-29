@@ -175,8 +175,14 @@ describe('SEC-05 Phase 4C — operator documentation', () => {
     assert.ok(reference.includes('noosphere restore recover'), 'the recover verb is not documented');
     assert.ok(/destination is never replaced\s*\n?\s*twice/i.test(reference.replace(/\s+/g, ' ')),
       'the no-repeat-replacement guarantee is not documented');
-    assert.ok(/never reclaimed because it is old/i.test(reference),
-      'the reference does not rule out age-based lock reclamation');
+    assert.ok(/present slot lock.*owner intervention/i.test(reference.replace(/\s+/g, ' ')),
+      'the reference does not require owner intervention for every present slot lock');
+    assert.ok(/including one whose PID is gone/i.test(reference.replace(/\s+/g, ' ')),
+      'the reference still treats a missing PID as permission to remove a lock');
+    assert.ok(/never deletes a slot lock automatically/i.test(reference),
+      'the reference does not rule out automatic lock deletion');
+    assert.ok(/independently confirm(?:ing)? no transaction is live/i.test(reference),
+      'the reference omits the owner\'s live-transaction check before lock removal');
     assert.ok(reference.includes('ERR_RESTORE_OWNER_INTERVENTION_REQUIRED'),
       'the owner-intervention outcome is not named');
     assert.ok(/changed after the replacement committed/i.test(reference),
@@ -307,5 +313,49 @@ describe('SEC-05 Phase 4C — operator documentation', () => {
       const source = await fs.readFile(path.join(packageRoot, file), 'utf8');
       assert.ok(source.includes(code), `${file} no longer refuses without a terminal (${code})`);
     }
+  });
+
+  it('documents the fail-closed recovery ordering and evidence limits', async () => {
+    const reference = await doc(REFERENCE);
+    const normalized = reference.replace(/\s+/g, ' ');
+
+    assert.match(normalized,
+      /trust mutations and `restore stage` require both TTY streams before reading or mutating their operation state/i,
+      'the pre-read TTY contract is not documented');
+    assert.match(normalized,
+      /`restore apply` runs recovery before its TTY check/i,
+      'the apply-before-TTY recovery ordering is not documented');
+    assert.match(normalized,
+      /creates no new apply transaction for the refused request/i,
+      'the refused apply transaction guarantee is not documented');
+    assert.match(normalized,
+      /authenticated apply-journal transactions/i,
+      'the authenticated journal recovery path is not documented');
+    assert.match(normalized,
+      /authenticated spent confirmation.*matching `apply-in-progress` candidate/i,
+      'the narrow journal-less recovery window is not documented');
+    assert.match(normalized,
+      /no slot lock.*rechecking that no journal appeared/i,
+      'the journal-less recovery race barrier is not documented');
+    assert.match(normalized,
+      /never driven by destination bytes alone/i,
+      'the recovery evidence limit is not documented');
+    assert.match(normalized,
+      /`prepared` journal never implies a rename/i,
+      'prepared-journal semantics are not documented');
+    assert.match(normalized,
+      /exact authenticated temporary may be discarded/i,
+      'the prepared temporary disposition is not documented');
+    assert.match(normalized,
+      /unexpected destination requires owner intervention/i,
+      'the prepared unexpected-destination refusal is not documented');
+    assert.match(normalized,
+      /complete final recovery barrier is repeated while holding the slot lock before any mutation/i,
+      'the under-lock final recovery barrier is not documented');
+    assert.equal(
+      /`recover` only completes transactions that an authenticated journal already committed to/i.test(normalized),
+      false,
+      'the reference falsely excludes the authenticated journal-less recovery window',
+    );
   });
 });
