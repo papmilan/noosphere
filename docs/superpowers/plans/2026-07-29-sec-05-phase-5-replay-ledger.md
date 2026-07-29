@@ -72,19 +72,18 @@
 - Create: `noosphere-mcp/continuity/internal/replay/lock.js`
 - Create: `noosphere-mcp/continuity/internal/restore/candidate-index-lock.js`
 - Create: `noosphere-mcp/tests/replay-lock-hierarchy.test.js`
-- Modify: `noosphere-mcp/tests/restore-candidate.test.js`
 
 **Interfaces:**
 - `createRankedLockScope()` returns an opaque scope with current rank/key.
 - Replay lock acquisition accepts only ranks 10/20/30.
 - Restore candidate-index acquisition accepts only rank 40 and the trusted tuple; it never accepts replay identity.
 
-- [ ] RED-test ascending ranks, descending refusal before mutation, lexical same-rank order, reverse release, malformed/present lock refusal, and no stale deletion.
-- [ ] RED-test that candidate-index lock files bind project, slot, and payload hash in a distinct restore MAC domain.
-- [ ] Implement common rank assertions and domain-specific lock adapters using existing owner-only/no-follow primitives.
-- [ ] Ensure rank 60 cannot begin while the opaque scope holds ranks 20–50.
-- [ ] Re-run focused lock, restore candidate, and authority lock tests.
-- [ ] Commit: `feat(security): enforce replay restore lock hierarchy`.
+- [x] RED-test ascending ranks, descending refusal before mutation, lexical same-rank order, reverse release, malformed/present lock refusal, and no stale deletion.
+- [x] RED-test that candidate-index lock files bind project, slot, and payload hash in a distinct restore MAC domain.
+- [x] Implement common rank assertions and domain-specific lock adapters using existing owner-only/no-follow primitives.
+- [x] Ensure rank 60 cannot begin while the opaque scope holds ranks 20–50.
+- [x] Re-run focused lock, restore candidate, and authority lock tests.
+- [x] Commit: `feat(security): enforce replay restore lock hierarchy`.
 
 ### Task 4: Replay store and monotonic observation state
 

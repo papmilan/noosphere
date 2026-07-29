@@ -75,7 +75,7 @@ test('declares six replay-only authenticated domains', () => {
 
 test('replay domains reject every ordered authority/restore/replay substitution', () => {
   const entries = Object.entries(AUTH_DOMAINS);
-  assert.equal(entries.length, 18);
+  assert.equal(entries.length, 19);
   for (const [sourceName, sourceDomain] of entries) {
     const sealed = sealRecord(KEY, sourceDomain, {
       domain: sourceDomain,

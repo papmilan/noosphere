@@ -15,6 +15,8 @@ export const AUTH_DOMAINS = Object.freeze({
   restoreApplyJournal: 'noosphere/sec05/v2/restore-apply-journal',
   restoreReceipt: 'noosphere/sec05/v2/restore-consumption-receipt',
   restoreConsumed: 'noosphere/sec05/v2/restore-consumed-candidate-marker',
+  restoreCandidateIndexLock:
+    'noosphere/sec05/v2/restore-candidate-index-lock',
   replayCatalog: 'noosphere.replay.catalog.v1',
   replayManifest: 'noosphere.replay.manifest.v1',
   replayRecord: 'noosphere.replay.record.v1',
