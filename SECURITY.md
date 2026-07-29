@@ -267,8 +267,44 @@ Accepted residuals:
   retained a legacy record can fall back to older **owner-approved** bytes. This
   never authorizes bytes you did not approve.
 
-Phase 4B does not include Phase 4C migration, revocation, restore, tombstones,
-identity switching, or retirement of the legacy format.
+Phase 4B did not include Phase 4C migration, revocation, restore, tombstones,
+identity switching, or retirement of the legacy format. Those authority and
+restore controls are now implemented by Phase 4C.
+
+## Replay-ledger boundary (SEC-05 Phase 5 release candidate)
+
+Recalled semantic memory remains quoted, non-authoritative data. Phase 5 adds
+owner-local replay evidence without expanding authority:
+
+- replay identity contains only the authenticated project identity, trusted
+  local slot, and normalized content digest;
+- replay identity and random restore-candidate identity are separate domains
+  with no persisted cross-reference;
+- all replay/restore mutations follow the ranked lock hierarchy and recover
+  authenticated incomplete replay journals before observing new content;
+- ordinary duplicates stay visible and receive informational replay/freshness
+  labels; typed restore may suppress only an already-matching authenticated
+  local candidate;
+- retention is fixed at 4,096 live records and 90 days and ignores remote
+  timestamp, ranking, and metadata;
+- `noosphere replay status` and bounded `replay list` are authenticated,
+  byte-for-byte read-only inspection commands;
+- replay writers and replay-key operations are absent from package exports,
+  MCP, HTTP, hooks, lifecycle services, adapters, and the relayer;
+- a missing or replaced replay key with surviving replay state fails closed.
+  There is deliberately no replay-key reset, reinitialization, rotation,
+  repair, recovery, import, or export operation.
+
+Replay classification never changes `isSlotAuthoritative`, approval,
+revocation, candidate application, or receipt state. Complete replay-root
+deletion loses replay history and permits only a later pristine initialization;
+this does not change content authority.
+
+Phase 5 is not yet a closure claim. The exact-head Linux/macOS/Windows CI and
+independent hostile-review gates are recorded as pending in
+[the Phase 5 verification record](docs/security/SEC-05-PHASE-5-VERIFICATION.md).
+Until those gates pass, SEC-05 remains open and the repository remains not
+public-ready.
 
 ## Known limitations and hardening notes
 

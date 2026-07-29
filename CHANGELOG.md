@@ -14,6 +14,19 @@ Dates are npm publish dates. The format follows
 
 ### Unreleased
 
+- **SEC-05 Phase 5 replay-ledger release candidate.** Added owner-local,
+  authenticated replay observations with content-based identity, monotonic
+  counts, crash-recoverable journals, deterministic 4,096-record/90-day
+  retention, typed restore suppression, and informational replay/freshness
+  labels that never confer authority. Replay and random restore-candidate
+  identities are fully separated; mutation paths enforce the global ranked
+  lock hierarchy and production-reachable recovery. Inspection is limited to
+  byte-for-byte read-only `replay status` and bounded `replay list`; package,
+  MCP, HTTP, hook, lifecycle, adapter, and relayer surfaces expose no replay
+  writer or replay-key reset/reinitialization operation. All 26 normative
+  mutants are killed and every RPL invariant/test identifier is mapped. This
+  entry does **not** close SEC-05: exact-head Linux/macOS/Windows CI and
+  independent hostile review remain mandatory.
 - **SEC-03 (Windows owner-only persistence) — closes SEC-03.** The centralized
   `@noosphere/secure-fs` boundary now enforces an exact three-SID Windows DACL
   (token user SID, `S-1-5-18`, `S-1-5-32-544`) via a fixed PowerShell/.NET helper:

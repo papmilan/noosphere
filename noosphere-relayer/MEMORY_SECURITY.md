@@ -28,6 +28,19 @@ Pending uploads temporarily exist as plaintext in the local durable queue.
 Successful uploads remove the pending record. Protect the host, user account,
 credential backend, and runtime volume.
 
+The continuity client may also maintain an owner-local authenticated replay
+ledger. The relayer is deliberately unaware of that ledger and exposes no
+replay writer, recovery, reset, or key-management endpoint. Replay identity is
+based on the authenticated local project, trusted local slot, and normalized
+content digest—not relayer ranking, timestamps, IDs, labels, or metadata.
+Replay/freshness labels are informational and never authenticate remote
+authorship or confer content authority.
+
+The local ledger retains at most 4,096 live records for 90 days. Complete local
+replay-root deletion loses replay history. Missing or replaced replay-key
+material with surviving state fails closed; the product has no replay-key
+reinitialization or repair surface.
+
 ## Operational limitations
 
 - Semantic recall is relevance-based, not a complete chronological audit.
