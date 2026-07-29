@@ -54,8 +54,11 @@ independently confirming that no transaction is live, then rerun recovery.
 
 A `prepared` journal never proves a rename. Only an exact authenticated
 temporary may be discarded; an unexpected destination requires owner
-intervention. Before any recovery mutation, the complete final barrier is
-repeated while the recovery process holds the slot lock.
+intervention. For an authenticated apply journal, the complete final barrier is
+repeated while the recovery process holds the slot lock before any recovery
+mutation. The journal-less path instead observes no slot lock,
+re-enumerates journals immediately before candidate-only failed consumption,
+and never touches the destination or trust authority.
 
 These statements are mechanically checked by
 `tests/operator-docs.test.js`, `tests/restore-recovery.test.js`,
@@ -106,7 +109,7 @@ from destination bytes or by an old CI run.
 | R3 — lock policy | `recovery.js` treats every present slot lock as owner intervention; `leaves an abandoned lock byte-identical until the owner clears it`, `refuses a lock held by a live process without modifying it`, and lock-policy CLI cases prove the fail-closed policy. |
 | R4 — rename/journal ordering | `restore-recovery-cli-hostile-review.test.js` proves a committed rename that precedes its journal event converges without a second replacement. |
 | R5 — pre-journal stranded candidate | `releaseStrandedCandidate` authenticates the spent confirmation, requires no lock, rechecks journals, and is covered by `releases a candidate stranded mid-apply with no journal`. |
-| R6 — stale pre-lock observations | `recoverOne` rereads the journal and repeats `assertCompleteChain` under the held lock; `repeats the manifest barrier under the recovery lock` proves it. |
+| R6 — stale pre-lock observations | Journal-backed `recoverOne` rereads the journal and repeats `assertCompleteChain` under the held lock; `repeats the manifest barrier under the recovery lock` proves it. |
 | R7 — early journal semantics | `prepared` takes only its authenticated pre-state path and can discard only an exact temporary; `never infers a destination replacement from a prepared journal` proves it. |
 
 Two follow-up review findings are likewise closed by `cbbef81` and their
@@ -136,5 +139,6 @@ approved fail-closed policy: both TTY streams before trust/stage state access;
 recovery before the apply TTY refusal; no new transaction for that refusal;
 authenticated journal or narrowly authenticated pre-journal recovery only; no
 destination-byte-only branch; owner intervention for every present slot lock;
-and the complete barrier repeated under lock before a mutation. Treat an
+and the complete barrier repeated under lock before a journal-backed mutation.
+Treat an
 uncompleted exact-head Windows runner as unresolved, not as a successful result.

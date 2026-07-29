@@ -383,8 +383,11 @@ A `prepared` journal never implies a rename. An exact authenticated temporary
 may be discarded and the candidate failed; an unexpected destination
 requires owner intervention. A later authenticated journal state may finish its
 receipt and consumed marker, but never performs a second destination
-replacement. The complete final recovery barrier is repeated while holding the
-slot lock before any mutation.
+replacement. For an authenticated apply journal, the complete final recovery
+barrier is repeated while holding the slot lock before any mutation. The
+journal-less path observes no slot lock, re-enumerates journals immediately
+before candidate-only failed consumption, and never touches the destination or
+trust authority.
 
 #### Owner intervention required
 

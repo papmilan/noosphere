@@ -350,8 +350,11 @@ describe('SEC-05 Phase 4C — operator documentation', () => {
       /unexpected destination requires owner intervention/i,
       'the prepared unexpected-destination refusal is not documented');
     assert.match(normalized,
-      /complete final recovery barrier is repeated while holding the slot lock before any mutation/i,
-      'the under-lock final recovery barrier is not documented');
+      /for an authenticated apply journal, the complete final recovery barrier is repeated while holding the slot lock before any mutation/i,
+      'the journal-backed under-lock final recovery barrier is not documented');
+    assert.match(normalized,
+      /journal-less path observes no slot lock, re-enumerates journals immediately before candidate-only failed consumption, and never touches the destination or trust authority/i,
+      'the journal-less recovery mutation boundary is not documented');
     assert.equal(
       /`recover` only completes transactions that an authenticated journal already committed to/i.test(normalized),
       false,
