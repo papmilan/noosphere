@@ -159,16 +159,16 @@
 - Create: `noosphere-mcp/tests/replay-context-refresh.test.js`
 - Create: `noosphere-mcp/tests/replay-production-recovery.test.js`
 
-- [ ] RED-test structured-response validation, original ordering, duplicate visibility, quote rendering, replay labels, and `CURRENT`/`STALE`/`TIME_UNVERIFIED`.
-- [ ] RED-test replay-unavailable behavior: ordinary content remains visible and authority remains unchanged.
-- [ ] Replace prompt-text parsing with structured recall ingestion where replay labels are produced.
-- [ ] Route ordinary and typed context observations through the production operation boundary.
-- [ ] Build child-process fixtures that strand authenticated journals, then enter
+- [x] RED-test structured-response validation, original ordering, duplicate visibility, quote rendering, replay labels, and `CURRENT`/`STALE`/`TIME_UNVERIFIED`.
+- [x] RED-test replay-unavailable behavior: ordinary content remains visible and authority remains unchanged.
+- [x] Replace prompt-text parsing with structured recall ingestion where replay labels are produced.
+- [x] Route ordinary and typed context observations through the production operation boundary.
+- [x] Build child-process fixtures that strand authenticated journals, then enter
   through real `restore stage`, structured ordinary recall, and typed context
   refresh; prove recovery precedes observation without directly importing the
   recovery helper.
-- [ ] Re-run recall/context, relayer-authority, and injection tests.
-- [ ] Commit: `feat(security): label replayed recalled memory`.
+- [x] Re-run recall/context, relayer-authority, and injection tests.
+- [x] Commit: `feat(security): label replayed recalled memory`.
 
 ### Task 9: Read-only inspection and mutation-surface lockdown
 
