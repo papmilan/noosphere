@@ -263,7 +263,8 @@ function claimsAutomaticLockRemoval(text) {
     const lock = /\b(?:dead|stale|abandoned|slot)?\s*lock\b/.test(normalized);
     const automatic = /\b(?:automatic(?:ally)?|on its own|without owner intervention)\b/.test(normalized);
     const removal = /\b(?:delete|remove|unlink|reclaim|clear)(?:d|s|ing)?\b/.test(normalized);
-    const negated = /\b(?:never|not|no|cannot|can't|without)\b[^.!?]{0,60}\b(?:delete|remove|unlink|reclaim|clear)(?:d|s|ing)?\b/.test(normalized);
+    const negated = /\b(?:never|not|no|cannot|can't)\b[^.!?]{0,60}\b(?:delete|remove|unlink|reclaim|clear)(?:d|s|ing)?\b/.test(normalized) ||
+      /\bwithout\s+(?:ever\s+)?(?:delet|remov|unlink|reclaim|clear)/.test(normalized);
     return lock && automatic && removal && !negated;
   });
 }
@@ -273,7 +274,7 @@ function claimsExactHeadSuccess(text) {
     const normalized = statement.toLowerCase();
     const exactHead = /\b(?:exact[- ]head|live head|current head|this documentation successor)\b/.test(normalized);
     const windows = /\bwindows\b/.test(normalized);
-    const success = /\b(?:pass(?:ed|es)?|green|successful|all checks|every check)\b/.test(normalized);
+    const success = /\b(?:pass(?:ed|es|ing)?|green|successful|complete(?:d)?|all checks|every check)\b/.test(normalized);
     const negated = /\b(?:not|no|pending|unresolved|blocked|old head|failing|fail)\b/.test(normalized);
     return (exactHead || windows) && success && !negated;
   });
@@ -367,8 +368,12 @@ describe('SEC-05 Phase 4C Task 10 — conformance gate', () => {
       'verification record marks an exact-head Windows/all-check result as successful');
     assert.equal(claimsAutomaticLockRemoval('Recovery automatically clears a stale slot lock.'), true);
     assert.equal(claimsAutomaticLockRemoval('A dead lock is removed on its own.'), true);
+    assert.equal(claimsAutomaticLockRemoval('Without owner intervention, recovery removes a stale slot lock.'), true);
     assert.equal(claimsAutomaticLockRemoval('Recovery never removes a slot lock automatically.'), false);
     assert.equal(claimsExactHeadSuccess('Windows all checks passed at the exact head.'), true);
+    assert.equal(claimsExactHeadSuccess('The current head Windows job is passing.'), true);
+    assert.equal(claimsExactHeadSuccess('The current head Windows job completed.'), true);
+    assert.equal(claimsExactHeadSuccess('The exact-head Windows verification is complete.'), true);
     assert.equal(claimsExactHeadSuccess('The old head had passing checks and one failing Windows check.'), false);
     for (const required of [
       'runtime remediation head `cbbef81`',
