@@ -258,23 +258,23 @@ async function read(relative) {
 }
 
 function claimsAutomaticLockRemoval(text) {
-  return text.split(/[.!?\n]+/).some((statement) => {
+  return text.replace(/\s+/g, ' ').split(/[.!?]+/).some((statement) => {
     const normalized = statement.toLowerCase();
     const lock = /\b(?:dead|stale|abandoned|slot)?\s*lock\b/.test(normalized);
     const automatic = /\b(?:automatic(?:ally)?|on its own|without owner intervention)\b/.test(normalized);
-    const removal = /\b(?:delete|remove|unlink|reclaim|clear)(?:d|s|ing)?\b/.test(normalized);
-    const negated = /\b(?:never|not|no|cannot|can't)\b[^.!?]{0,60}\b(?:delete|remove|unlink|reclaim|clear)(?:d|s|ing)?\b/.test(normalized) ||
+    const removal = /\b(?:delet(?:e|es|ed|ing)|remov(?:e|es|ed|ing)|unlink(?:s|ed|ing)?|reclaim(?:s|ed|ing)?|clear(?:s|ed|ing)?)\b/.test(normalized);
+    const negated = /\b(?:never|not|no|cannot|can't)\b[^.!?]{0,60}\b(?:delet(?:e|es|ed|ing)|remov(?:e|es|ed|ing)|unlink(?:s|ed|ing)?|reclaim(?:s|ed|ing)?|clear(?:s|ed|ing)?)\b/.test(normalized) ||
       /\bwithout\s+(?:ever\s+)?(?:delet|remov|unlink|reclaim|clear)/.test(normalized);
     return lock && automatic && removal && !negated;
   });
 }
 
 function claimsExactHeadSuccess(text) {
-  return text.split(/[.!?\n]+/).some((statement) => {
+  return text.replace(/\s+/g, ' ').split(/[.!?]+/).some((statement) => {
     const normalized = statement.toLowerCase();
     const exactHead = /\b(?:exact[- ]head|live head|current head|this documentation successor)\b/.test(normalized);
     const windows = /\bwindows\b/.test(normalized);
-    const success = /\b(?:pass(?:ed|es|ing)?|green|successful|complete(?:d)?|all checks|every check)\b/.test(normalized);
+    const success = /\b(?:pass(?:ed|es|ing)?|succeed(?:ed|s|ing)?|green|successful|complete(?:d)?|all checks|every check)\b/.test(normalized);
     const negated = /\b(?:not|no|pending|unresolved|blocked|old head|failing|fail)\b/.test(normalized);
     return (exactHead || windows) && success && !negated;
   });
@@ -369,11 +369,16 @@ describe('SEC-05 Phase 4C Task 10 — conformance gate', () => {
     assert.equal(claimsAutomaticLockRemoval('Recovery automatically clears a stale slot lock.'), true);
     assert.equal(claimsAutomaticLockRemoval('A dead lock is removed on its own.'), true);
     assert.equal(claimsAutomaticLockRemoval('Without owner intervention, recovery removes a stale slot lock.'), true);
+    assert.equal(claimsAutomaticLockRemoval('Recovery automatically\nremoves a stale slot lock.'), true);
+    assert.equal(claimsAutomaticLockRemoval('Recovery is automatically removing an abandoned lock.'), true);
+    assert.equal(claimsAutomaticLockRemoval('Recovery is deleting a dead lock on its own.'), true);
     assert.equal(claimsAutomaticLockRemoval('Recovery never removes a slot lock automatically.'), false);
+    assert.equal(claimsAutomaticLockRemoval('The owner manually removes a stale slot lock.'), false);
     assert.equal(claimsExactHeadSuccess('Windows all checks passed at the exact head.'), true);
     assert.equal(claimsExactHeadSuccess('The current head Windows job is passing.'), true);
     assert.equal(claimsExactHeadSuccess('The current head Windows job completed.'), true);
     assert.equal(claimsExactHeadSuccess('The exact-head Windows verification is complete.'), true);
+    assert.equal(claimsExactHeadSuccess('The exact-head Windows verification succeeded.'), true);
     assert.equal(claimsExactHeadSuccess('The old head had passing checks and one failing Windows check.'), false);
     for (const required of [
       'runtime remediation head `cbbef81`',

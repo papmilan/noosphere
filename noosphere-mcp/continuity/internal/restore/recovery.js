@@ -303,10 +303,21 @@ async function assertCompleteChain(journal, input, {
       'restore recovery does not hold the authenticated slot lock',
     );
   }
-  return { store, binding };
+  const candidateDisposition = candidateInProgress
+    ? 'in-progress'
+    : candidateFailed
+      ? 'failed'
+      : candidateApplied
+        ? 'applied'
+        : 'conflicting';
+  return { store, binding, candidateDisposition };
 }
 
-async function advance(journal, input, { store, binding }) {
+async function advance(journal, input, {
+  store,
+  binding,
+  candidateDisposition,
+}) {
   const destinationPath = path.join(
     input.projectRoot,
     ...journal.destination.split('/'),
@@ -322,6 +333,31 @@ async function advance(journal, input, { store, binding }) {
   });
 
   let state = journal.state;
+  if ((state === 'prepared' || state === 'temporary-written') &&
+      candidateDisposition === 'failed') {
+    let observed;
+    try {
+      observed = await input.secureFs.inspectOwnerOnlyDestination(destinationPath, {
+        root: input.projectRoot,
+        maxBytes: AUTHORITY_PAYLOAD_BYTES,
+      });
+    } catch (error) {
+      throw ownerIntervention(`restore destination is unsafe: ${error.code ?? 'invalid'}`);
+    }
+    const matchesBefore = observed.state === 'absent'
+      ? journal.destinationBefore.state === 'absent'
+      : journal.destinationBefore.state === 'present' &&
+        observed.contentHash === journal.destinationBefore.rawHash;
+    requireEvidence(
+      matchesBefore,
+      'restore failed-path destination does not match the authenticated pre-state',
+    );
+    await discardTemporary(journal, input);
+    await ensureCandidateConsumed(journal, 'failed', input);
+    await append('complete', 'failed');
+    return 'discarded';
+  }
+
   if (state === 'prepared') {
     let observed;
     try {

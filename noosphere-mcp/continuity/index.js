@@ -2167,10 +2167,10 @@ async function restoreFromCli(root, args) {
     return;
   }
   if (parsed.verb === 'recover') {
-    // Completes transactions that already exist. It cannot stage, approve,
-    // revoke, or start a transaction, and it takes no candidate argument, so
-    // there is nothing for it to select. Non-destructive by construction: every
-    // write it performs is one an authenticated journal already committed to.
+    // Converges authenticated journal-backed transactions, plus the one
+    // pre-journal crash window where a spent confirmation owns an
+    // apply-in-progress candidate. That journal-less path may consume only the
+    // candidate as failed; it never mutates a destination or trust state.
     const recovered = await recoverRestoreTransactions({ projectRoot: root });
     const outstanding = recovered.filter((entry) => entry.status !== 'complete');
     if (outstanding.length === 0) {

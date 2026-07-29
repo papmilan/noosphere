@@ -533,4 +533,70 @@ describe('SEC-05 Phase 4C — authenticated restore recovery', () => {
     assert.equal(after.state, 'complete');
     assert.equal(after.outcome, 'failed');
   });
+
+  for (const boundary of ['prepared', 'temporary-written']) {
+    it(`keeps an early ${boundary} journal failed after candidate consumption`, async () => {
+      const context = await fixture();
+      // Make the authenticated pre-state byte-identical to the candidate. At
+      // temporary-written this makes destination bytes alone unable to prove
+      // whether the rename happened.
+      await fs.writeFile(context.destination, context.content);
+      await assert.rejects(
+        applyRestoreCandidate({
+          projectRoot: context.projectRoot,
+          env: context.env,
+          candidateId: context.candidateId,
+          confirm: () => true,
+          afterJournalState: crashAt(boundary),
+        }),
+        error => error.simulatedCrash === true,
+      );
+      const before = await readApplyJournal({
+        projectRoot: context.projectRoot,
+        env: context.env,
+        candidateId: context.candidateId,
+      });
+      assert.equal(before.state, boundary);
+
+      // Reconstruct an interruption after failed-path cleanup consumed the
+      // candidate but before it appended the terminal journal event.
+      await fs.rm(path.join(
+        context.projectRoot,
+        ...before.temporaryPath.split('/'),
+      ), { force: true });
+      const candidate = await readCandidateState({
+        projectRoot: context.projectRoot,
+        env: context.env,
+        candidateId: context.candidateId,
+      });
+      assert.equal(candidate.state, 'consumed');
+      assert.equal(candidate.transactionId, before.transactionId);
+      assert.equal(candidate.outcome, 'failed');
+
+      const recovered = await recoverRestoreTransactions({
+        projectRoot: context.projectRoot,
+        env: context.env,
+      });
+      assert.equal(recovered[0].status, 'discarded');
+      const after = await readApplyJournal({
+        projectRoot: context.projectRoot,
+        env: context.env,
+        candidateId: context.candidateId,
+      });
+      assert.equal(after.state, 'complete');
+      assert.equal(after.outcome, 'failed');
+      assert.equal(await readRestoreReceipt({
+        projectRoot: context.projectRoot,
+        env: context.env,
+        receiptId: before.receiptId,
+        missingAllowed: true,
+      }), null);
+      assert.equal(await readConsumedMarker({
+        projectRoot: context.projectRoot,
+        env: context.env,
+        candidateId: context.candidateId,
+        missingAllowed: true,
+      }), null);
+    });
+  }
 });
