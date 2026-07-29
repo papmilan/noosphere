@@ -29,7 +29,6 @@ import { listRestoreCandidates } from '../continuity/internal/restore/candidate-
 import { createHash, randomUUID } from 'node:crypto';
 import {
   classifyLockLiveness,
-  reclaimAbandonedLock,
 } from '../continuity/internal/restore/recovery.js';
 import { stripComments } from './helpers/writer-surface.js';
 import { createFormatV2Store } from '../continuity/internal/trust-format-v2.js';
@@ -113,6 +112,12 @@ function crash(context, boundary) {
   return result;
 }
 
+async function clearSlotLockAsOwner(context) {
+  const store = createFormatV2Store({ env: context.env });
+  const binding = await store.readProjectBinding(context.projectRoot);
+  await fs.rm(store.lockPath(binding, 'baseline'));
+}
+
 async function stateOf(context) {
   const journal = await readApplyJournal({
     projectRoot: context.projectRoot,
@@ -129,7 +134,7 @@ async function stateOf(context) {
 
 describe('SEC-05 Phase 4C — crash recovery through the production CLI', () => {
   for (const boundary of BOUNDARIES) {
-    it(`recovers a SIGKILL at ${boundary} through \`noosphere restore recover\``, async () => {
+    it(`recovers a SIGKILL at ${boundary} after the owner clears its slot lock`, async () => {
       const context = await fixture();
       crash(context, boundary);
 
@@ -140,6 +145,12 @@ describe('SEC-05 Phase 4C — crash recovery through the production CLI', () => 
       assert.notEqual(held, null, 'a real crash must leave the slot lock held');
       assert.equal(classifyLockLiveness(held), 'abandoned');
 
+      const refused = cli(context, ['recover']);
+      assert.equal(refused.status, 4);
+      assert.match(refused.stderr, /slot lock is present/);
+      assert.notEqual(await store.inspectLock(binding, 'baseline'), null);
+
+      await clearSlotLockAsOwner(context);
       const recovered = cli(context, ['recover']);
       assert.equal(recovered.status, 0, `restore recover failed: ${recovered.stderr}`);
       assert.match(recovered.stdout, /no destination was replaced twice/);
@@ -164,10 +175,15 @@ describe('SEC-05 Phase 4C — crash recovery through the production CLI', () => 
   // the apply itself is then refused at the TTY gate. Portable: no PTY needed,
   // which is what lets this run on Windows too.
   for (const boundary of BOUNDARIES) {
-    it(`converges a SIGKILL at ${boundary} before a new apply may begin`, async () => {
+    it(`converges a SIGKILL at ${boundary} before a new apply after owner lock removal`, async () => {
       const context = await fixture();
       crash(context, boundary);
 
+      const blocked = cli(context, ['apply', context.candidateId]);
+      assert.equal(blocked.status, 4);
+      assert.match(blocked.stderr, /slot lock is present/);
+
+      await clearSlotLockAsOwner(context);
       const attempted = cli(context, ['apply', context.candidateId]);
       // The apply is refused — piped stdin is not a terminal — but only after
       // recovery already ran.
@@ -188,6 +204,7 @@ describe('SEC-05 Phase 4C — crash recovery through the production CLI', () => 
   it('never repeats a destination replacement across repeated CLI recovery', async () => {
     const context = await fixture();
     crash(context, 'destination-replaced');
+    await clearSlotLockAsOwner(context);
 
     const first = cli(context, ['recover']);
     assert.equal(first.status, 0, first.stderr);
@@ -213,6 +230,7 @@ describe('SEC-05 Phase 4C — crash recovery through the production CLI', () => 
   it('converges a receipt-only partial state without a second replacement', async () => {
     const context = await fixture();
     crash(context, 'receipt-committed');
+    await clearSlotLockAsOwner(context);
     const before = await fs.readFile(context.destination);
     assert.equal(before.toString('utf8'), context.content, 'the crash should have replaced already');
 
@@ -227,6 +245,7 @@ describe('SEC-05 Phase 4C — crash recovery through the production CLI', () => 
   it('converges a consumed-marker-only partial state without a second replacement', async () => {
     const context = await fixture();
     crash(context, 'consumed-marker-committed');
+    await clearSlotLockAsOwner(context);
     const before = await fs.readFile(context.destination);
 
     assert.equal(cli(context, ['recover']).status, 0);
@@ -239,6 +258,7 @@ describe('SEC-05 Phase 4C — crash recovery through the production CLI', () => 
   it('leaves a destination changed after the committed replacement untouched', async () => {
     const context = await fixture();
     crash(context, 'destination-replaced');
+    await clearSlotLockAsOwner(context);
     // A third party rewrites the destination after the replacement committed.
     await fs.writeFile(context.destination, 'tampered after the rename\n');
 
@@ -278,6 +298,7 @@ describe('SEC-05 Phase 4C — hostile-review recovery findings', () => {
     assert.equal(journal.state, 'temporary-written');
     const temporaryPath = path.join(context.projectRoot, ...journal.temporaryPath.split('/'));
     await fs.rename(temporaryPath, context.destination);
+    await clearSlotLockAsOwner(context);
     assert.equal(await fs.readFile(context.destination, 'utf8'), context.content);
 
     const recovered = cli(context, ['recover']);
@@ -303,6 +324,7 @@ describe('SEC-05 Phase 4C — hostile-review recovery findings', () => {
   it('requires owner intervention when the destination is neither pre-state nor replacement', async () => {
     const context = await fixture();
     crash(context, 'temporary-written');
+    await clearSlotLockAsOwner(context);
     await fs.writeFile(context.destination, 'a third value entirely\n');
 
     const result = cli(context, ['recover']);
@@ -508,7 +530,8 @@ describe('SEC-05 Phase 4C — restore recovery lock policy', () => {
       path.join(packageRoot, 'continuity/internal/restore/recovery.js'), 'utf8',
     ));
     const mentions = [...source.matchAll(/classifyLockLiveness\s*\(/g)];
-    assert.equal(mentions.length, 3, 'unexpected classifyLockLiveness call sites');
+    assert.equal(mentions.length, 1,
+      'recovery must not use liveness to permit automatic lock removal');
     assert.equal(/classifyLockLiveness\([a-zA-Z]+,/.test(source), false,
       'a second argument was reintroduced to the liveness verdict');
     const live = { pid: process.pid, startedAt: new Date().toISOString() };
@@ -516,7 +539,7 @@ describe('SEC-05 Phase 4C — restore recovery lock policy', () => {
       'an injected clock changed the verdict');
   });
 
-  it('refuses to reclaim a lock held by a live process', async () => {
+  it('refuses a lock held by a live process without modifying it', async () => {
     const context = await fixture();
     crash(context, 'destination-replaced');
     const store = createFormatV2Store({ env: context.env });
@@ -530,7 +553,7 @@ describe('SEC-05 Phase 4C — restore recovery lock policy', () => {
 
     const result = cli(context, ['recover']);
     assert.equal(result.status, 4, `expected a security refusal, got ${result.status}`);
-    assert.match(result.stderr, /live process|different transaction/);
+    assert.match(result.stderr, /slot lock is present/);
     // The competitor's lock survives untouched.
     assert.notEqual(await store.inspectLock(binding, 'baseline'), null);
     await live.release();
@@ -566,23 +589,17 @@ describe('SEC-05 Phase 4C — restore recovery lock policy', () => {
     }
   });
 
-  // HOSTILE REVIEW, finding 1: reclaiming by path alone lets recovery delete a
-  // LIVE competitor's lock if that competitor cleared the dead one and took the
-  // slot between the verdict and the removal. The reclaim must re-identify the
-  // exact file it authenticated.
-  it('refuses to reclaim a lock that was replaced after the verdict', async () => {
+  it('leaves a competitor lock untouched after the owner clears a stale lock', async () => {
     const context = await fixture();
     crash(context, 'destination-replaced');
     const store = createFormatV2Store({ env: context.env });
     const binding = await store.readProjectBinding(context.projectRoot);
     const lockFile = store.lockPath(binding, 'baseline');
 
-    // The dead lock is authenticated and abandoned...
     const dead = await store.inspectLock(binding, 'baseline');
     assert.equal(classifyLockLiveness(dead), 'abandoned');
 
-    // ...and then a competitor replaces it with its own live lock, exactly as it
-    // would in the verdict-to-removal window.
+    // The owner clears the stale lock, then a competitor takes the slot.
     await fs.rm(lockFile, { force: true });
     const competitor = await store.acquireLock(binding, 'baseline');
     const held = await store.inspectLock(binding, 'baseline');
@@ -599,91 +616,6 @@ describe('SEC-05 Phase 4C — restore recovery lock policy', () => {
     await competitor.release();
   });
 
-  // HOSTILE REVIEW, finding 1 — the reclamation race, isolated.
-  //
-  // The enclosing barrier rejects a foreign transactionId BEFORE the reclaim, so
-  // driving this through the CLI cannot reach the window. This drives the
-  // reclaim directly with a stale expectation, which is exactly the state the
-  // barrier hands it when a competitor moves in the meantime.
-  it('refuses to remove a lock that was replaced after the verdict', async () => {
-    const context = await fixture();
-    crash(context, 'destination-replaced');
-    const store = createFormatV2Store({ env: context.env });
-    const binding = await store.readProjectBinding(context.projectRoot);
-    const lockFile = store.lockPath(binding, 'baseline');
-
-    // What the barrier authenticated: a dead lock, plus its file identity.
-    const dead = await store.inspectLock(binding, 'baseline');
-    assert.equal(classifyLockLiveness(dead), 'abandoned');
-    const deadStat = await fs.lstat(lockFile);
-    const expected = {
-      lock: dead,
-      identity: { ino: deadStat.ino, dev: deadStat.dev, size: deadStat.size },
-    };
-
-    // A competitor clears the dead lock and takes the slot — the race window.
-    await fs.rm(lockFile, { force: true });
-    const competitor = await store.acquireLock(binding, 'baseline');
-    const held = await store.inspectLock(binding, 'baseline');
-    assert.equal(classifyLockLiveness(held), 'live');
-    assert.notEqual(held.transactionId, dead.transactionId);
-
-    await assert.rejects(
-      reclaimAbandonedLock(store, binding, 'baseline', expected),
-      (error) => error.code === 'ERR_RESTORE_OWNER_INTERVENTION_REQUIRED',
-      'the reclaim removed a live competitor lock',
-    );
-    const survived = await store.inspectLock(binding, 'baseline');
-    assert.notEqual(survived, null, 'a live competitor lock was deleted');
-    assert.equal(survived.mac, held.mac);
-    await competitor.release();
-  });
-
-  it('removes only the exact authenticated file, and reports an already-cleared lock', async () => {
-    const context = await fixture();
-    crash(context, 'destination-replaced');
-    const store = createFormatV2Store({ env: context.env });
-    const binding = await store.readProjectBinding(context.projectRoot);
-    const lockFile = store.lockPath(binding, 'baseline');
-    const dead = await store.inspectLock(binding, 'baseline');
-    const stat = await fs.lstat(lockFile);
-    const expected = {
-      lock: dead,
-      identity: { ino: stat.ino, dev: stat.dev, size: stat.size },
-    };
-
-    // A lock file recreated with identical BYTES but a new inode is still not
-    // the file that was authenticated.
-    const bytes = await fs.readFile(lockFile);
-    await fs.rm(lockFile);
-    await fs.writeFile(lockFile, bytes, { mode: 0o600 });
-    await assert.rejects(
-      reclaimAbandonedLock(store, binding, 'baseline', expected),
-      (error) => error.code === 'ERR_RESTORE_OWNER_INTERVENTION_REQUIRED',
-      'the reclaim accepted a different file with the same bytes',
-    );
-
-    // Cleared by someone else: nothing to remove, and no refusal either.
-    await fs.rm(lockFile, { force: true });
-    assert.equal(await reclaimAbandonedLock(store, binding, 'baseline', expected), false);
-
-    // The genuine case still works.
-    const fresh = await fixture();
-    crash(fresh, 'destination-replaced');
-    const freshStore = createFormatV2Store({ env: fresh.env });
-    const freshBinding = await freshStore.readProjectBinding(fresh.projectRoot);
-    const freshLock = await freshStore.inspectLock(freshBinding, 'baseline');
-    const freshStat = await fs.lstat(freshStore.lockPath(freshBinding, 'baseline'));
-    assert.equal(
-      await reclaimAbandonedLock(freshStore, freshBinding, 'baseline', {
-        lock: freshLock,
-        identity: { ino: freshStat.ino, dev: freshStat.dev, size: freshStat.size },
-      }),
-      true,
-    );
-    assert.equal(await freshStore.inspectLock(freshBinding, 'baseline'), null);
-  });
-
   it('does not touch a lock belonging to a different transaction', async () => {
     const context = await fixture();
     crash(context, 'destination-replaced');
@@ -698,7 +630,7 @@ describe('SEC-05 Phase 4C — restore recovery lock policy', () => {
 
     const result = cli(context, ['recover']);
     assert.equal(result.status, 4);
-    assert.match(result.stderr, /different transaction|live process/);
+    assert.match(result.stderr, /slot lock is present/);
     await other.release();
   });
 

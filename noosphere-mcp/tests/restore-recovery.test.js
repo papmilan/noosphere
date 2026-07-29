@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,11 +9,26 @@ import { fileURLToPath } from 'node:url';
 import { after, describe, it } from 'node:test';
 
 import { applyRestoreCandidate } from '../continuity/internal/restore/apply-service.js';
-import { readCandidateState, stageRestoreCandidate } from '../continuity/internal/restore/candidate-store.js';
+import { approveSlot } from '../continuity/internal/approval-service.js';
+import {
+  consumeCandidate,
+  markApplyInProgress,
+  readCandidateState,
+  stageRestoreCandidate,
+} from '../continuity/internal/restore/candidate-store.js';
+import {
+  issueConfirmation,
+  spendContext,
+} from '../continuity/internal/restore/confirmation-store.js';
 import { readApplyJournal } from '../continuity/internal/restore/apply-journal.js';
 import { classifyLockLiveness, recoverRestoreTransactions } from '../continuity/internal/restore/recovery.js';
-import { classifyRestoreReceipt } from '../continuity/internal/restore/receipt-store.js';
+import {
+  classifyRestoreReceipt,
+  readConsumedMarker,
+  readRestoreReceipt,
+} from '../continuity/internal/restore/receipt-store.js';
 import { createFormatV2Store } from '../continuity/internal/trust-format-v2.js';
+import * as secureFs from '../continuity/secure-fs.js';
 
 const CHILD = fileURLToPath(
   new URL('./helpers/restore-crash-child.mjs', import.meta.url),
@@ -70,6 +86,40 @@ function crashAt(state) {
       throw error;
     }
   };
+}
+
+async function strandCandidateWhileHoldingLock(context) {
+  const issued = await issueConfirmation({
+    projectRoot: context.projectRoot,
+    env: context.env,
+    candidateId: context.candidateId,
+    destination: {
+      state: 'present',
+      rawHash: createHash('sha256').update('before').digest('hex'),
+    },
+    manifest: {
+      state: 'pristine-unapproved',
+      generation: { state: 'no-manifest' },
+    },
+  });
+  const transactionId = randomUUID();
+  const store = createFormatV2Store({ env: context.env });
+  const binding = await store.readProjectBinding(context.projectRoot);
+  const lock = await store.acquireLock(binding, 'baseline', transactionId);
+  await spendContext({
+    projectRoot: context.projectRoot,
+    env: context.env,
+    contextId: issued.contextId,
+    transactionId,
+  });
+  await markApplyInProgress({
+    projectRoot: context.projectRoot,
+    env: context.env,
+    candidateId: context.candidateId,
+    contextId: issued.contextId,
+    transactionId,
+  });
+  return { lock, transactionId };
 }
 
 describe('SEC-05 Phase 4C — authenticated restore recovery', () => {
@@ -137,7 +187,7 @@ describe('SEC-05 Phase 4C — authenticated restore recovery', () => {
     'receipt-committed',
     'consumed-marker-committed',
   ]) {
-    it(`SIGKILL at ${boundary}: reclaims the abandoned lock and converges`, async () => {
+    it(`SIGKILL at ${boundary}: waits for owner lock removal and converges`, async () => {
       const context = await fixture();
       const replaced = !['prepared', 'temporary-written'].includes(boundary);
       const result = spawnSync(process.execPath, [CHILD], {
@@ -158,15 +208,25 @@ describe('SEC-05 Phase 4C — authenticated restore recovery', () => {
         `child must be forcibly terminated (signal=${result.signal}, status=${result.status})`);
       if (process.platform !== 'win32') assert.equal(result.signal, 'SIGKILL');
 
-      // A real crash leaves the slot lock held. Phase 4C recovery reclaims it,
-      // but only because inspectLock authenticates it as this project's own
-      // lock for this transaction AND the writing PID is provably gone. The
-      // lock is not removed by hand and not removed by age.
+      // A real crash leaves the slot lock held. Recovery never removes it,
+      // regardless of ownership or liveness; the owner clears it explicitly.
       const store = createFormatV2Store({ env: context.env });
       const binding = await store.readProjectBinding(context.projectRoot);
       const heldLock = await store.inspectLock(binding, 'baseline');
       assert.notEqual(heldLock, null);
       assert.equal(classifyLockLiveness(heldLock), 'abandoned');
+      const lockPath = store.lockPath(binding, 'baseline');
+      const lockBytes = await fs.readFile(lockPath);
+
+      await assert.rejects(
+        recoverRestoreTransactions({
+          projectRoot: context.projectRoot,
+          env: context.env,
+        }),
+        error => error.code === 'ERR_RESTORE_OWNER_INTERVENTION_REQUIRED',
+      );
+      assert.deepEqual(await fs.readFile(lockPath), lockBytes);
+      await fs.rm(lockPath);
 
       await recoverRestoreTransactions({
         projectRoot: context.projectRoot,
@@ -226,5 +286,251 @@ describe('SEC-05 Phase 4C — authenticated restore recovery', () => {
       await fs.readFile(context.destination, 'utf8'),
       'owner changed after rename',
     );
+  });
+
+  it('does not consume a journal-less candidate while its live apply holds the slot lock', async () => {
+    const context = await fixture();
+    const { lock, transactionId } = await strandCandidateWhileHoldingLock(context);
+    try {
+      await assert.rejects(
+        recoverRestoreTransactions({
+          projectRoot: context.projectRoot,
+          env: context.env,
+        }),
+        error => error.code === 'ERR_RESTORE_OWNER_INTERVENTION_REQUIRED',
+        'recovery consumed a candidate between markApplyInProgress and journal creation',
+      );
+      const state = await readCandidateState({
+        projectRoot: context.projectRoot,
+        env: context.env,
+        candidateId: context.candidateId,
+      });
+      assert.equal(state.state, 'apply-in-progress');
+      assert.equal(state.transactionId, transactionId);
+    } finally {
+      await lock.release();
+    }
+  });
+
+  it('repeats the manifest barrier under the recovery lock', async () => {
+    const context = await fixture();
+    await assert.rejects(
+      applyRestoreCandidate({
+        projectRoot: context.projectRoot,
+        env: context.env,
+        candidateId: context.candidateId,
+        confirm: () => true,
+        afterJournalState: crashAt('destination-replaced'),
+      }),
+      error => error.simulatedCrash === true,
+    );
+
+    await assert.rejects(
+      recoverRestoreTransactions({
+        projectRoot: context.projectRoot,
+        env: context.env,
+        beforeRecoveryLock: async () => {
+          await approveSlot({
+            projectRoot: context.projectRoot,
+            slot: 'baseline',
+            env: context.env,
+            confirm: () => true,
+          });
+        },
+      }),
+      error =>
+        error.code === 'ERR_RESTORE_OWNER_INTERVENTION_REQUIRED' &&
+        /manifest state changed/.test(error.message),
+      'recovery advanced on the manifest observation taken before acquiring its lock',
+    );
+    assert.notEqual((await readApplyJournal({
+      projectRoot: context.projectRoot,
+      env: context.env,
+      candidateId: context.candidateId,
+    })).state, 'complete');
+  });
+
+  it('never infers a destination replacement from a prepared journal', async () => {
+    const context = await fixture();
+    await assert.rejects(
+      applyRestoreCandidate({
+        projectRoot: context.projectRoot,
+        env: context.env,
+        candidateId: context.candidateId,
+        confirm: () => true,
+        afterJournalState: crashAt('prepared'),
+      }),
+      error => error.simulatedCrash === true,
+    );
+    await fs.writeFile(context.destination, context.content);
+
+    await assert.rejects(
+      recoverRestoreTransactions({
+        projectRoot: context.projectRoot,
+        env: context.env,
+      }),
+      error =>
+        error.code === 'ERR_RESTORE_OWNER_INTERVENTION_REQUIRED' &&
+        /authenticated pre-state/.test(error.message),
+      'a prepared journal was promoted as though its destination rename could have committed',
+    );
+    const journal = await readApplyJournal({
+      projectRoot: context.projectRoot,
+      env: context.env,
+      candidateId: context.candidateId,
+    });
+    assert.equal(journal.state, 'prepared');
+    assert.equal(journal.outcome, null);
+  });
+
+  it('leaves an abandoned lock byte-identical until the owner clears it', async () => {
+    const context = await fixture();
+    const result = spawnSync(process.execPath, [CHILD], {
+      env: {
+        ...process.env,
+        CRASH_HOME: context.env.NOOSPHERE_HOME,
+        CRASH_PROJECT: context.projectRoot,
+        CRASH_SCOPE: context.env.NOOSPHERE_OWNER_SCOPE,
+        CRASH_CANDIDATE: context.candidateId,
+        CRASH_AT: 'destination-replaced',
+      },
+      timeout: 300000,
+      killSignal: 'SIGKILL',
+    });
+    assert.equal(result.error, undefined);
+    assert.ok(result.signal === 'SIGKILL' || result.status !== 0);
+
+    const store = createFormatV2Store({ env: context.env });
+    const binding = await store.readProjectBinding(context.projectRoot);
+    const lockPath = store.lockPath(binding, 'baseline');
+    const before = await fs.readFile(lockPath);
+    await assert.rejects(
+      recoverRestoreTransactions({
+        projectRoot: context.projectRoot,
+        env: context.env,
+      }),
+      error => error.code === 'ERR_RESTORE_OWNER_INTERVENTION_REQUIRED',
+      'recovery automatically removed an abandoned lock',
+    );
+    assert.deepEqual(await fs.readFile(lockPath), before);
+
+    await fs.rm(lockPath);
+    await recoverRestoreTransactions({
+      projectRoot: context.projectRoot,
+      env: context.env,
+    });
+    const journal = await readApplyJournal({
+      projectRoot: context.projectRoot,
+      env: context.env,
+      candidateId: context.candidateId,
+    });
+    assert.equal(journal.state, 'complete');
+    assert.equal(journal.outcome, 'applied');
+  });
+
+  it('refuses a conflicting candidate namespace under lock before any mutation', async () => {
+    const context = await fixture();
+    await assert.rejects(
+      applyRestoreCandidate({
+        projectRoot: context.projectRoot,
+        env: context.env,
+        candidateId: context.candidateId,
+        confirm: () => true,
+        afterJournalState: crashAt('destination-replaced'),
+      }),
+      error => error.simulatedCrash === true,
+    );
+    const before = await readApplyJournal({
+      projectRoot: context.projectRoot,
+      env: context.env,
+      candidateId: context.candidateId,
+    });
+
+    await assert.rejects(
+      recoverRestoreTransactions({
+        projectRoot: context.projectRoot,
+        env: context.env,
+        beforeRecoveryLock: async () => {
+          await consumeCandidate({
+            projectRoot: context.projectRoot,
+            env: context.env,
+            candidateId: context.candidateId,
+            transactionId: before.transactionId,
+            outcome: 'failed',
+          });
+        },
+      }),
+      error => error.code === 'ERR_RESTORE_OWNER_INTERVENTION_REQUIRED',
+    );
+    const after = await readApplyJournal({
+      projectRoot: context.projectRoot,
+      env: context.env,
+      candidateId: context.candidateId,
+    });
+    assert.equal(after.state, before.state);
+    assert.equal(after.stateEventHash, before.stateEventHash);
+    assert.equal(await readRestoreReceipt({
+      projectRoot: context.projectRoot,
+      env: context.env,
+      receiptId: before.receiptId,
+      missingAllowed: true,
+    }), null);
+    assert.equal(await readConsumedMarker({
+      projectRoot: context.projectRoot,
+      env: context.env,
+      candidateId: context.candidateId,
+      missingAllowed: true,
+    }), null);
+    await assert.rejects(
+      fs.access(path.join(context.projectRoot, ...before.temporaryPath.split('/'))),
+    );
+  });
+
+  it('discards an exact temporary left while the journal is still prepared', async () => {
+    const context = await fixture();
+    await assert.rejects(
+      applyRestoreCandidate({
+        projectRoot: context.projectRoot,
+        env: context.env,
+        candidateId: context.candidateId,
+        confirm: () => true,
+        afterJournalState: crashAt('prepared'),
+      }),
+      error => error.simulatedCrash === true,
+    );
+    const journal = await readApplyJournal({
+      projectRoot: context.projectRoot,
+      env: context.env,
+      candidateId: context.candidateId,
+    });
+    const prepared = await secureFs.prepareOwnerOnlyReplacement(
+      context.destination,
+      context.content,
+      {
+        root: context.projectRoot,
+        expectedDestination: await secureFs.inspectOwnerOnlyDestination(
+          context.destination,
+          { root: context.projectRoot },
+        ),
+        randomUUID: () => journal.transactionId,
+      },
+    );
+    assert.equal(prepared.temporaryPath,
+      path.join(context.projectRoot, ...journal.temporaryPath.split('/')));
+
+    await recoverRestoreTransactions({
+      projectRoot: context.projectRoot,
+      env: context.env,
+    });
+    await assert.rejects(fs.access(prepared.temporaryPath),
+      'prepared recovery orphaned its exact authenticated temporary');
+    assert.equal(await fs.readFile(context.destination, 'utf8'), 'before');
+    const after = await readApplyJournal({
+      projectRoot: context.projectRoot,
+      env: context.env,
+      candidateId: context.candidateId,
+    });
+    assert.equal(after.state, 'complete');
+    assert.equal(after.outcome, 'failed');
   });
 });

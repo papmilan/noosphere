@@ -35,41 +35,8 @@ function requireEvidence(condition, message) {
   if (!condition) throw ownerIntervention(message);
 }
 
-/**
- * Classifies an already-authenticated slot lock as `abandoned`, `live`, or
- * `ambiguous`. Only `abandoned` may be reclaimed.
- *
- * The input must already have come back from `store.inspectLock`, which proves
- * ownership: MAC over the slot-lock domain, this project identity and identity
- * digest, this owner scope, this machine key, this slot. A malformed,
- * unauthenticated, foreign, or unsafe lock never reaches here. The only question
- * left is liveness.
- *
- * Exactly one signal: `kill(pid, 0)`. ESRCH means gone. Success means running.
- * EPERM means the process exists but belongs to another user, which is
- * existence, so it is live. Every other errno is unclassifiable and therefore
- * ambiguous, which fails closed.
- *
- * There is deliberately NO clock- or uptime-derived signal. An earlier version
- * also treated "the lock predates the machine's current boot" as abandonment,
- * on the reasoning that a wall clock could only cost a fail-closed refusal.
- * That was wrong, and hostile review caught it: a clock that jumps FORWARD (NTP
- * correction, VM resume, a container inheriting a skewed host clock) makes a
- * LIVE lock's `startedAt` older than uptime, so it is declared abandoned and
- * reclaimed out from under a running transaction. That is fail-open, and no
- * wall-clock-derived boot identity avoids it — a forward jump moves the derived
- * boot time by the same amount. The signal is removed rather than patched.
- * Removing it also removes the `os.uptime()` call, which throws EPERM under
- * some sandbox and container profiles.
- *
- * The cost is the case that signal existed for: after a reboot a dead
- * transaction's PID may be reused by an unrelated live process, and recovery
- * will report `live` indefinitely. That is fail-closed and visible — the owner
- * gets ERR_RESTORE_OWNER_INTERVENTION_REQUIRED naming the PID and can clear the
- * lock. Matching the Phase 4A stance: never reclaim on a guess.
- *
- * Age alone is never a reason. A lock is not reclaimed because it is old.
- */
+// Diagnostic only. Recovery does not use liveness to decide whether a present
+// lock may be removed; every present lock requires owner intervention.
 export function classifyLockLiveness(lock) {
   if (!Number.isInteger(lock?.pid) || lock.pid <= 0) return 'ambiguous';
   try {
@@ -80,65 +47,6 @@ export function classifyLockLiveness(lock) {
     if (error?.code === 'EPERM') return 'live';
     return 'ambiguous';
   }
-}
-
-/**
- * Removes the exact lock file the barrier authenticated and proved abandoned —
- * and nothing else.
- *
- * Removing by path alone is a race: between the verdict and the removal a
- * competitor can clear the dead lock and take its own, and a path-based `rm`
- * would then delete a LIVE lock while its owner believes it holds one. So the
- * file is re-identified immediately before removal — same inode, device and
- * size, same authenticated bytes, same transaction, still abandoned — and
- * anything else fails closed.
- *
- * Residual, stated rather than hidden: Node offers no `funlinkat`, so a window
- * remains between the final check and `unlink`. It is far smaller than the
- * verdict-to-removal window it replaces, and a competitor that loses this way
- * still detects it — `release()` compares lock tokens and refuses with
- * `trust-lock-not-owner` rather than silently continuing.
- *
- * Exported for direct testing: the enclosing barrier rejects a foreign
- * transactionId earlier, so the race window this closes is unreachable through
- * recoverRestoreTransactions alone.
- */
-export async function reclaimAbandonedLock(store, binding, slot, expected) {
-  const file = store.lockPath(binding, slot);
-  let stat;
-  try {
-    stat = await fs.lstat(file);
-  } catch (error) {
-    if (error.code === 'ENOENT') return false;
-    throw ownerIntervention(`restore slot lock could not be re-identified: ${error.code ?? 'invalid'}`);
-  }
-  requireEvidence(
-    stat.isFile() &&
-      stat.ino === expected.identity.ino &&
-      stat.dev === expected.identity.dev &&
-      stat.size === expected.identity.size,
-    'restore slot lock file changed between authentication and reclaim',
-  );
-
-  let current;
-  try {
-    current = await store.inspectLock(binding, slot);
-  } catch (error) {
-    throw ownerIntervention(`restore slot lock became unusable before reclaim: ${error.code ?? 'invalid'}`);
-  }
-  requireEvidence(
-    current !== null &&
-      current.mac === expected.lock.mac &&
-      current.transactionId === expected.lock.transactionId &&
-      current.token === expected.lock.token,
-    'restore slot lock was replaced between authentication and reclaim',
-  );
-  requireEvidence(
-    classifyLockLiveness(current) === 'abandoned',
-    'restore slot lock became live before reclaim',
-  );
-  await fs.rm(file, { force: false });
-  return true;
 }
 
 /**
@@ -231,7 +139,9 @@ async function currentManifestBinding(store, binding, slot) {
   };
 }
 
-async function assertCompleteChain(journal, input) {
+async function assertCompleteChain(journal, input, {
+  heldTransactionId = null,
+} = {}) {
   const store = createFormatV2Store({
     env: input.env,
     secureFileOptions: input.secureFileOptions,
@@ -282,37 +192,118 @@ async function assertCompleteChain(journal, input) {
     canonicalize(currentManifest) === canonicalize(journal.manifest),
     'restore manifest state changed after the owner confirmed',
   );
-  // A lock left behind by a SIGKILLed process must not hide the transaction
-  // forever, but it is also the only thing standing between recovery and a
-  // genuinely live competitor. inspectLock proves ownership or throws; only
-  // then may liveness decide, and only `abandoned` may be reclaimed.
+
+  const destinationPath = path.join(
+    input.projectRoot,
+    ...journal.destination.split('/'),
+  );
+  try {
+    await input.secureFs.inspectOwnerOnlyDestination(destinationPath, {
+      root: input.projectRoot,
+      maxBytes: AUTHORITY_PAYLOAD_BYTES,
+    });
+  } catch (error) {
+    throw ownerIntervention(`restore destination is unsafe: ${error.code ?? 'invalid'}`);
+  }
+
+  const receipt = await readRestoreReceipt({
+    projectRoot: input.projectRoot,
+    env: input.env,
+    secureFileOptions: input.secureFileOptions,
+    receiptId: journal.receiptId,
+    missingAllowed: true,
+  });
+  const consumed = await readConsumedMarker({
+    projectRoot: input.projectRoot,
+    env: input.env,
+    secureFileOptions: input.secureFileOptions,
+    candidateId: journal.candidateId,
+    missingAllowed: true,
+  });
+  if (receipt !== null) {
+    requireEvidence(
+      receipt.transactionId === journal.transactionId &&
+        receipt.contextId === journal.contextId &&
+        receipt.candidateId === journal.candidateId &&
+        receipt.candidatePayloadHash === journal.candidatePayloadHash &&
+        receipt.destinationHash === journal.destinationAfterHash &&
+        receipt.slot === journal.slot,
+      'restore receipt does not match its authenticated apply journal',
+    );
+  }
+  if (consumed !== null) {
+    requireEvidence(
+      consumed.transactionId === journal.transactionId &&
+        consumed.contextId === journal.contextId &&
+        consumed.candidateId === journal.candidateId &&
+        consumed.candidatePayloadHash === journal.candidatePayloadHash &&
+        consumed.slot === journal.slot,
+      'restore consumed marker does not match its authenticated apply journal',
+    );
+  }
+  const candidateState = candidate.candidateState;
+  const candidateInProgress =
+    candidateState.state === 'apply-in-progress' &&
+    candidateState.transactionId === journal.transactionId &&
+    candidateState.contextId === journal.contextId;
+  const candidateFailed =
+    candidateState.state === 'consumed' &&
+    candidateState.transactionId === journal.transactionId &&
+    candidateState.contextId === journal.contextId &&
+    candidateState.outcome === 'failed';
+  const candidateApplied =
+    candidateState.state === 'consumed' &&
+    candidateState.transactionId === journal.transactionId &&
+    candidateState.contextId === journal.contextId &&
+    candidateState.outcome === 'applied';
+
+  const early = journal.state === 'prepared' ||
+    journal.state === 'temporary-written';
+  const destinationReplaced = journal.state === 'destination-replaced';
+  const receiptCommitted = journal.state === 'receipt-committed';
+  const consumedCommitted = journal.state === 'consumed-marker-committed';
+  requireEvidence(
+    !early || (receipt === null && consumed === null &&
+      (candidateInProgress || candidateFailed)),
+    'restore candidate or receipt namespace conflicts with the early apply journal state',
+  );
+  requireEvidence(
+    !destinationReplaced || (consumed === null && candidateInProgress),
+    'restore candidate or consumed namespace conflicts with the destination-replaced journal state',
+  );
+  requireEvidence(
+    !receiptCommitted || (receipt !== null &&
+      (consumed === null
+        ? candidateInProgress
+        : candidateInProgress || candidateApplied)),
+    'restore candidate, receipt, or consumed namespace conflicts with the receipt-committed journal state',
+  );
+  requireEvidence(
+    !consumedCommitted || (receipt !== null && consumed !== null &&
+      candidateApplied),
+    'restore candidate, receipt, or consumed namespace conflicts with the consumed-marker journal state',
+  );
+
+  // Phase 4A lock policy: every present lock is owner-intervention territory.
+  // Recovery never decides that a lock is stale and never unlinks one.
   let lock;
   try {
     lock = await store.inspectLock(binding, journal.slot);
   } catch (error) {
     throw ownerIntervention(`restore slot lock is unusable: ${error.code ?? 'invalid'}`);
   }
-  if (lock === null) return { store, binding, staleLock: null };
-
-  requireEvidence(
-    lock.transactionId === journal.transactionId,
-    'restore slot lock belongs to a different transaction',
-  );
-  const liveness = classifyLockLiveness(lock);
-  requireEvidence(
-    liveness === 'abandoned',
-    liveness === 'live'
-      ? `restore slot lock is held by a live process (pid ${lock.pid})`
-      : 'restore slot lock ownership could not be proven abandoned',
-  );
-  let identity;
-  try {
-    const stat = await fs.lstat(store.lockPath(binding, journal.slot));
-    identity = { ino: stat.ino, dev: stat.dev, size: stat.size };
-  } catch (error) {
-    throw ownerIntervention(`restore slot lock could not be identified: ${error.code ?? 'invalid'}`);
+  if (heldTransactionId === null) {
+    requireEvidence(
+      lock === null,
+      'restore slot lock is present and requires owner intervention',
+    );
+  } else {
+    requireEvidence(
+      lock !== null && lock.transactionId === heldTransactionId,
+      'restore recovery does not hold the authenticated slot lock',
+    );
   }
-  return { store, binding, staleLock: { lock, identity } };
+  return { store, binding };
 }
 
 async function advance(journal, input, { store, binding }) {
@@ -331,17 +322,31 @@ async function advance(journal, input, { store, binding }) {
   });
 
   let state = journal.state;
-  if (state === 'prepared' || state === 'temporary-written') {
-    // HOSTILE REVIEW, finding A: the atomic rename and the `destination-replaced`
-    // journal event are two steps. A crash between them leaves the journal at
-    // `temporary-written` while the destination ALREADY holds the replacement.
-    // Treating that as "nothing happened" consumed the candidate as failed and
-    // told the owner the apply did not occur — with the new bytes on disk.
-    //
-    // The destination is not being used to pick a permissive branch: recovery
-    // requires it to be exactly one of the two states the journal authenticated,
-    // the pre-state it recorded or the replacement it committed to, and anything
-    // else is owner intervention.
+  if (state === 'prepared') {
+    let observed;
+    try {
+      observed = await input.secureFs.inspectOwnerOnlyDestination(destinationPath, {
+        root: input.projectRoot,
+        maxBytes: AUTHORITY_PAYLOAD_BYTES,
+      });
+    } catch (error) {
+      throw ownerIntervention(`restore destination is unsafe: ${error.code ?? 'invalid'}`);
+    }
+    const matchesBefore = observed.state === 'absent'
+      ? journal.destinationBefore.state === 'absent'
+      : journal.destinationBefore.state === 'present' &&
+        observed.contentHash === journal.destinationBefore.rawHash;
+    requireEvidence(
+      matchesBefore,
+      'restore prepared destination does not match the authenticated pre-state',
+    );
+    await discardTemporary(journal, input);
+    await ensureCandidateConsumed(journal, 'failed', input);
+    await append('complete', 'failed');
+    return 'discarded';
+  }
+
+  if (state === 'temporary-written') {
     let observed;
     try {
       observed = await input.secureFs.inspectOwnerOnlyDestination(destinationPath, {
@@ -359,16 +364,13 @@ async function advance(journal, input, { store, binding }) {
       observed.contentHash === journal.destinationAfterHash;
     const temporaryPresent = await temporaryExists(journal, input);
 
-    // The rename committed if the destination holds the replacement and the
-    // temporary is gone. When the pre-state and the replacement hash to the same
-    // bytes the destination cannot distinguish them, so the temporary decides.
-    if (matchesAfter && (!matchesBefore || (state === 'temporary-written' && !temporaryPresent))) {
+    if (matchesAfter && !temporaryPresent) {
       await append('destination-replaced');
       state = 'destination-replaced';
     } else {
       requireEvidence(
         matchesBefore,
-        'restore destination is neither the authenticated pre-state nor the authenticated replacement',
+        'restore temporary-written destination is neither the authenticated pre-state nor the authenticated replacement',
       );
       await discardTemporary(journal, input);
       await ensureCandidateConsumed(journal, 'failed', input);
@@ -457,18 +459,12 @@ async function advance(journal, input, { store, binding }) {
 }
 
 async function recoverOne(journal, input) {
-  const context = await assertCompleteChain(journal, input);
-  const { store, binding, staleLock } = context;
-  // Reclaim only the exact lock file the barrier authenticated and proved
-  // abandoned. `force: false` so a lock that vanished between the barrier and
-  // here — meaning something else moved — raises rather than silently
-  // succeeding, and the transaction stays for the owner.
-  if (staleLock !== null) {
-    await reclaimAbandonedLock(store, binding, journal.slot, staleLock);
-  }
+  const oriented = await assertCompleteChain(journal, input);
+  const { store, binding } = oriented;
+  if (input.beforeRecoveryLock) await input.beforeRecoveryLock();
   let lock;
   try {
-    lock = await store.acquireLock(binding, journal.slot);
+    lock = await store.acquireLock(binding, journal.slot, journal.transactionId);
   } catch (error) {
     // Another process took the slot between the barrier and the acquire. That
     // process is live by definition, so this is the live-competitor outcome,
@@ -492,6 +488,12 @@ async function recoverOne(journal, input) {
         current.stateEventHash === journal.stateEventHash,
       'restore apply journal advanced while recovery was starting',
     );
+    // This is the complete final barrier. The pre-lock pass only oriented
+    // recovery; every mutable authority and restore fact is re-read and
+    // authenticated while the per-slot lock is held before any mutation.
+    const context = await assertCompleteChain(current, input, {
+      heldTransactionId: journal.transactionId,
+    });
     return await advance(current, input, context);
   } finally {
     await lock.release().catch(() => undefined);
@@ -509,9 +511,24 @@ async function recoverOne(journal, input) {
  * crashed apply fails closed rather than being quietly consumed.
  */
 async function releaseStrandedCandidate(stranded, input) {
-  const state = stranded.candidateState;
+  const candidate = await showRestoreCandidate({
+    projectRoot: input.projectRoot,
+    env: input.env,
+    secureFileOptions: input.secureFileOptions,
+    candidateId: stranded.candidateId,
+  });
+  const state = candidate.candidateState;
   requireEvidence(
-    typeof state.transactionId === 'string' && typeof state.contextId === 'string',
+    state.state === 'apply-in-progress' &&
+      state.transactionId === stranded.candidateState.transactionId &&
+      state.contextId === stranded.candidateState.contextId &&
+      candidate.slot === stranded.slot &&
+      candidate.payloadHash === stranded.payloadHash,
+    'stranded restore candidate changed during recovery',
+  );
+  requireEvidence(
+    typeof state.transactionId === 'string' &&
+      typeof state.contextId === 'string',
     'stranded restore candidate is not bound to a transaction',
   );
   let confirmation;
@@ -534,6 +551,49 @@ async function releaseStrandedCandidate(stranded, input) {
       confirmation.candidatePayloadHash === stranded.payloadHash,
     'stranded restore candidate is not owned by a spent confirmation',
   );
+
+  const store = createFormatV2Store({
+    env: input.env,
+    secureFileOptions: input.secureFileOptions,
+  });
+  const binding = await store.readProjectBinding(input.projectRoot);
+  let lock;
+  try {
+    lock = await store.inspectLock(binding, candidate.slot);
+  } catch (error) {
+    throw ownerIntervention(
+      `stranded restore candidate slot lock is unusable: ${error.code ?? 'invalid'}`,
+    );
+  }
+  requireEvidence(
+    lock === null,
+    'stranded restore candidate slot lock is present and requires owner intervention',
+  );
+
+  // The apply service holds this lock continuously from before
+  // markApplyInProgress through journal creation. Re-enumerating only after
+  // observing no lock closes the journal-less classification race.
+  const journalMatches = (await listApplyJournals({
+    projectRoot: input.projectRoot,
+    env: input.env,
+    secureFileOptions: input.secureFileOptions,
+  })).filter(journal =>
+    journal.candidateId === stranded.candidateId ||
+    journal.transactionId === state.transactionId);
+  requireEvidence(
+    journalMatches.length <= 1,
+    'stranded restore candidate has conflicting apply journals',
+  );
+  if (journalMatches.length === 1) {
+    const [journal] = journalMatches;
+    requireEvidence(
+      journal.candidateId === stranded.candidateId &&
+        journal.transactionId === state.transactionId,
+      'stranded restore candidate journal belongs to a conflicting transaction',
+    );
+    return { status: 'journaled', journal };
+  }
+
   await consumeCandidate({
     projectRoot: input.projectRoot,
     env: input.env,
@@ -543,7 +603,7 @@ async function releaseStrandedCandidate(stranded, input) {
     outcome: 'failed',
     now: input.now,
   });
-  return 'released';
+  return { status: 'released', journal: null };
 }
 
 export async function recoverRestoreTransactions({
@@ -552,8 +612,16 @@ export async function recoverRestoreTransactions({
   secureFileOptions = {},
   secureFs = defaultSecureFs,
   now = () => new Date(),
+  beforeRecoveryLock,
 } = {}) {
-  const input = { projectRoot, env, secureFileOptions, secureFs, now };
+  const input = {
+    projectRoot,
+    env,
+    secureFileOptions,
+    secureFs,
+    now,
+    beforeRecoveryLock,
+  };
   const journals = await listApplyJournals({
     projectRoot,
     env,
@@ -595,10 +663,18 @@ export async function recoverRestoreTransactions({
     projectRoot, env, secureFileOptions,
   })) {
     if (journalled.has(stranded.candidateId)) continue;
+    const released = await releaseStrandedCandidate(stranded, input);
+    let status = released.status;
+    if (released.journal !== null) {
+      status = released.journal.state === 'complete'
+        ? 'complete'
+        : await recoverOne(released.journal, input);
+      journalled.add(released.journal.candidateId);
+    }
     recovered.push(Object.freeze({
       transactionId: stranded.candidateState.transactionId ?? null,
       candidateId: stranded.candidateId,
-      status: await releaseStrandedCandidate(stranded, input),
+      status,
     }));
   }
   return Object.freeze(recovered);
