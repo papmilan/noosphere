@@ -118,6 +118,17 @@ const MAX_CHECKPOINT_RETRY_MS = 5 * 60_000;
 const DEFAULT_WRITE_TIMEOUT_MS = 130_000;
 const DEFAULT_READ_TIMEOUT_MS = 30_000;
 const DEFAULT_BASELINE_HISTORY_COMMITS = 50;
+// Bounds for the journal section of context.md — see formatLocalJournal.
+// On this repository's 135 entries the median is 883 bytes and the 90th
+// percentile 1,958, with a single 68 KB outlier. Thirty entries capped at 4 KB
+// each renders ~47 KB and truncates two of them; a section-wide byte budget was
+// tried first and one outlier starved every older entry behind it.
+const JOURNAL_CONTEXT_ENTRIES = 30;
+const JOURNAL_ENTRY_BYTES = 4096;
+// Entry headers are written by journalFromCli as `## <ISO timestamp> — …`.
+// Anchoring on the timestamp keeps a `## ` inside quoted prose from being
+// mistaken for an entry boundary.
+const JOURNAL_ENTRY_SPLIT = /\n(?=## \d{4}-\d{2}-\d{2}T)/;
 const MAX_BASELINE_HISTORY_COMMITS = 200;
 const MAX_HANDOFF_BYTES = 1_048_576;
 // SEC-05 Phase 4B-R4 — the size bound for repository-controlled files that are
@@ -3196,6 +3207,16 @@ async function removeLegacyProjectFiles(root) {
   }
 }
 
+// journal.md is append-only for the life of the project, and this rendered the
+// whole of it into context.md — the file every agent reads at session start.
+// On this repository that was 211 KB of a 220 KB context, 96% of it, growing
+// with every entry and never shrinking. The recalled-history section beside it
+// has always been bounded, and the Ollama consumer bounds the same journal to
+// 1,500 characters; only this path was unbounded.
+//
+// Keep the newest entries, whole, and say what was left out and where it lives.
+// The bounds live with the other module constants: this runs during the
+// entry-point await, where a const declared here would still be in its TDZ.
 async function formatLocalJournal(root) {
   const journal = await readRepositoryText(
     path.join(root, '.noosphere', 'journal.md'),
@@ -3203,9 +3224,24 @@ async function formatLocalJournal(root) {
   const firstEntry = journal.indexOf('\n## ');
   const entries =
     firstEntry >= 0 ? journal.slice(firstEntry + 1).trim() : '';
-  return entries
-    ? `## Local public work journal\n\n${entries}\n`
-    : '## Local public work journal\n\nNo entries yet.\n';
+  if (!entries) return '## Local public work journal\n\nNo entries yet.\n';
+
+  const all = entries.split(JOURNAL_ENTRY_SPLIT);
+  // Newest entries are last. Bound the count, then bound each entry on its own
+  // so one oversized entry cannot crowd out the others.
+  const kept = all.slice(-JOURNAL_CONTEXT_ENTRIES).map(boundJournalEntry);
+  const note =
+    kept.length < all.length
+      ? `Showing the newest ${kept.length} of ${all.length} entries; the full log is at .noosphere/journal.md.\n\n`
+      : '';
+  return `## Local public work journal\n\n${note}${kept.join('\n')}\n`;
+}
+
+// Truncation has to be visible, and it has to say where the rest is — a
+// silently shortened entry reads as the whole entry.
+function boundJournalEntry(entry) {
+  if (entry.length <= JOURNAL_ENTRY_BYTES) return entry;
+  return `${entry.slice(0, JOURNAL_ENTRY_BYTES).trimEnd()}\n\n[Entry truncated at ${JOURNAL_ENTRY_BYTES} of ${entry.length} bytes; full text in .noosphere/journal.md]\n`;
 }
 
 async function fileHasJournalEntries(root) {
