@@ -36,9 +36,19 @@ const STALE_BLOCK = `<!-- noosphere:continuity:start -->
 // Inherited GIT_* variables therefore turn a broken fixture into a silent no-op,
 // so drop them and give the child a git environment that depends on nothing
 // outside the temp project.
+// The CLI resolves its project from --path, then NOOSPHERE_PROJECT_DIR, then
+// INIT_CWD, and only then the working directory. npm sets INIT_CWD to wherever
+// `npm run` was invoked, so under `npm run check` — which is how CI runs the
+// suite — the CLI targeted the repository checkout and ignored the child's cwd
+// entirely, leaving the temp project untouched and exiting 0.
 function childEnv(home) {
   const env = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')),
+    Object.entries(process.env).filter(
+      ([key]) =>
+        !key.startsWith('GIT_') &&
+        key !== 'INIT_CWD' &&
+        key !== 'NOOSPHERE_PROJECT_DIR',
+    ),
   );
   return {
     ...env,
