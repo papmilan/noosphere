@@ -54,11 +54,12 @@ jobs:
       - run: npm audit --audit-level=high
 
   # The SEC-05 shards are their own tri-platform job rather than extra steps on
-  # the full-suite job. On windows-latest `npm run check` alone takes ~4 h —
-  # every owner-only ACL inspection costs an external process — so appending the
-  # shards behind it pushed one job toward GitHub's 6 h ceiling and twice cut the
-  # run off before any shard had run. As separate jobs they run in parallel, each
-  # with its own budget, and a boundary breach still fails within seconds.
+  # the full-suite job. Appending them behind `npm run check` pushed one job
+  # toward GitHub's 6 h ceiling and twice cut the run off before any shard had
+  # run, back when every owner-only ACL operation on windows-latest cost its own
+  # PowerShell start. They stay separate now that the ACL helper is a persistent
+  # host: they run in parallel, each with its own budget, and a boundary breach
+  # still fails within seconds.
   sec05-shards:
     name: SEC-05 shards / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -93,14 +94,16 @@ jobs:
       # and a platform cell in SEC-05-PHASE-4C-VERIFICATION.md is only evidence
       # if the shard that produced it is named and reproducible.
       #
-      # The per-test timeout is 3600 s because every restore apply and recovery
-      # spawns real children and, on windows-latest, each owner-only ACL
-      # inspection costs an external process: restore-recovery.test.js runs
-      # ~130-230 s per crash boundary there versus a few seconds on POSIX, and
-      # its ten boundaries overran the previous 1800 s budget for the file.
+      # The per-test timeout is 1800 s: these tests spawn real children, and on
+      # windows-latest each owner-only ACL operation still costs a round trip to
+      # the helper host. It was briefly 3600 s because restore-recovery.test.js
+      # ran 130-230 s per crash boundary there — 1777 s for the file — when every
+      # one of those operations paid its own PowerShell start. Serving them from
+      # a persistent host brought that file to ~59 s, so the stopgap is retired;
+      # see .github/workflows/windows-acl-profile.yml to re-measure.
       - name: SEC-05 Phase 4C trust and restore
         run: >-
-          node --test --test-concurrency=1 --test-timeout=3600000
+          node --test --test-concurrency=1 --test-timeout=1800000
           tests/trust-domain-separation.test.js
           tests/trust-record-splicing.test.js
           tests/trust-concurrency.test.js
@@ -129,7 +132,7 @@ jobs:
       # mutants run as one explicit release shard on Linux, macOS, and Windows.
       - name: SEC-05 Phase 5 replay ledger
         run: >-
-          node --test --test-concurrency=1 --test-timeout=3600000
+          node --test --test-concurrency=1 --test-timeout=1800000
           tests/phase5-conformance.test.js
           tests/replay-api-boundary.test.js
           tests/replay-cli-boundary.test.js
