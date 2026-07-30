@@ -38,17 +38,27 @@ jobs:
         working-directory: noosphere-relayer
         run: npm ci
 
+      # The mirror of the case above: noosphere-relayer's local-projects test
+      # boots noosphere-mcp's continuity CLI as a sibling child process, so that
+      # package's dependencies have to exist for the relayer's own suite to run.
+      - if: matrix.package == 'noosphere-relayer'
+        working-directory: noosphere-mcp
+        run: npm ci
+
       - run: npm run check
 
       # SEC-03: both persistence consumers run the shared boundary and their own
       # security suites on every OS. On windows-latest the exact numeric-SID ACL
       # tests execute rather than skip; a skipped Windows security test is not
       # evidence of closure.
-      # A skipped or unrun security test is not evidence of closure. Scoped to the
-      # security suite: the full relayer suite has pre-existing, non-security Windows
-      # failures (POSIX 0o600 mode not enforceable on Windows; local-projects boots
-      # noosphere-mcp whose workspace deps this job does not install) that are out of
-      # SEC-03 scope and tracked separately.
+      #
+      # This step used to be the relayer's only gate, because its full suite had
+      # two non-security Windows failures: a POSIX 0o600 assertion that carries
+      # no meaning there (now guarded, with the SID-ACL assertion in
+      # windows-acl.test.js standing in its place), and local-projects booting
+      # noosphere-mcp without its dependencies (now installed above). Both are
+      # fixed, so `npm run check` runs the whole relayer suite on every OS and
+      # this step is the security-scoped belt to that braces.
       - run: npm run test:security
 
       - run: npm audit --audit-level=high

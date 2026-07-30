@@ -116,6 +116,10 @@ const uploadMinIntervalMs =
         30_000,
         'UPLOAD_MIN_INTERVAL_MS',
       );
+// Retries a queued item has survived before /ready calls it failing rather
+// than in flight. Two covers an ordinary transient upstream blip; a third
+// failed attempt means the write is genuinely not landing.
+const QUEUE_FAILING_ATTEMPTS = 3;
 let queueRecoveryTimer = null;
 let queuePausedUntil = 0;
 let uploadInProgress = false;
@@ -170,6 +174,21 @@ app.get('/ready', async (_req, res) => {
   const uploadDelayMs = uploadDelayRemaining();
   const ready = memory.ready && state.ready;
   const status = ready ? 200 : 503;
+  // A pending count alone cannot tell a queue that is draining from one that
+  // has been failing for days: both read as "N pending", and a caller that
+  // only sees the number reports all-green while nothing lands. The durable
+  // store already records per-item attempts and the last error, so publish the
+  // retry signal that separates the two.
+  const failing = pending.filter(
+    (item) => (item?.attempts ?? 0) >= QUEUE_FAILING_ATTEMPTS,
+  );
+  const newestFailure = failing.reduce(
+    (latest, item) =>
+      !latest || (item.lastAttemptAt ?? '') > (latest.lastAttemptAt ?? '')
+        ? item
+        : latest,
+    null,
+  );
   res.status(status).json({
     success: ready,
     service: 'Noosphere',
@@ -177,6 +196,14 @@ app.get('/ready', async (_req, res) => {
     exact_state: exactState,
     queue: {
       pending: pending.length,
+      // Items that have been retried past a transient blip and are still
+      // queued. Non-zero means writes are not landing, whatever the count says.
+      failing: failing.length,
+      max_attempts: pending.reduce(
+        (most, item) => Math.max(most, item?.attempts ?? 0),
+        0,
+      ),
+      last_error: newestFailure?.lastError ?? null,
       durable: state.durable,
       writable: state.ready,
       paused_until:

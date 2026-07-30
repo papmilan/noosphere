@@ -566,6 +566,44 @@ describe('Noosphere memory API', () => {
     assert.match(body.exact_state.relayer_index_id, /^sha256:[0-9a-f]{64}$/);
   });
 
+  it('separates a queue that is failing from one that is merely deep', async () => {
+    // A depth alone reads identically whether uploads are landing or not, so
+    // /ready must publish the retry signal that tells them apart. Without it a
+    // caller reports all-green while every write silently backs up.
+    try {
+      await runtimeStore.enqueue('ready-health:draining', { projectId: 'p' });
+      await runtimeStore.enqueue('ready-health:stuck', { projectId: 'p' });
+      // One transient miss: still in flight, not yet a failure.
+      await runtimeStore.markAttempt(
+        'ready-health:draining',
+        new Error('transient blip'),
+      );
+      // Retried past the threshold and still queued: genuinely not landing.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await runtimeStore.markAttempt(
+          'ready-health:stuck',
+          new Error('Walrus Memory server error (503): uploads are paused'),
+        );
+      }
+
+      const body = await (await fetch(`${baseUrl}/ready`)).json();
+      assert.equal(body.queue.pending, 2, 'both items are still queued');
+      assert.equal(body.queue.failing, 1, 'only the retried item counts as failing');
+      assert.equal(body.queue.max_attempts, 3);
+      assert.match(body.queue.last_error, /uploads are paused/);
+    } finally {
+      await runtimeStore.clear();
+    }
+  });
+
+  it('reports a clean queue as not failing rather than unknown', async () => {
+    const body = await (await fetch(`${baseUrl}/ready`)).json();
+    assert.equal(body.queue.pending, 0);
+    assert.equal(body.queue.failing, 0);
+    assert.equal(body.queue.max_attempts, 0);
+    assert.equal(body.queue.last_error, null);
+  });
+
   it('keeps liveness independent from Walrus readiness', async () => {
     const response = await fetch(`${baseUrl}/health`);
     assert.equal(response.status, 200);

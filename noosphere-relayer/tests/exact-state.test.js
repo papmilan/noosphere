@@ -81,7 +81,13 @@ describe('FileSnapshotBackend', () => {
     assert.equal(first.bytes, bytes.length);
     await backend.put(PROJECT, id, bytes); // idempotent, no throw
     assert.deepEqual(await backend.get(PROJECT, id), bytes);
-    assert.equal((await stat(backend.pathFor(PROJECT, id))).mode & 0o777, 0o600);
+    // POSIX mode bits carry no owner-only meaning on Windows, where the same
+    // guarantee is an explicit SID ACL — asserted separately by
+    // windows-acl.test.js ("FileSnapshotBackend snapshot is owner-only").
+    // Only this assertion is platform-bound; the round-trip above is not.
+    if (process.platform !== 'win32') {
+      assert.equal((await stat(backend.pathFor(PROJECT, id))).mode & 0o777, 0o600);
+    }
   });
 
   it('rejects the same id with different bytes', async () => {

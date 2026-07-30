@@ -11,7 +11,7 @@
     "test": "node --experimental-vm-modules --test tests/*.test.js",
     "test:security": "node --test ../noosphere-secure-fs/tests/acl-host-framing.test.js ../noosphere-secure-fs/tests/secure-persistence.test.js tests/secure-fs.test.js tests/state-load-symlink.test.js tests/snapshot-path-escape.test.js tests/windows-reparse.test.js tests/windows-acl.test.js tests/credentials.test.js tests/owner-only-boundary.test.js tests/relayer-origins.test.js tests/relayer-redirect-guard.test.js",
     "test:live": "node scripts/live-walrus-smoke.js",
-    "check": "node --check index.js && node --check memory.js && node --check local-memory.js && node --check walrus-memory.js && node --check relayer-origins.js && node --check relayer-fetch-guard.js && node --check durable-store.js && node --check durability.js && node --check security.js && node --check credentials.js && node --check local-projects.js && node --check acp-protocol.js && node --check snapshot-backend.js && node --check walrus-snapshot-backend.js && node --check exact-state.js && node --check exact-routes.js"
+    "check": "node --check index.js && node --check memory.js && node --check local-memory.js && node --check walrus-memory.js && node --check relayer-origins.js && node --check relayer-fetch-guard.js && node --check durable-store.js && node --check durability.js && node --check security.js && node --check credentials.js && node --check local-projects.js && node --check acp-protocol.js && node --check snapshot-backend.js && node --check walrus-snapshot-backend.js && node --check exact-state.js && node --check exact-routes.js && npm test"
   },
   "files": [
     "acp-protocol.js",
