@@ -14,7 +14,7 @@ Dates are npm publish dates. The format follows
 
 ### Unreleased
 
-- **SEC-05 Phase 5 replay-ledger release candidate.** Added owner-local,
+- **SEC-05 Phase 5 replay ledger — closes SEC-05.** Added owner-local,
   authenticated replay observations with content-based identity, monotonic
   counts, crash-recoverable journals, deterministic 4,096-record/90-day
   retention, typed restore suppression, and informational replay/freshness
@@ -27,9 +27,16 @@ Dates are npm publish dates. The format follows
   mutants are killed and every RPL invariant/test identifier is mapped.
   Multi-item typed refresh serializes replay observations to avoid self-lock
   evidence loss, and crash-lock behavior now explicitly refuses until owner
-  intervention before production-path journal recovery. This entry does
-  **not** close SEC-05: exact-head Linux/macOS/Windows CI and independent
-  hostile review remain mandatory.
+  intervention before production-path journal recovery. Windows ACL
+  operations are served by a persistent length-framed helper instead of one
+  process per inspection, removing the dominant Windows CI cost. Both closure
+  gates passed at final head `d6dc0b6`: tri-platform exact-head CI
+  ([run 30526063300](https://github.com/papmilan/noosphere/actions/runs/30526063300))
+  and an independent exact-head hostile review with no Critical, Important, or
+  Minor finding. Merged in
+  [PR #35](https://github.com/papmilan/noosphere/pull/35), merge commit
+  `c54189b`. Evidence:
+  [docs/security/SEC-05-PHASE-5-VERIFICATION.md](docs/security/SEC-05-PHASE-5-VERIFICATION.md).
 - **SEC-03 (Windows owner-only persistence) — closes SEC-03.** The centralized
   `@noosphere/secure-fs` boundary now enforces an exact three-SID Windows DACL
   (token user SID, `S-1-5-18`, `S-1-5-32-544`) via a fixed PowerShell/.NET helper:
