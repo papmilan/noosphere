@@ -1,12 +1,7 @@
 {
   "version": 1,
-  "status": "in_progress",
+  "status": "in-progress",
   "current_task": "Closure documentation pass done: SECURITY-FOLLOWUPS.md now records SEC-01/01b/03/05 all CLOSED and 'Remaining before public-ready' is replaced by a 'Public-readiness status' section with the two non-blocking defense-in-depth items",
   "next_action": "Commit the closure-documentation pass and decide public release; post-release hardening backlog: DNS-rebinding resolve-and-pin, ACL-profiler workflow_dispatch input allowlisting",
-  "blocker": null,
-  "pending_checkpoint_fingerprint": "08185e4515ef298d0beace0c3515e9f558cc47f13ac8314cba5008f25c35bbb0",
-  "last_checkpoint_at": "2026-07-30T13:25:59.372Z",
-  "last_blob_id": null,
-  "last_checkpoint_pending": true,
-  "last_workspace_fingerprint": "ad0fe0ece7a7e65dd687277a016319fbd517656f7eccfaf901e048c71c62bfe6"
+  "blocker": null
 }
