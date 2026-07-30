@@ -23,7 +23,7 @@ const {
   await import('../index.js');
 const { MemoryStore, memoryStore, parseMemory, serializeMemory } =
   await import('../memory.js');
-const { resolveWalrusConfig, WALRUS_NETWORKS } =
+const { resolveWalrusConfig, validateOnChainAccount, WALRUS_NETWORKS } =
   await import('../walrus-memory.js');
 const { DurableStore, retryOperation } =
   await import('../durable-store.js');
@@ -105,6 +105,85 @@ describe('Noosphere memory API', () => {
           MEMWAL_ACCOUNT_ID: '1234',
         }),
       /Sui object ID/,
+    );
+  });
+
+  it('validates the on-chain account against a gRPC response', async () => {
+    const { delegateKeyToPublicKey } = await import(
+      '@mysten-incubation/memwal'
+    );
+    const config = resolveWalrusConfig({
+      MEMWAL_PRIVATE_KEY: 'a'.repeat(64),
+      MEMWAL_ACCOUNT_ID: `0x${'1'.repeat(64)}`,
+    });
+    const publicKey = Buffer.from(
+      await delegateKeyToPublicKey(config.privateKey),
+    ).toString('base64');
+
+    // gRPC returns Move `vector<u8>` as base64, not the numeric array
+    // JSON-RPC produced, and puts the parsed fields on `object.json`.
+    const grpcAccount = (overrides = {}) => ({
+      getObject: async () => ({
+        object: {
+          type: `${config.packageId}::account::MemWalAccount`,
+          json: {
+            active: true,
+            delegate_keys: [{ label: 'Web App', public_key: publicKey }],
+          },
+          ...overrides,
+        },
+      }),
+    });
+
+    assert.deepEqual(
+      await validateOnChainAccount(config, {
+        createClient: () => grpcAccount(),
+      }),
+      { valid: true, delegateRegistered: true },
+    );
+
+    await assert.rejects(
+      validateOnChainAccount(config, {
+        createClient: () => ({
+          getObject: async () => {
+            throw new Error(`Object ${config.accountId} not found`);
+          },
+        }),
+      }),
+      /does not exist on Sui mainnet/,
+    );
+
+    // A dead endpoint must stay diagnosable rather than read as a missing
+    // account — that distinction is what made the JSON-RPC outage findable.
+    await assert.rejects(
+      validateOnChainAccount(config, {
+        createClient: () => ({
+          getObject: async () => {
+            throw new Error('fetch failed: ECONNREFUSED');
+          },
+        }),
+      }),
+      /ECONNREFUSED/,
+    );
+
+    await assert.rejects(
+      validateOnChainAccount(config, {
+        createClient: () =>
+          grpcAccount({
+            json: {
+              active: true,
+              delegate_keys: [{ label: 'Other', public_key: 'AAAA' }],
+            },
+          }),
+      }),
+      /delegate key is not registered/,
+    );
+
+    await assert.rejects(
+      validateOnChainAccount(config, {
+        createClient: () => grpcAccount({ type: '0x2::coin::Coin' }),
+      }),
+      /is not a mainnet MemWalAccount/,
     );
   });
 

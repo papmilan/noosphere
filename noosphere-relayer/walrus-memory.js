@@ -1,9 +1,6 @@
 import os from 'node:os';
 import { delegateKeyToPublicKey, MemWal } from '@mysten-incubation/memwal';
-import {
-  getJsonRpcFullnodeUrl,
-  SuiJsonRpcClient,
-} from '@mysten/sui/jsonRpc';
+import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { loadCredentialsIntoEnv } from './credentials.js';
 import { installRelayerFetchGuard } from './relayer-fetch-guard.js';
 import { assertApprovedRelayerOrigin } from './relayer-origins.js';
@@ -17,6 +14,7 @@ export const WALRUS_NETWORKS = {
     registryId:
       '0x0da982cefa26864ae834a8a0504b904233d49e20fcc17c373c8bed99c75a7edd',
     relayerUrl: 'https://relayer.memory.walrus.xyz',
+    rpcUrl: 'https://fullnode.mainnet.sui.io:443',
   },
   testnet: {
     packageId:
@@ -24,6 +22,7 @@ export const WALRUS_NETWORKS = {
     registryId:
       '0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437',
     relayerUrl: 'https://relayer-staging.memory.walrus.xyz',
+    rpcUrl: 'https://fullnode.testnet.sui.io:443',
   },
 };
 
@@ -163,7 +162,7 @@ export function resolveWalrusConfig(env = process.env) {
     packageId: networkConfig.packageId,
     registryId: networkConfig.registryId,
     relayerUrl: env.MEMWAL_SERVER_URL || networkConfig.relayerUrl,
-    rpcUrl: env.MEMWAL_SUI_RPC_URL || getJsonRpcFullnodeUrl(network),
+    rpcUrl: env.MEMWAL_SUI_RPC_URL || networkConfig.rpcUrl,
     privateKey,
     accountId,
     configured: Boolean(privateKey && accountId),
@@ -176,33 +175,43 @@ export function resolveWalrusConfig(env = process.env) {
   };
 }
 
-export async function validateOnChainAccount(config) {
-  const client = new SuiJsonRpcClient({
-    url: config.rpcUrl,
-    network: config.network,
-  });
-  const object = await client.getObject({
-    id: config.accountId,
-    options: { showContent: true, showType: true },
-  });
+export async function validateOnChainAccount(config, { createClient } = {}) {
+  // Sui public fullnodes retired JSON-RPC (-32601 on every method), so this
+  // reads the account over gRPC-web instead. Same host and port as before.
+  // `createClient` is a test seam, matching WalrusMemoryAdapter's.
+  const client = createClient
+    ? createClient(config)
+    : new SuiGrpcClient({
+        network: config.network,
+        baseUrl: config.rpcUrl,
+      });
 
-  if (!object.data) {
+  let object;
+  try {
+    // `include.json` returns the parsed Move fields; without it the response
+    // carries only object metadata.
+    ({ object } = await client.getObject({
+      objectId: config.accountId,
+      include: { json: true },
+    }));
+  } catch (error) {
+    // A missing object throws here rather than returning an empty result.
+    // Every other failure (transport, TLS, wrong endpoint) must surface as
+    // itself — that is how a dead endpoint stays diagnosable.
+    if (!/not found/i.test(error.message)) throw error;
     throw new Error(
       `MemWalAccount ${config.accountId} does not exist on Sui ${config.network}`,
     );
   }
 
   const expectedType = `${config.packageId}::account::MemWalAccount`;
-  if (object.data.type !== expectedType) {
+  if (object.type !== expectedType) {
     throw new Error(
       `Object ${config.accountId} is not a ${config.network} MemWalAccount`,
     );
   }
 
-  const fields =
-    object.data.content?.dataType === 'moveObject'
-      ? object.data.content.fields
-      : null;
+  const fields = object.json;
   if (!fields || fields.active === false) {
     throw new Error(`MemWalAccount ${config.accountId} is not active`);
   }
@@ -220,7 +229,16 @@ export async function validateOnChainAccount(config) {
   return { valid: true, delegateRegistered: true };
 }
 
-function containsByteArray(value, expected) {
+function containsByteArray(
+  value,
+  expected,
+  // gRPC renders Move `vector<u8>` as a base64 string where JSON-RPC returned a
+  // numeric array. Both shapes are accepted so the delegate lookup does not
+  // depend on the transport. Computed once by the top-level call and threaded
+  // through the recursion.
+  encoded = Buffer.from(expected).toString('base64'),
+) {
+  if (typeof value === 'string') return value === encoded;
   if (Array.isArray(value)) {
     if (
       value.length === expected.length &&
@@ -228,11 +246,11 @@ function containsByteArray(value, expected) {
     ) {
       return true;
     }
-    return value.some((item) => containsByteArray(item, expected));
+    return value.some((item) => containsByteArray(item, expected, encoded));
   }
   if (value && typeof value === 'object') {
     return Object.values(value).some((item) =>
-      containsByteArray(item, expected),
+      containsByteArray(item, expected, encoded),
     );
   }
   return false;
