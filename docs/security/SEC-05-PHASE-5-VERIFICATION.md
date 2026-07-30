@@ -67,11 +67,28 @@ budget.
 | 9 of the 26 mutants in `replay-mutation` — exactly the 9 whose anchors span lines | `windows-latest` checks out with `core.autocrlf=true`. CRLF text cannot match an exact multi-line `\n` source anchor, so those mutants were reported as missing anchors rather than as killed mutants. | A repository `.gitattributes` pinning `* text=auto eol=lf`, so every platform checks out the bytes the digests, anchors, and mutants are written against. |
 | `restore-recovery.test.js` (Phase 4C) timed out at 1 800 s | Every crash boundary spawns real children and each owner-only ACL inspection costs an external process on Windows: 130–230 s per boundary there versus a few seconds on POSIX. Its ten boundaries all passed but summed to 1 777 s, overrunning the per-test budget for the file itself. | Raise the per-test timeout to 3 600 s in `check`, `test`, and both SEC-05 CI shards. |
 
-Residual watch item: `npm run check` alone took ~3.3 h on `windows-latest`, and
-the Phase 4C and Phase 5 shards re-run its heaviest child-process files. Total
-`noosphere-mcp / windows-latest` job time is the next gate to observe against
-GitHub's 6 h job ceiling; the cost driver is one spawned process per Windows
-owner-only ACL inspection, not the replay ledger.
+Run 30493832013 at `ba65d81` then took the Windows job further than any earlier
+head: `npm run check` **passed** on `windows-latest` — 862 tests, 849 passed, 0
+failed, 13 documented platform skips — in 3 h 54 min, and `ubuntu-latest` and
+`macos-latest` stayed green. Two items remained:
+
+- `npm run test:security` failed one assertion, the same POSIX-mode class as the
+  replay key: `noosphere-secure-fs/tests/replacement.test.js` asserted mode
+  `0o600` on the prepared sibling, which Node reports as `0o666` on Windows. The
+  file already guarded its other three mode assertions with
+  `process.platform !== 'win32'`; that guard now also covers the prepared
+  temporary, and `secure-persistence.test.js` remains the Windows ACL evidence
+  for the same path.
+- The Windows job never reached either SEC-05 shard, for the third run in a row,
+  because `npm run check` consumed ~4 of the job's 6 hours. The shards are now
+  their own tri-platform `sec05-shards` job instead of steps appended to the
+  full-suite job, so they run in parallel with the full suite, each with its own
+  budget, and shard evidence no longer depends on the full suite finishing
+  first.
+
+Residual watch item: the Windows cost driver is one spawned process per
+owner-only ACL inspection, not the replay ledger. Until that is reduced, Windows
+runs about 40× slower than POSIX on child-process restore and replay tests.
 
 ## Normative traceability
 

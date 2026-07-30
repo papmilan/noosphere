@@ -38,7 +38,12 @@ describe('two-phase owner-only replacement', () => {
       { root: context.root },
     );
     await assert.rejects(fs.access(context.destination));
-    assert.equal((await fs.stat(prepared.temporaryPath)).mode & 0o777, 0o600);
+    // Windows carries owner-only intent in the SID DACL that the prepare step
+    // applies and verifies, not in POSIX mode bits, which Node reports as 0o666
+    // there; secure-persistence.test.js covers the Windows ACL path.
+    if (process.platform !== 'win32') {
+      assert.equal((await fs.stat(prepared.temporaryPath)).mode & 0o777, 0o600);
+    }
 
     await commitOwnerOnlyReplacement(prepared, { root: context.root });
 
