@@ -250,12 +250,27 @@ async function writeJsonAtomic(root, target, bytes, expectedIdentity, readRecord
   }
 }
 
+// POSIX answers an exclusive create against an existing lock with EEXIST.
+// Windows answers with EPERM or EACCES whenever another handle still holds the
+// file — including one already unlinked but pending delete, which is the state
+// this module's own release leaves behind for a moment. Treating those as fatal
+// turned ordinary contention into a hard failure: `EPERM: operation not
+// permitted, open .csp-state.lock`, intermittently, on Windows CI.
+function isLockContention(error, platform) {
+  if (error.code === 'EEXIST') return true;
+  return platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(error.code);
+}
+
 export async function withCspLock(root, operation, options = {}) {
   const paths = cspPaths(root);
   await ensureContainedDir(root, paths.dir);
   const token = randomUUID();
   let handle;
+  let contention;
   const openImpl = options.openImpl ?? open;
+  // Injectable so the Windows contention path is exercisable off Windows,
+  // matching NOOSPHERE_TEST_PLATFORM elsewhere in the package.
+  const platform = options.platform ?? process.platform;
   for (let attempt = 0; attempt < 500; attempt += 1) {
     let candidate;
     try {
@@ -271,12 +286,19 @@ export async function withCspLock(root, operation, options = {}) {
       handle = candidate;
       break;
     } catch (error) {
-      if (error.code !== 'EEXIST') throw mapNoFollowError(error, paths.lock);
-      if (await staleLock(paths.lock)) await rm(paths.lock, { force: true });
+      if (!isLockContention(error, platform)) throw mapNoFollowError(error, paths.lock);
+      contention = error;
+      if (await staleLock(paths.lock)) await rm(paths.lock, { force: true }).catch(() => undefined);
       else await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
-  if (!handle) throw cspError('csp-lock-timeout', 'Timed out waiting for the CSP transition lock');
+  if (!handle) {
+    // Report the permission error itself rather than a generic timeout when
+    // that is what we spent the retries on; an ACL problem and a busy lock are
+    // different problems and should not read the same.
+    if (contention && contention.code !== 'EEXIST') throw mapNoFollowError(contention, paths.lock);
+    throw cspError('csp-lock-timeout', 'Timed out waiting for the CSP transition lock');
+  }
   let value;
   let operationError;
   try {

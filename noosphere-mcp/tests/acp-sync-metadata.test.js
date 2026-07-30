@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -247,5 +247,28 @@ describe('ACP quarantine', () => {
         await mkdir(directory, { mode: 0o700 });
       },
     }), /quarantine-directory-mismatch/);
+
+    // The swap above is caught by dev/ino on POSIX, but those read as equal for
+    // two different directories on Windows, where the check silently passed.
+    // Losing the nonce alone must be refused, which is the signal that survives
+    // there.
+    const markerRoot = await temp();
+    await assert.rejects(quarantineBytes(markerRoot, id('e'), bytes, {
+      beforeSpawn: async (directory) => {
+        for (const entry of await readdir(directory)) {
+          if (entry.startsWith('.quarantine-identity-')) {
+            await rm(path.join(directory, entry));
+          }
+        }
+      },
+    }), /quarantine-directory-mismatch/);
+
+    // The nonce must not survive a successful write either.
+    const cleanRoot = await temp();
+    const written = await quarantineBytes(cleanRoot, id('f'), bytes);
+    const leftovers = (await readdir(path.dirname(written.path))).filter((entry) =>
+      entry.startsWith('.quarantine-identity-'),
+    );
+    assert.deepEqual(leftovers, []);
   });
 });

@@ -6,7 +6,12 @@ import { fileURLToPath } from 'node:url';
 import { canonicalize } from '@noosphere/acp-protocol';
 import { RECONCILIATION_POLICY_VERSION, SYNC_PROTOCOL_VERSION } from '@noosphere/acp-protocol';
 import { syncDirectoryPath } from './durability.js';
-import { atomicOwnerOnlyWrite, readBoundedRegularFile, readOwnerOnlyFile } from '../secure-fs.js';
+import {
+  atomicOwnerOnlyWrite,
+  readBoundedRegularFile,
+  readOwnerOnlyFile,
+  writeOwnerOnlyFileExclusive,
+} from '../secure-fs.js';
 
 const METADATA_FILE = 'continuity-sync.json';
 
@@ -165,10 +170,32 @@ export async function quarantineBytes(root, receivedSnapshotId, receivedBytes, o
   const identity = await lstat(directory);
   const safeId = SNAPSHOT_ID.test(receivedSnapshotId) ? receivedSnapshotId.slice(7) : hashHex(bytes);
   const filename = `sha256-${safeId}.json`;
-  await options.beforeSpawn?.(directory);
-  await runQuarantineWriter(directory, filename, identity, bytes);
-  const after = await lstat(directory).catch(() => null);
-  if (!after || after.dev !== identity.dev || after.ino !== identity.ino) throw syncError('quarantine-directory-mismatch');
+
+  // dev/ino alone is not a dependable directory identity on Windows: libuv
+  // cannot always populate them for a directory, and where it can, NTFS reuses
+  // file-index numbers. When both sides read as equal the swap defence silently
+  // passes — which is how the swap case reached CI as "Missing expected
+  // rejection" rather than a rejection.
+  //
+  // Anchor the check on a nonce this call placed inside the directory. A
+  // directory substituted at the same path cannot carry it, on any platform.
+  // The dev/ino comparison stays as the stronger POSIX signal.
+  const marker = `.quarantine-identity-${randomUUID()}`;
+  await writeOwnerOnlyFileExclusive(path.join(directory, marker), Buffer.alloc(0), { root });
+  try {
+    await options.beforeSpawn?.(directory);
+    await runQuarantineWriter(directory, filename, identity, marker, bytes);
+    const after = await lstat(directory).catch(() => null);
+    const markerHeld = await lstat(path.join(directory, marker)).then(
+      (entry) => entry.isFile(),
+      () => false,
+    );
+    if (!after || !markerHeld || after.dev !== identity.dev || after.ino !== identity.ino) {
+      throw syncError('quarantine-directory-mismatch');
+    }
+  } finally {
+    await rm(path.join(directory, marker), { force: true }).catch(() => undefined);
+  }
   return {
     path: path.join(directory, filename),
     snapshot_id: SNAPSHOT_ID.test(receivedSnapshotId) ? receivedSnapshotId : null,
@@ -276,10 +303,10 @@ async function staleLock(lockPath) {
   catch (error) { return error.code === 'ESRCH'; }
 }
 
-async function runQuarantineWriter(directory, filename, identity, bytes) {
+async function runQuarantineWriter(directory, filename, identity, marker, bytes) {
   const helper = fileURLToPath(new URL('./quarantine-writer.js', import.meta.url));
   await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [helper, filename, String(identity.dev), String(identity.ino)], {
+    const child = spawn(process.execPath, [helper, filename, String(identity.dev), String(identity.ino), marker], {
       cwd: directory,
       stdio: ['pipe', 'ignore', 'pipe'],
     });
