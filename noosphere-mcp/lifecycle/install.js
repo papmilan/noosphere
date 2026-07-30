@@ -22,6 +22,7 @@ import { CredentialStore } from './credentials.js';
 import { formatServiceInstallError } from './service-errors.js';
 import { escapeRegExp, exists, npmCommand, npmSpawnOptions } from './util.js';
 import { atomicOwnerOnlyWrite, readOwnerOnlyFile } from '../continuity/secure-fs.js';
+import { secureRelayerFetch } from '../continuity/relayer-authority.js';
 
 const execFileAsync = promisify(execFile);
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -55,6 +56,10 @@ const shellDirectory = home; // shell fragments live in ~/.noosphere/
 const relayerLabel = 'xyz.noosphere.relayer';
 const managerLabel = 'xyz.noosphere.manager';
 const node = process.execPath;
+
+// Declared before the entry-point await, like the guard markers below: doctor
+// runs during that await, and a const initialized later is still in its TDZ.
+const READY_TIMEOUT_MS = 10_000;
 
 // Shell block guard markers — must be declared before the entry-point await.
 const GUARD_START = '# >>> noosphere >>>';
@@ -258,6 +263,7 @@ async function doctor() {
     installed_cli: await exists(path.join(binDirectory, 'noosphere')),
     ...platformChecks,
     credentials: await configuredCredentials(path.join(installedRelayer, '.env')),
+    relayer_ready: await relayerReadiness(path.join(installedRelayer, '.env')),
   };
 
   console.log(JSON.stringify(checks, null, 2));
@@ -266,10 +272,58 @@ async function doctor() {
     !checks.installed_cli ||
     !checks.relayer_service ||
     !checks.manager_service ||
-    !checks.credentials
+    !checks.credentials ||
+    !checks.relayer_ready.ok
   ) {
     process.exitCode = 1;
   }
+}
+
+// Presence checks alone cannot see a relayer that is running and refusing every
+// request: doctor reported all-green while /ready was answering 503 with a dead
+// memory backend and a six-figure upload backlog. /ready already knows, so ask
+// it, and let its answer decide the exit code.
+//
+// The probe goes through secureRelayerFetch so an unapproved or non-HTTPS
+// origin is refused before any request leaves, and no API token is sent to one.
+async function relayerReadiness(envFile) {
+  const url = await relayerUrlFor(envFile);
+  try {
+    const response = await secureRelayerFetch(`${url}/ready`, {
+      signal: AbortSignal.timeout(READY_TIMEOUT_MS),
+    });
+    const body = await response.json().catch(() => null);
+    return {
+      url,
+      ok: response.ok,
+      memory_ready: body?.memory?.ready ?? null,
+      queue_pending: body?.queue?.pending ?? null,
+      // The upstream reason is the point of asking; pass it through verbatim
+      // rather than flattening it into another opaque failure.
+      ...(response.ok
+        ? {}
+        : { error: body?.memory?.error ?? `HTTP ${response.status}` }),
+    };
+  } catch (error) {
+    // Node reports a bare "fetch failed" and hides ECONNREFUSED in the cause.
+    // The cause is the part that tells a user the relayer simply is not up.
+    const cause = error.cause?.code ?? error.cause?.message;
+    return {
+      url,
+      ok: false,
+      error: cause ? `${error.message} (${cause})` : error.message,
+    };
+  }
+}
+
+async function relayerUrlFor(envFile) {
+  if (process.env.NOOSPHERE_RELAYER_URL) return process.env.NOOSPHERE_RELAYER_URL;
+  const contents = await readFile(envFile, 'utf8').catch(() => '');
+  const host = /^HOST=(.*)$/m.exec(contents)?.[1]?.trim();
+  const port = /^PORT=(.*)$/m.exec(contents)?.[1]?.trim();
+  // A wildcard bind is what the service listens on, not somewhere to connect.
+  const target = !host || host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host;
+  return `http://${target}:${port || 3001}`;
 }
 
 // ---------------------------------------------------------------------------

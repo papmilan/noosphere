@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import {
   access,
   mkdtemp,
@@ -105,6 +106,26 @@ function baseEnv(fakeHome, noosphereHome) {
     NOOSPHERE_SKIP_SCHTASKS: '1',
     NOOSPHERE_SKIP_CLAUDE_HOOK: '1',
     NOOSPHERE_SKIP_NPM: '1',
+    // doctor probes /ready. Point it at the discard port so these fake homes
+    // never reach a relayer the developer happens to be running.
+    NOOSPHERE_RELAYER_URL: 'http://127.0.0.1:9',
+  };
+}
+
+/** Serve one canned /ready response; returns { url, close }. */
+async function readyStub(status, body) {
+  const server = createServer((request, response) => {
+    if (!request.url.startsWith('/ready')) {
+      response.writeHead(404).end();
+      return;
+    }
+    response.writeHead(status, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(body));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    url: `http://127.0.0.1:${server.address().port}`,
+    close: () => new Promise((resolve) => server.close(resolve)),
   };
 }
 
@@ -232,6 +253,104 @@ describe('Noosphere macOS lifecycle installer', () => {
       assert.ok('relayer_service' in report);
       assert.ok('manager_service' in report);
       assert.ok('credentials' in report);
+    } finally {
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it('doctor fails when the relayer is running but not ready', async () => {
+    const fakeHome = await makeFakeHome({ '.zshrc': '' });
+    const noosphereHome = path.join(fakeHome, '.noosphere');
+    // The exact shape that used to pass silently: the service is up, so every
+    // presence check is true, while /ready reports a dead memory backend.
+    const stub = await readyStub(503, {
+      success: false,
+      memory: { ready: false, error: 'JSON-RPC on public fullnodes has been deprecated' },
+      queue: { pending: 26866 },
+    });
+
+    try {
+      await runInstallerOk('install', {
+        ...baseEnv(fakeHome, noosphereHome),
+        NOOSPHERE_TEST_PLATFORM: 'darwin',
+      });
+
+      const { stdout, code } = await runInstaller('doctor', {
+        ...baseEnv(fakeHome, noosphereHome),
+        NOOSPHERE_TEST_PLATFORM: 'darwin',
+        NOOSPHERE_RELAYER_URL: stub.url,
+      });
+
+      const ready = JSON.parse(stdout).relayer_ready;
+      assert.equal(ready.ok, false);
+      assert.equal(ready.memory_ready, false);
+      assert.equal(ready.queue_pending, 26866);
+      // The upstream reason must survive, not flatten into another opaque 503.
+      assert.match(ready.error, /JSON-RPC on public fullnodes/);
+      assert.equal(code, 1);
+    } finally {
+      await stub.close();
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it('doctor reports a healthy relayer with its queue depth', async () => {
+    const fakeHome = await makeFakeHome({ '.zshrc': '' });
+    const noosphereHome = path.join(fakeHome, '.noosphere');
+    const stub = await readyStub(200, {
+      success: true,
+      memory: { ready: true },
+      queue: { pending: 0 },
+    });
+
+    try {
+      await runInstallerOk('install', {
+        ...baseEnv(fakeHome, noosphereHome),
+        NOOSPHERE_TEST_PLATFORM: 'darwin',
+      });
+
+      const { stdout } = await runInstaller('doctor', {
+        ...baseEnv(fakeHome, noosphereHome),
+        NOOSPHERE_TEST_PLATFORM: 'darwin',
+        NOOSPHERE_RELAYER_URL: stub.url,
+      });
+
+      assert.deepEqual(JSON.parse(stdout).relayer_ready, {
+        url: stub.url,
+        ok: true,
+        memory_ready: true,
+        queue_pending: 0,
+      });
+    } finally {
+      await stub.close();
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it('doctor records an unreachable relayer instead of passing', async () => {
+    const fakeHome = await makeFakeHome({ '.zshrc': '' });
+    const noosphereHome = path.join(fakeHome, '.noosphere');
+    // Take a real port and release it, so the probe meets a refused connection
+    // on an ordinary port rather than one Node rejects out of hand.
+    const stub = await readyStub(200, {});
+    await stub.close();
+
+    try {
+      await runInstallerOk('install', {
+        ...baseEnv(fakeHome, noosphereHome),
+        NOOSPHERE_TEST_PLATFORM: 'darwin',
+      });
+
+      const { stdout, code } = await runInstaller('doctor', {
+        ...baseEnv(fakeHome, noosphereHome),
+        NOOSPHERE_TEST_PLATFORM: 'darwin',
+        NOOSPHERE_RELAYER_URL: stub.url,
+      });
+
+      const ready = JSON.parse(stdout).relayer_ready;
+      assert.equal(ready.ok, false);
+      assert.match(ready.error, /ECONNREFUSED/);
+      assert.equal(code, 1);
     } finally {
       await rm(fakeHome, { recursive: true, force: true });
     }
