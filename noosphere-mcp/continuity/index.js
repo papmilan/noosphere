@@ -118,6 +118,17 @@ const MAX_CHECKPOINT_RETRY_MS = 5 * 60_000;
 const DEFAULT_WRITE_TIMEOUT_MS = 130_000;
 const DEFAULT_READ_TIMEOUT_MS = 30_000;
 const DEFAULT_BASELINE_HISTORY_COMMITS = 50;
+// Bounds for the journal section of context.md — see formatLocalJournal.
+// On this repository's 135 entries the median is 883 bytes and the 90th
+// percentile 1,958, with a single 68 KB outlier. Thirty entries capped at 4 KB
+// each renders ~47 KB and truncates two of them; a section-wide byte budget was
+// tried first and one outlier starved every older entry behind it.
+const JOURNAL_CONTEXT_ENTRIES = 30;
+const JOURNAL_ENTRY_BYTES = 4096;
+// Entry headers are written by journalFromCli as `## <ISO timestamp> — …`.
+// Anchoring on the timestamp keeps a `## ` inside quoted prose from being
+// mistaken for an entry boundary.
+const JOURNAL_ENTRY_SPLIT = /\n(?=## \d{4}-\d{2}-\d{2}T)/;
 const MAX_BASELINE_HISTORY_COMMITS = 200;
 const MAX_HANDOFF_BYTES = 1_048_576;
 // SEC-05 Phase 4B-R4 — the size bound for repository-controlled files that are
@@ -312,6 +323,14 @@ try {
   }
 } catch (error) {
   console.error(`Noosphere continuity: ${error.message}`);
+  // A schema rejection already knows which fields are wrong. Printing only the
+  // headline left the user with an unrecoverable file and nothing to act on.
+  if (Array.isArray(error.errors) && error.errors.length > 0) {
+    console.error(`  file: ${path.join('.noosphere', 'state.json')}`);
+    for (const issue of error.errors) {
+      console.error(`  ${issue.path}: ${issue.message} (${issue.code})`);
+    }
+  }
   process.exitCode = error.exitCode
     ?? (command === 'trust' && error.message === '--path requires a value.' ? 2 : null)
     ?? (command === 'trust' || command === 'restore'
@@ -377,10 +396,7 @@ export async function initializeProject(root, options = {}) {
     '',
     { root },
   );
-  await writeUniversalProtocol(root, projectId);
-  await writeAgentAdapters(root, projectId, adapters);
-  await writeMcpConfigs(root, projectId, adapters);
-  await ensureLocalExcludes(root);
+  await refreshManagedArtifacts(root, projectId, adapters);
   await removeLegacyProjectFiles(root);
   if (isFirstInitialization && config.onboarding.auto_baseline) {
     await prepareAutomaticBaseline(root, config);
@@ -389,6 +405,23 @@ export async function initializeProject(root, options = {}) {
 
   console.log(`Noosphere continuity initialized for ${projectId}.`);
   console.log('The Noosphere project manager will start its watcher.');
+}
+
+// Everything here is machine-owned and derived from the project id and the
+// selected adapters — no user content, so regenerating is always safe and each
+// writer skips a write that would change nothing.
+//
+// This used to run only inside initializeProject, which activate calls only for
+// a project it has never seen. A project initialized by an older release
+// therefore kept that release's adapter text forever: upgrading the CLI never
+// updated the instructions agents actually load. That is not cosmetic drift —
+// the pre-SEC-05 adapter told agents to treat the master prompt as project
+// intent, which is exactly the fail-open reading the trust gate replaced.
+async function refreshManagedArtifacts(root, projectId, adapters, { prune = true } = {}) {
+  await writeUniversalProtocol(root, projectId);
+  await writeAgentAdapters(root, projectId, adapters, { prune });
+  await writeMcpConfigs(root, projectId, adapters, { prune });
+  await ensureLocalExcludes(root);
 }
 
 export async function activateProject(start, { quiet = false } = {}) {
@@ -407,6 +440,14 @@ export async function activateProject(start, { quiet = false } = {}) {
     await initializeProject(root);
   }
   const config = await loadConfig(root);
+  if (!isNew) {
+    // initializeProject already wrote these for a new project. For every other
+    // project this is the only place they get brought up to the running
+    // release, so an upgrade reaches the adapters agents actually load.
+    await refreshManagedArtifacts(root, config.project_id, config.adapters, {
+      prune: false,
+    });
+  }
   await registerProject(root, config.project_id);
   await retryExactUploads(root, { config }).catch((error) => {
     if (!quiet) console.warn(`Noosphere: exact-state upload deferred (${error.code || error.message}).`);
@@ -1330,7 +1371,12 @@ async function printStatus(root) {
   );
 }
 
-async function writeMcpConfigs(root, projectId, adapters) {
+// `prune` distinguishes the two callers. init and `adapters --only` assert a
+// selection and may remove what is not in it. A refresh must never do that: it
+// updates the adapters a project already has and adds or removes nothing, so
+// activating a project cannot silently delete an adapter file the config does
+// not happen to list.
+async function writeMcpConfigs(root, projectId, adapters, { prune = true } = {}) {
   const namespace = `noosphere-${sanitizeProjectId(projectId)}`;
   const server = {
     command: 'npx',
@@ -1344,23 +1390,23 @@ async function writeMcpConfigs(root, projectId, adapters) {
   };
   const selected = new Set(adapters);
   const genericMcp = path.join(root, '.mcp.json');
-  if (selected.has('mcp')) {
+  if (prune ? selected.has('mcp') : await exists(genericMcp)) {
     await upsertMcpServer(root, genericMcp, server);
-  } else {
+  } else if (prune) {
     await removeMcpServer(root, genericMcp);
   }
 
   const cursorDirectory = path.join(root, '.cursor');
   const cursorMcp = path.join(cursorDirectory, 'mcp.json');
-  if (selected.has('cursor')) {
+  if (prune ? selected.has('cursor') : await exists(cursorMcp)) {
     await upsertMcpServer(root, cursorMcp, server);
-  } else {
+  } else if (prune) {
     await removeMcpServer(root, cursorMcp);
   }
-  await removeRepositoryDirectoryIfEmpty(cursorDirectory, { root });
+  if (prune) await removeRepositoryDirectoryIfEmpty(cursorDirectory, { root });
 }
 
-async function writeAgentAdapters(root, projectId, adapters) {
+async function writeAgentAdapters(root, projectId, adapters, { prune = true } = {}) {
   const shared = `${MANAGED_START}
 ## Noosphere continuity adapter
 
@@ -1399,9 +1445,9 @@ ${MANAGED_END}`;
     gemini: path.join(root, 'GEMINI.md'),
   };
   for (const [adapter, file] of Object.entries(files)) {
-    if (selected.has(adapter)) {
+    if (prune ? selected.has(adapter) : await exists(file)) {
       await upsertManagedBlock(root, file, shared);
-    } else {
+    } else if (prune) {
       await removeManagedBlock(root, file);
     }
   }
@@ -1409,8 +1455,8 @@ ${MANAGED_END}`;
   const cursorDirectory = path.join(root, '.cursor');
   const cursorRules = path.join(cursorDirectory, 'rules');
   const cursorRule = path.join(cursorRules, 'noosphere.mdc');
-  if (selected.has('cursor')) {
-    await atomicWrite(
+  if (prune ? selected.has('cursor') : await exists(cursorRule)) {
+    await atomicWriteIfChanged(
       cursorRule,
       `---
 description: Load the universal Noosphere continuity protocol
@@ -1430,11 +1476,11 @@ verifiable findings and handoffs to the journal. Do not write hidden chain-of-th
 `,
       { root },
     );
-  } else {
+  } else if (prune) {
     await removeRepositoryFile(cursorRule, { root });
     await removeRepositoryDirectoryIfEmpty(cursorRules, { root });
   }
-  await removeRepositoryDirectoryIfEmpty(cursorDirectory, { root });
+  if (prune) await removeRepositoryDirectoryIfEmpty(cursorDirectory, { root });
 }
 
 async function ensureLocalExcludes(root) {
@@ -1497,6 +1543,10 @@ async function upsertManagedBlock(root, file, block) {
   const next = pattern.test(current)
     ? current.replace(pattern, block)
     : `${current.trimEnd()}${current.trim() ? '\n\n' : ''}${block}\n`;
+  // activate runs from a shell prompt hook, so this is reached constantly.
+  // Rewriting a tracked adapter file that did not change would leave the
+  // working tree permanently dirty.
+  if (next === current && existing.present) return;
   await atomicWrite(file, next, { root });
 }
 
@@ -3059,6 +3109,20 @@ function normalizeBaselineHistoryLimit(value) {
   return Math.min(parsed, MAX_BASELINE_HISTORY_COMMITS);
 }
 
+// The managed artifacts are regenerated on every activate, which a shell prompt
+// hook triggers constantly. Several of them are git-tracked, so an unconditional
+// write would leave the working tree permanently dirty — the same churn that
+// made .noosphere/state.json impossible to keep clean.
+async function atomicWriteIfChanged(file, content, options) {
+  const existing = await readRepositoryFile(file);
+  if (existing.present && !existing.unusable && existing.text === content) return;
+  await atomicWrite(file, content, options);
+}
+
+async function writeJsonIfChanged(file, value, options) {
+  await atomicWriteIfChanged(file, `${JSON.stringify(value, null, 2)}\n`, options);
+}
+
 async function writeUniversalProtocol(root, projectId) {
   const slug = sanitizeProjectId(projectId);
   const content = `# Noosphere universal agent protocol
@@ -3124,8 +3188,8 @@ next recommended action.
 - HTTP recall: \`POST /v1/projects/${slug}/recall\`
 - MCP namespace: \`noosphere-${slug}\`
 `;
-  await atomicWrite(path.join(root, '.noosphere', 'instructions.md'), content, { root });
-  await writeJson(path.join(root, '.noosphere', 'protocol.json'), {
+  await atomicWriteIfChanged(path.join(root, '.noosphere', 'instructions.md'), content, { root });
+  await writeJsonIfChanged(path.join(root, '.noosphere', 'protocol.json'), {
     protocol: 'noosphere-continuity',
     version: '1.0',
     project_id: projectId,
@@ -3188,6 +3252,16 @@ async function removeLegacyProjectFiles(root) {
   }
 }
 
+// journal.md is append-only for the life of the project, and this rendered the
+// whole of it into context.md — the file every agent reads at session start.
+// On this repository that was 211 KB of a 220 KB context, 96% of it, growing
+// with every entry and never shrinking. The recalled-history section beside it
+// has always been bounded, and the Ollama consumer bounds the same journal to
+// 1,500 characters; only this path was unbounded.
+//
+// Keep the newest entries, whole, and say what was left out and where it lives.
+// The bounds live with the other module constants: this runs during the
+// entry-point await, where a const declared here would still be in its TDZ.
 async function formatLocalJournal(root) {
   const journal = await readRepositoryText(
     path.join(root, '.noosphere', 'journal.md'),
@@ -3195,9 +3269,24 @@ async function formatLocalJournal(root) {
   const firstEntry = journal.indexOf('\n## ');
   const entries =
     firstEntry >= 0 ? journal.slice(firstEntry + 1).trim() : '';
-  return entries
-    ? `## Local public work journal\n\n${entries}\n`
-    : '## Local public work journal\n\nNo entries yet.\n';
+  if (!entries) return '## Local public work journal\n\nNo entries yet.\n';
+
+  const all = entries.split(JOURNAL_ENTRY_SPLIT);
+  // Newest entries are last. Bound the count, then bound each entry on its own
+  // so one oversized entry cannot crowd out the others.
+  const kept = all.slice(-JOURNAL_CONTEXT_ENTRIES).map(boundJournalEntry);
+  const note =
+    kept.length < all.length
+      ? `Showing the newest ${kept.length} of ${all.length} entries; the full log is at .noosphere/journal.md.\n\n`
+      : '';
+  return `## Local public work journal\n\n${note}${kept.join('\n')}\n`;
+}
+
+// Truncation has to be visible, and it has to say where the rest is — a
+// silently shortened entry reads as the whole entry.
+function boundJournalEntry(entry) {
+  if (entry.length <= JOURNAL_ENTRY_BYTES) return entry;
+  return `${entry.slice(0, JOURNAL_ENTRY_BYTES).trimEnd()}\n\n[Entry truncated at ${JOURNAL_ENTRY_BYTES} of ${entry.length} bytes; full text in .noosphere/journal.md]\n`;
 }
 
 async function fileHasJournalEntries(root) {
