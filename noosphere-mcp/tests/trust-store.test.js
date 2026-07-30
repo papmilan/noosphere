@@ -5,9 +5,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
-// M-3 (PR-H): the low-level writers and helpers are internal/test-only and live
-// in trust-store-internal.js; production consumes only ./trust-store.js.
-import { isSlotAuthoritative } from '../continuity/trust-store.js';
 import {
   canonicalize,
   ensureMachineKey,
@@ -15,6 +12,7 @@ import {
   putSlotRecord,
   readRecord,
   MAX_TRUST_RECORD_BYTES,
+  isSlotAuthoritative,
 } from '../continuity/trust-store-internal.js';
 import { NORM_ALGO, NORM_VERSION } from '../continuity/memory-safety.js';
 
@@ -34,7 +32,7 @@ after(async () => {
 
 const BYTES = 'You are the pinned master prompt. Preserve phases.';
 
-describe('SEC-05 trust store — authenticated authority gate', () => {
+describe('SEC-05 legacy trust inventory verifier — authenticated format-1 records', () => {
   it('quote-unless-authenticated: no record ⇒ not authoritative (legacy/fresh)', async () => {
     const { env, project } = await freshEnv();
     assert.equal(

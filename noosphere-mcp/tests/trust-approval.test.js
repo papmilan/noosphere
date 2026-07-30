@@ -246,7 +246,7 @@ describe('SEC-05 Phase 4B — owner approval mints authority for exactly the app
     // false". Buffer.byteLength THROWS for these, so the guard itself must not
     // be the thing that propagates an exception where false is the safe answer.
     const { env, project } = await fresh();
-    await putSlotRecord({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env });
+    await approveSlot({ projectRoot: project, slot: 'master-prompt', env, confirm: accept });
     for (const rawBytes of [undefined, null, 5, true, {}, ['a'], Symbol('x'), () => MASTER, new Date()]) {
       assert.equal(
         await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes, env }),
@@ -371,7 +371,9 @@ describe('SEC-05 Phase 4B — owner approval mints authority for exactly the app
     assert.equal(manifest.currentGeneration, 2);
     assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: revised, env }), true);
     assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env }), false);
-    assert.equal(await createFormatV2Store({ env }).verifyAuditChain(await createFormatV2Store({ env }).readProjectBinding(project), 'master-prompt'), true);
+    const store = createFormatV2Store({ env });
+    const binding = await store.readProjectBinding(project);
+    assert.equal(await store.verifyAuditChain(binding, 'master-prompt'), true);
   });
 
   it('fails closed while another transaction holds the slot lock', async () => {
@@ -511,7 +513,7 @@ describe('SEC-05 Phase 4B — the production TTY confirmation itself', () => {
   });
 });
 
-describe('SEC-05 Phase 4B — format-2 governs a bound slot; format-1 survives elsewhere', () => {
+describe('SEC-05 Phase 4C — format-2 governs every authority slot', () => {
   it('a format-1 record for different bytes cannot downgrade an approved slot', async () => {
     const { env, project } = await fresh();
     await approveSlot({ projectRoot: project, slot: 'master-prompt', env, confirm: accept });
@@ -522,13 +524,13 @@ describe('SEC-05 Phase 4B — format-2 governs a bound slot; format-1 survives e
     assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: MASTER, env }), true);
   });
 
-  it('a slot with no format-2 manifest keeps its unchanged Phase-1 behaviour', async () => {
+  it('a slot with no format-2 manifest never falls back to Phase-1', async () => {
     const { env, project } = await fresh({ instructions: 'Protocol text.' });
     // Approving master-prompt binds the project but must not disturb instructions.
     await approveSlot({ projectRoot: project, slot: 'master-prompt', env, confirm: accept });
     await putSlotRecord({ projectRoot: project, slot: 'instructions', rawBytes: 'Protocol text.', env });
 
-    assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'instructions', rawBytes: 'Protocol text.', env }), true);
+    assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'instructions', rawBytes: 'Protocol text.', env }), false);
     assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'instructions', rawBytes: 'Protocol text!', env }), false);
   });
 

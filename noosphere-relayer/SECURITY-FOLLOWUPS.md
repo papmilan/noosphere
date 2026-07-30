@@ -152,3 +152,23 @@ packaging are all verified by mandatory Windows/Ubuntu/macOS CI. The items under
 SEC-05 (semantic-memory prompt/control injection) remains **open** and is the
 active security milestone. Per the security mandate, the repository is **not
 public-ready** while SEC-05 remains open.
+
+## SEC-05 Phase 5 — replay-ledger release gate
+
+The Phase 5 implementation candidate adds owner-local authenticated replay
+evidence, production-reachable journal recovery, complete replay/candidate
+identity separation, a global ranked replay–restore lock hierarchy, bounded
+deterministic retention, typed suppression, and read-only inspection. Replay
+classification remains independent from authority, and no relayer, MCP, HTTP,
+hook, lifecycle, adapter, or package surface exposes a replay writer.
+
+Replay-key reinitialization is deliberately omitted. A pristine root may create
+one key; missing, replacement, or corrupt key material with any surviving replay
+state fails closed without mutation. There is no reset, reinitialize, rotate,
+repair, recovery, import, or export surface.
+
+Local verification and the 26-mutant/conformance evidence are recorded in
+[`docs/security/SEC-05-PHASE-5-VERIFICATION.md`](../docs/security/SEC-05-PHASE-5-VERIFICATION.md).
+SEC-05 remains **open** and the repository remains **not public-ready** until
+exact-head Linux, macOS, and Windows CI pass and an independent exact-head
+hostile review reports no Critical or Important finding.

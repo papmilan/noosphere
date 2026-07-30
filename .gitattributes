@@ -1,0 +1,6 @@
+# GitHub's windows-latest runners check out with core.autocrlf=true. Several
+# security tests match exact multi-line source anchors (the 26 Phase 5 mutants
+# in noosphere-mcp/tests/replay-mutation.test.js) and byte-exact document and
+# record digests, all of which a CRLF checkout silently breaks. Normalize every
+# text file to LF in the index and on checkout, on every platform.
+* text=auto eol=lf

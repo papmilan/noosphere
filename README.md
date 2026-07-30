@@ -341,13 +341,19 @@ noosphere credentials status | migrate | rotate
 noosphere activate | deactivate
 noosphere register --path /absolute/repository
 noosphere projects | status | protocol
-noosphere baseline | checkpoint | refresh | restore
+noosphere baseline | checkpoint | refresh
 noosphere context
 noosphere recall "query"
 noosphere remember --agent <name> --type <type> "content"
 noosphere journal --agent <name> "note"
 noosphere master-prompt [--replace]
+noosphere trust migrate                                       # interactive only
 noosphere trust approve master-prompt|instructions|baseline   # interactive only
+noosphere trust revoke  master-prompt|instructions|baseline   # interactive only
+noosphere restore stage master-prompt|instructions|baseline   # interactive only
+noosphere restore list | show <candidate-id>
+noosphere restore apply <candidate-id>                        # interactive only
+noosphere restore recover
 noosphere state [show|set|next|reopen|restore] [--json]
 noosphere acp state [--json] [validate|sync|push|pull|history|quarantine]
 noosphere handoff --stdin | --file <handoff.json>
@@ -433,19 +439,27 @@ cat existing-roadmap.md | noosphere master-prompt
 
 ### Restore on a fresh machine
 
-After cloning to a machine where `.noosphere/` is missing:
+After cloning to a machine where `.noosphere/` is missing, restore is explicit,
+per slot, and confirmed by you. There is no bulk restore.
 
 ```sh
-noosphere restore
+noosphere restore stage master-prompt   # fetch a candidate; nothing is written
+noosphere restore show <candidate-id>   # read the exact bytes first
+noosphere restore apply <candidate-id>  # replace the file, once
 ```
 
-This reconstructs `baseline.md`, `master-prompt.md`, `followups.jsonl`, and
-`context.md` from the project's Walrus records. Files are restored only
-when missing or empty; existing local content is never overwritten, and the
-command is safe to repeat. It requires the same `project_id` in
-`.noosphere/config.json`, provisioned credentials, and network access. The
-local journal does not survive the move unless `privacy.share_journal` was
-enabled on the previous machine.
+Staging fetches from the project's Walrus records into authenticated, untrusted,
+owner-local state; it changes no project file. Applying replaces exactly one
+fixed destination and consumes the candidate. Restored bytes are **not**
+authoritative — run `noosphere trust approve <slot>` after reading them.
+
+Staging requires the same `project_id` in `.noosphere/config.json`, provisioned
+credentials, and network access. The local journal does not survive the move
+unless `privacy.share_journal` was enabled on the previous machine.
+
+The complete operator reference — exit codes, terminal requirements, retention,
+one-shot semantics, crash recovery, and refusals — is in
+[`noosphere-mcp/README.md`](noosphere-mcp/README.md#owner-authority-commands-sec-05-phase-4c).
 
 ## Project files
 

@@ -1,5 +1,5 @@
-import { execFileSync } from 'node:child_process';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { execFileSync, spawn } from 'node:child_process';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -201,6 +201,366 @@ export async function atomicOwnerOnlyWrite(file, data, options = {}) {
   }
 }
 
+function fileSnapshot(info) {
+  return Object.freeze({
+    dev: String(info.dev),
+    gid: String(info.gid),
+    ino: String(info.ino),
+    mode: Number(info.mode),
+    mtimeNs: String(info.mtimeNs),
+    nlink: Number(info.nlink),
+    size: Number(info.size),
+    uid: String(info.uid),
+  });
+}
+
+function sameSnapshot(left, right) {
+  return left.dev === right.dev &&
+    left.gid === right.gid &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.mtimeNs === right.mtimeNs &&
+    left.nlink === right.nlink &&
+    left.size === right.size &&
+    left.uid === right.uid;
+}
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+async function assertSafeDestinationParents(root, directory, options) {
+  const relative = path.relative(root, directory);
+  let current = root;
+  for (const segment of relative === '' ? [] : relative.split(path.sep)) {
+    current = path.join(current, segment);
+    const info = await lstat(current, { bigint: true });
+    if (info.isSymbolicLink()) {
+      throw new PathBoundaryError(
+        'state-dir-symlink',
+        `refusing symlinked destination parent: ${current}`,
+      );
+    }
+    if (!info.isDirectory()) {
+      throw new PathBoundaryError(
+        'state-dir-not-directory',
+        `destination parent is not a directory: ${current}`,
+      );
+    }
+    if (typeof process.getuid === 'function' &&
+        info.uid !== BigInt(process.getuid())) {
+      throw new PathBoundaryError(
+        'state-dir-owner-mismatch',
+        `destination parent is not owned by the current user: ${current}`,
+      );
+    }
+    if ((options.platform ?? process.platform) !== 'win32' &&
+        (Number(info.mode) & 0o022) !== 0) {
+      throw new PathBoundaryError(
+        'state-dir-unsafe-mode',
+        `destination parent is writable by group or other: ${current}`,
+      );
+    }
+  }
+}
+
+export async function inspectOwnerOnlyDestination(file, options = {}) {
+  const resolved = rootAndDirectory(file, options.root);
+  const parent = await assertContainedChain(resolved.root, resolved.directory);
+  if (parent === null) {
+    throw new PathBoundaryError(
+      'state-destination-parent-missing',
+      `destination parent is missing: ${resolved.directory}`,
+    );
+  }
+  await assertSafeDestinationParents(
+    resolved.root,
+    resolved.directory,
+    options,
+  );
+  let info;
+  try {
+    info = await lstat(resolved.file, { bigint: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return Object.freeze({
+        path: resolved.file,
+        root: resolved.root,
+        state: 'absent',
+      });
+    }
+    throw error;
+  }
+  if (info.isSymbolicLink()) {
+    throw new PathBoundaryError(
+      'state-file-symlink',
+      `refusing symlinked destination: ${resolved.file}`,
+    );
+  }
+  if (!info.isFile()) {
+    throw new PathBoundaryError(
+      'state-file-not-regular',
+      `refusing non-regular destination: ${resolved.file}`,
+    );
+  }
+  if (Number(info.nlink) !== 1) {
+    throw new PathBoundaryError(
+      'state-file-hard-link',
+      `refusing multiply-linked destination: ${resolved.file}`,
+    );
+  }
+  if (typeof process.getuid === 'function' &&
+      info.uid !== BigInt(process.getuid())) {
+    throw new PathBoundaryError(
+      'state-file-owner-mismatch',
+      `destination is not owned by the current user: ${resolved.file}`,
+    );
+  }
+  const platform = options.platform ?? process.platform;
+  if (platform !== 'win32' && (Number(info.mode) & 0o022) !== 0) {
+    throw new PathBoundaryError(
+      'state-file-unsafe-mode',
+      `destination is writable by group or other: ${resolved.file}`,
+    );
+  }
+  // The POSIX branch above asks "can group or other WRITE this?"; this asks the
+  // same question of Windows. It is not verifyOwnerOnlyWindows: this function
+  // observes restore DESTINATIONS, which are repository files with inherited
+  // ACLs, and the owner-only DACL that owner-local state carries is enforced
+  // where that state is written (the helper's write/read/repair actions), not
+  // here. See SEC-05 Phase 4C Finding 4.
+  if (platform === 'win32') await verifyNoForeignWriteWindowsAsync(resolved.file, options);
+  const maxBytes = options.maxBytes ?? 1_048_576;
+  const bytes = await readBoundedRegularFile(resolved.file, {
+    ...options,
+    maxBytes,
+    root: resolved.root,
+  });
+  const after = await lstat(resolved.file, { bigint: true });
+  const beforeSnapshot = fileSnapshot(info);
+  const afterSnapshot = fileSnapshot(after);
+  if (!sameSnapshot(beforeSnapshot, afterSnapshot)) {
+    throw new PathBoundaryError(
+      'state-destination-changed',
+      `destination changed during inspection: ${resolved.file}`,
+    );
+  }
+  return Object.freeze({
+    path: resolved.file,
+    root: resolved.root,
+    state: 'present',
+    contentHash: sha256(bytes),
+    byteLength: bytes.length,
+    snapshot: afterSnapshot,
+  });
+}
+
+function validatePreparedReplacement(prepared, options = {}) {
+  if (!prepared || typeof prepared !== 'object' ||
+      typeof prepared.temporaryPath !== 'string' ||
+      typeof prepared.destination?.path !== 'string' ||
+      typeof prepared.temporarySnapshot !== 'object') {
+    throw new PathBoundaryError(
+      'state-replacement-invalid',
+      'prepared replacement is invalid',
+    );
+  }
+  const resolved = rootAndDirectory(
+    prepared.destination.path,
+    options.root ?? prepared.destination.root,
+  );
+  const expectedPrefix = `.${path.basename(resolved.file)}.`;
+  if (path.dirname(prepared.temporaryPath) !== resolved.directory ||
+      !path.basename(prepared.temporaryPath).startsWith(expectedPrefix) ||
+      !path.basename(prepared.temporaryPath).endsWith('.restore-tmp')) {
+    throw new PathBoundaryError(
+      'state-replacement-invalid',
+      'prepared replacement temporary path is invalid',
+    );
+  }
+  return resolved;
+}
+
+export async function prepareOwnerOnlyReplacement(file, data, options = {}) {
+  const bytes = buffer(data);
+  const maxBytes = options.maxBytes ?? 1_048_576;
+  if (bytes.length > maxBytes) {
+    throw new PathBoundaryError(
+      'state-file-too-large',
+      `replacement exceeds the ${maxBytes}-byte bound: ${file}`,
+    );
+  }
+  const destination = await inspectOwnerOnlyDestination(file, {
+    ...options,
+    maxBytes,
+  });
+  if (options.expectedDestination &&
+      !sameDestinationObservation(destination, options.expectedDestination)) {
+    throw new PathBoundaryError(
+      'state-destination-changed',
+      `destination changed after the caller's final barrier: ${file}`,
+    );
+  }
+  const resolved = rootAndDirectory(file, options.root);
+  const writeExclusive = options.writeExclusive ?? writeOwnerOnlyFileExclusive;
+  for (let attempt = 0; attempt < 128; attempt += 1) {
+    const token = (options.randomUUID ?? randomUUID)();
+    const temporaryPath = path.join(
+      resolved.directory,
+      `.${path.basename(resolved.file)}.${token}.restore-tmp`,
+    );
+    try {
+      await writeExclusive(temporaryPath, bytes, {
+        ...options,
+        root: resolved.root,
+        mode: 0o600,
+      });
+      const temporary = await inspectOwnerOnlyDestination(temporaryPath, {
+        ...options,
+        root: resolved.root,
+        maxBytes,
+      });
+      if (temporary.state !== 'present' ||
+          temporary.byteLength !== bytes.length ||
+          temporary.contentHash !== sha256(bytes)) {
+        throw new PathBoundaryError(
+          'state-write-incomplete',
+          `replacement temporary write is incomplete: ${temporaryPath}`,
+        );
+      }
+      return Object.freeze({
+        destination,
+        temporaryPath,
+        temporarySnapshot: temporary.snapshot,
+        byteLength: bytes.length,
+        contentHash: sha256(bytes),
+      });
+    } catch (error) {
+      if (error.code === 'state-file-exists' || error.code === 'EEXIST') {
+        continue;
+      }
+      await safeCleanup(temporaryPath);
+      throw normalizeSecurityError(error);
+    }
+  }
+  throw new PathBoundaryError(
+    'state-replacement-collision-limit',
+    'replacement temporary-name collisions exceeded the fixed retry limit',
+  );
+}
+
+async function revalidatePreparedDestination(prepared, options) {
+  const observed = await inspectOwnerOnlyDestination(
+    prepared.destination.path,
+    {
+      ...options,
+      root: options.root ?? prepared.destination.root,
+      maxBytes: options.maxBytes ?? 1_048_576,
+    },
+  );
+  const expected = prepared.destination;
+  if (observed.state !== expected.state ||
+      (expected.state === 'present' &&
+       (observed.contentHash !== expected.contentHash ||
+        observed.byteLength !== expected.byteLength ||
+        !sameSnapshot(observed.snapshot, expected.snapshot)))) {
+    throw new PathBoundaryError(
+      'state-destination-changed',
+      `destination changed after replacement preparation: ${expected.path}`,
+    );
+  }
+  return observed;
+}
+
+function sameDestinationObservation(observed, expected) {
+  return observed?.state === expected?.state &&
+    observed?.path === expected?.path &&
+    (expected?.state === 'absent' ||
+      (observed?.contentHash === expected?.contentHash &&
+       observed?.byteLength === expected?.byteLength &&
+       sameSnapshot(observed.snapshot, expected.snapshot)));
+}
+
+async function fsyncDirectoryStrict(directory) {
+  let handle;
+  try {
+    handle = await open(directory, 'r');
+    await handle.sync();
+  } catch (error) {
+    if (!isIgnorableDirFsyncError(error)) throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+export async function commitOwnerOnlyReplacement(prepared, options = {}) {
+  validatePreparedReplacement(prepared, options);
+  await revalidatePreparedDestination(prepared, options);
+  const temporary = await inspectOwnerOnlyDestination(
+    prepared.temporaryPath,
+    {
+      ...options,
+      root: options.root ?? prepared.destination.root,
+      maxBytes: options.maxBytes ?? 1_048_576,
+    },
+  );
+  if (temporary.state !== 'present' ||
+      !sameSnapshot(temporary.snapshot, prepared.temporarySnapshot) ||
+      temporary.byteLength !== prepared.byteLength ||
+      temporary.contentHash !== prepared.contentHash) {
+    throw new PathBoundaryError(
+      'state-replacement-temporary-changed',
+      'prepared replacement temporary file changed',
+    );
+  }
+  await replaceWithRetry(
+    options.rename ?? rename,
+    prepared.temporaryPath,
+    prepared.destination.path,
+    options,
+  );
+  if ((options.platform ?? process.platform) !== 'win32') {
+    try {
+      await (options.fsyncDirectory ?? fsyncDirectoryStrict)(
+        path.dirname(prepared.destination.path),
+      );
+    } catch (cause) {
+      const error = new PathBoundaryError(
+        'state-directory-fsync-failed-after-replace',
+        'destination was replaced but directory durability was not confirmed',
+        cause,
+      );
+      error.destinationReplaced = true;
+      throw error;
+    }
+  }
+  return Object.freeze({
+    path: prepared.destination.path,
+    byteLength: prepared.byteLength,
+    contentHash: prepared.contentHash,
+  });
+}
+
+export async function discardOwnerOnlyReplacement(prepared, options = {}) {
+  validatePreparedReplacement(prepared, options);
+  let info;
+  try {
+    info = await lstat(prepared.temporaryPath, { bigint: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+  if (!info.isFile() ||
+      !sameSnapshot(fileSnapshot(info), prepared.temporarySnapshot)) {
+    throw new PathBoundaryError(
+      'state-replacement-temporary-changed',
+      'refusing to remove a changed replacement temporary file',
+    );
+  }
+  await rm(prepared.temporaryPath, { force: false });
+  return true;
+}
+
 export function atomicOwnerOnlyWriteSync(file, data, options = {}) {
   const resolved = rootAndDirectory(file, options.root);
   ensureContainedDirSync(resolved.root, resolved.directory, { mode: options.directoryMode ?? 0o700 });
@@ -226,7 +586,7 @@ export async function writeOwnerOnlyFileExclusive(file, data, options = {}) {
   const bytes = buffer(data);
   try {
     if ((options.platform ?? process.platform) === 'win32') {
-      await Promise.resolve((options.windowsAction ?? defaultWindowsAction)({
+      await Promise.resolve((options.windowsAction ?? defaultWindowsActionAsync)({
         action: 'write', file: resolved.file, input: bytes,
       }));
       const info = await assertFinalNotReparse(resolved.file);
@@ -398,7 +758,7 @@ export async function readOwnerOnlyFile(file, options = {}) {
   if (await assertContainedChain(resolved.root, resolved.directory) === null) return null;
   if (await assertFinalNotReparse(resolved.file) === null) return null;
   if ((options.platform ?? process.platform) === 'win32') {
-    return buffer(await Promise.resolve((options.windowsAction ?? defaultWindowsAction)({
+    return buffer(await Promise.resolve((options.windowsAction ?? defaultWindowsActionAsync)({
       action: 'read', file: resolved.file, input: null,
     })));
   }
@@ -697,7 +1057,7 @@ export async function atomicRepositoryWrite(file, data, options = {}) {
     const current = await assertFinalNotReparse(absolute);
     if (current && platform !== 'win32') await chmod(temporary, current.mode & 0o777);
     if (current && platform === 'win32') {
-      await Promise.resolve((options.copyWindowsAcl ?? defaultCopyWindowsAcl)(absolute, temporary));
+      await Promise.resolve((options.copyWindowsAcl ?? defaultCopyWindowsAclAsync)(absolute, temporary));
     }
     await replaceWithRetry(options.rename ?? rename, temporary, absolute, options);
     if (platform !== 'win32') await fsyncDir(directory);
@@ -861,6 +1221,75 @@ export function currentWindowsSid(options = {}) {
   return sid;
 }
 
+// SEC-05 Phase 4C Finding 4. The Windows counterpart of the POSIX
+// `mode & 0o022` destination check, and deliberately NOT the owner-only check:
+// a restore destination is a repository file that inherits the repository's
+// ACL, so demanding an exact protected `{owner, SYSTEM, Administrators}` DACL
+// refuses every real one. What must be refused is the same thing POSIX refuses
+// — a principal other than the owner being able to modify the file.
+//
+// The helper reports facts (the owner SID, then every SID holding a write-ish
+// right); the policy lives here, where it is testable without a Windows host.
+// SYSTEM and Administrators are permitted for the same reason POSIX ignores
+// root: they can take ownership regardless, so refusing them would be theatre.
+const WINDOWS_PRIVILEGED_SIDS = Object.freeze(['S-1-5-18', 'S-1-5-32-544']);
+const WINDOWS_WRITE_SID_LINE = /^(owner|write):S-1-(?:\d+-)+\d+$/;
+
+export function verifyNoForeignWriteWindows(file, options = {}) {
+  if ((options.platform ?? process.platform) !== 'win32') return [];
+  assertFinalNotReparseSync(file);
+  return windowsWriteSidPolicy((options.windowsAction ?? defaultWindowsAction)({
+    action: 'write-sids', file: path.resolve(file), input: null,
+  }), file);
+}
+
+// The same check reached through the persistent host. `inspectOwnerOnlyDestination`
+// is the only production caller and is already async, and it is the call this
+// whole file's Windows cost is concentrated in — one destination inspection per
+// prepare, per revalidate, and per temporary. The sync export above stays for
+// callers outside an async context; both hand their answer to the one policy
+// function below, so there is exactly one place where "no foreign writer" is
+// decided.
+async function verifyNoForeignWriteWindowsAsync(file, options = {}) {
+  if ((options.platform ?? process.platform) !== 'win32') return [];
+  assertFinalNotReparseSync(file);
+  return windowsWriteSidPolicy(await Promise.resolve((options.windowsAction ?? defaultWindowsActionAsync)({
+    action: 'write-sids', file: path.resolve(file), input: null,
+  })), file);
+}
+
+function windowsWriteSidPolicy(output, file) {
+  const lines = buffer(output).toString('utf8').split(/\r?\n/)
+    .map((value) => value.trim()).filter(Boolean);
+  // Fail closed on anything unexpected: an unparseable answer is not "no
+  // foreign writer", it is an unanswered question.
+  if (lines.length === 0 || lines.some((line) => !WINDOWS_WRITE_SID_LINE.test(line))) {
+    throw new PathBoundaryError(
+      'state-acl-readback-failed',
+      'Windows write-ACE enumeration returned an invalid response',
+    );
+  }
+  const owners = lines.filter((line) => line.startsWith('owner:')).map((line) => line.slice(6));
+  if (owners.length !== 1) {
+    throw new PathBoundaryError(
+      'state-acl-readback-failed',
+      'Windows write-ACE enumeration did not report exactly one owner SID',
+    );
+  }
+  const writers = [...new Set(
+    lines.filter((line) => line.startsWith('write:')).map((line) => line.slice(6)),
+  )].sort();
+  const permitted = new Set([owners[0], ...WINDOWS_PRIVILEGED_SIDS]);
+  const foreign = writers.filter((sid) => !permitted.has(sid));
+  if (foreign.length > 0) {
+    throw new PathBoundaryError(
+      'state-destination-foreign-write',
+      `destination is writable by a principal other than its owner: ${foreign.join(', ')}`,
+    );
+  }
+  return writers;
+}
+
 export function verifyOwnerOnlyWindows(file, options = {}) {
   if ((options.platform ?? process.platform) !== 'win32') return [];
   assertFinalNotReparseSync(file);
@@ -895,42 +1324,382 @@ export async function readContainedStateFile(file, options = {}) {
   return result === null ? null : result.toString('utf8');
 }
 
-function defaultWindowsAction({ action, file, input }) {
+const ACL_TRANSPORT_LIMIT = 16 * 1024 * 1024;
+const ACL_ERROR_PATTERN = /NOOSPHERE_ACL_ERROR:([a-z0-9-]+):([^\r\n]*)/i;
+
+function powershellArgs(...tail) {
+  return [
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-File', WINDOWS_SCRIPT, ...tail,
+  ];
+}
+
+// The helper reports every refusal as one tagged line, and it reports it the same
+// way on both transports: on stderr for a one-shot invocation, in an `err` frame
+// for the host. So one parser serves both, and a caller's error codes do not
+// depend on which transport answered.
+function aclRefusal(text, fallbackCode, cause) {
+  const match = String(text ?? '').match(ACL_ERROR_PATTERN);
+  return new PathBoundaryError(
+    match?.[1] ?? fallbackCode,
+    match?.[2] || cause?.message || fallbackCode,
+    cause,
+  );
+}
+
+// Set NOOSPHERE_ACL_PROFILE=1 to get a per-action call count and cost breakdown
+// on stderr at process exit. This is how the Windows cost was attributed in the
+// first place, and it is the only way to re-check it: the machinery that makes
+// these calls cheap is invisible from POSIX, where they never run.
+const ACL_PROFILE = process.env.NOOSPHERE_ACL_PROFILE ? new Map() : null;
+
+function recordAclCall(transport, action, startedAt) {
+  if (ACL_PROFILE === null) return;
+  const key = `${transport}:${action}`;
+  const entry = ACL_PROFILE.get(key) ?? { calls: 0, ms: 0 };
+  entry.calls += 1;
+  entry.ms += Number(process.hrtime.bigint() - startedAt) / 1e6;
+  ACL_PROFILE.set(key, entry);
+}
+
+if (ACL_PROFILE !== null) {
+  process.on('exit', () => {
+    const rows = [...ACL_PROFILE.entries()].sort((left, right) => right[1].ms - left[1].ms);
+    const calls = rows.reduce((sum, [, entry]) => sum + entry.calls, 0);
+    const ms = rows.reduce((sum, [, entry]) => sum + entry.ms, 0);
+    // One line per process, prefixed so a CI log can be summed across the many
+    // children these suites spawn.
+    process.stderr.write(`NOOSPHERE_ACL_PROFILE total pid=${process.pid} calls=${calls} ms=${ms.toFixed(0)}\n`);
+    for (const [key, entry] of rows) {
+      process.stderr.write(
+        `NOOSPHERE_ACL_PROFILE   ${key} calls=${entry.calls} ms=${entry.ms.toFixed(0)} mean=${(entry.ms / entry.calls).toFixed(1)}\n`,
+      );
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The owner-only ACL helper host.
+//
+// Windows has no ACL API in Node, so the exact-SID DACL has to be applied and
+// verified by an external process. The ACL calls themselves are microseconds;
+// STARTING the process that makes them is not — loading the CLR, the PowerShell
+// engine, and the System.Security assemblies costs hundreds of milliseconds, and
+// the restore and replay paths perform many file operations per transaction.
+// Measured on windows-latest, restore-recovery.test.js spent 130-230 s per crash
+// boundary against a few seconds on POSIX, essentially all of it in process
+// startup rather than in ACL work.
+//
+// So startup is paid once per Node process and every subsequent operation is a
+// framed request over the host's stdin/stdout. What is applied and verified does
+// not change: the same script, the same actions, the same Set/Verify functions,
+// the same error codes. Only the dispatch changes.
+//
+// The trust boundary does not move either. The host is this process's own child,
+// spawned from the same absolute script path with the same arguments, and the
+// only channel is the pipe pair that execFileSync was already using. Nothing is
+// introduced that a third party could write to: no control file, no shared
+// directory, no socket. Response frames echo the request id, so a desynchronised
+// stream is detected and kills the host rather than letting one file's answer be
+// matched to another file's question.
+//
+// Set NOOSPHERE_ACL_NO_HOST=1 to force the historical one-shot invocation per
+// call. That is the baseline the host is measured against, and the escape hatch
+// if a host ever misbehaves.
+// ---------------------------------------------------------------------------
+let aclHost = null;
+let aclHostUnavailable = false;
+
+function encodeAclField(value) {
+  return value ? Buffer.from(String(value), 'utf8').toString('base64') : '-';
+}
+
+// Framing, kept pure and exported so it is covered on every platform. A framing
+// bug is the one way this transport could hand a caller the wrong file's answer,
+// and it would otherwise be exercised only on windows-latest.
+//
+// Request:  "<id> <action> <payloadLength> <base64Path> <base64Source>\n" + payload
+// Paths are base64 so a path containing a space or a newline cannot shift a
+// field; '-' stands for an absent one, since an empty field would collapse.
+export function encodeAclRequestFrame({ id, action, file, source, payload }) {
+  const bytes = payload ?? Buffer.alloc(0);
+  const header = Buffer.from(
+    `${id} ${action} ${bytes.length} ${encodeAclField(file)} ${encodeAclField(source)}\n`,
+    'ascii',
+  );
+  return bytes.length === 0 ? header : Buffer.concat([header, bytes]);
+}
+
+// Response: "<id> ok|err <length>\n" + payload. Returns null when the buffer does
+// not hold a whole frame yet, and throws when it holds something that is not a
+// frame at all — an unparseable stream is not an answer, so it must fail closed
+// rather than be skipped past.
+export function decodeAclResponseFrame(bytes) {
+  const newline = bytes.indexOf(0x0a);
+  if (newline < 0) {
+    if (bytes.length > 8192) {
+      throw new PathBoundaryError('state-acl-failed', 'the ACL host sent an oversized response header');
+    }
+    return null;
+  }
+  const fields = bytes.subarray(0, newline).toString('ascii').trim().split(' ');
+  const length = fields.length === 3 ? Number(fields[2]) : Number.NaN;
+  if (!['ok', 'err'].includes(fields[1])
+    || !/^[0-9]+$/.test(fields[2] ?? '')
+    || !Number.isSafeInteger(length)
+    || length > ACL_TRANSPORT_LIMIT) {
+    throw new PathBoundaryError('state-acl-failed', 'the ACL host sent a malformed response header');
+  }
+  const end = newline + 1 + length;
+  if (bytes.length < end) return null;
+  return {
+    id: fields[0],
+    status: fields[1],
+    body: Buffer.from(bytes.subarray(newline + 1, end)),
+    rest: bytes.subarray(end),
+  };
+}
+
+// Idle must not hold the process open — these suites already spawn enough
+// children — but an in-flight request must, or the process could exit between
+// asking for a DACL and hearing the answer. So the stdio handles are referenced
+// exactly while the queue is non-empty.
+function setAclHostRef(host, active) {
+  for (const stream of [host.child.stdin, host.child.stdout, host.child.stderr]) {
+    if (active) stream?.ref?.();
+    else stream?.unref?.();
+  }
+}
+
+function failAclHost(host, code, cause) {
+  if (host.failure) return;
+  const detail = host.stderr.trim();
+  host.failure = new PathBoundaryError(
+    code,
+    `${cause?.message ?? 'the Windows ACL helper host failed'}${detail ? ` (${detail})` : ''}`,
+    cause,
+  );
+  // Marks "the transport broke", as opposed to "the helper refused this file".
+  // Only the former may be repeated through a fresh process.
+  host.failure.aclTransport = true;
+  if (aclHost === host) aclHost = null;
+  try { host.child.kill(); } catch { /* already gone */ }
+  const abandoned = host.queue.splice(0);
+  setAclHostRef(host, false);
+  for (const pending of abandoned) pending.reject(host.failure);
+}
+
+function drainAclHost(host) {
+  for (;;) {
+    let frame;
+    try {
+      frame = decodeAclResponseFrame(host.stdout);
+    } catch (error) {
+      failAclHost(host, 'state-acl-failed', error);
+      return;
+    }
+    if (frame === null) return;
+    host.stdout = frame.rest;
+    const pending = host.queue.shift();
+    // A response that does not match the request it is being handed to makes
+    // every later answer suspect, including "this DACL is correct". Fail closed
+    // on the whole session rather than trust one more frame.
+    if (!pending || pending.id !== frame.id) {
+      const desync = new PathBoundaryError('state-acl-failed', 'the ACL host response stream desynchronised');
+      desync.aclTransport = true;
+      pending?.reject(desync);
+      failAclHost(host, 'state-acl-failed', new Error('the ACL host response stream desynchronised'));
+      return;
+    }
+    setAclHostRef(host, host.queue.length > 0);
+    if (frame.status === 'ok') pending.resolve(frame.body);
+    else pending.reject(aclRefusal(frame.body.toString('utf8'), 'state-acl-failed'));
+  }
+}
+
+function startAclHost() {
+  const child = spawn('powershell.exe', powershellArgs('serve'), {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  const host = { child, queue: [], stdout: Buffer.alloc(0), stderr: '', seq: 0, failure: null };
+  // A spawn that never produced a process ran nothing, so no request it was
+  // handed can have had an effect and the caller may safely retry one-shot. A
+  // host that dies after receiving bytes may have already created a file, so
+  // that case must surface instead of being retried.
+  child.once('error', (error) => failAclHost(
+    host,
+    child.pid === undefined ? 'state-acl-host-unavailable' : 'state-acl-failed',
+    error,
+  ));
+  child.once('exit', (code, signal) => failAclHost(
+    host,
+    child.pid === undefined ? 'state-acl-host-unavailable' : 'state-acl-failed',
+    new Error(`the Windows ACL helper host exited (code ${code}, signal ${signal})`),
+  ));
+  child.stdout.on('data', (chunk) => {
+    host.stdout = host.stdout.length === 0 ? chunk : Buffer.concat([host.stdout, chunk]);
+    drainAclHost(host);
+  });
+  child.stderr.on('data', (chunk) => {
+    host.stderr = (host.stderr + chunk.toString('utf8')).slice(-4096);
+  });
+  child.stdin.on('error', (error) => failAclHost(host, 'state-acl-failed', error));
+  child.unref();
+  setAclHostRef(host, false);
+  return host;
+}
+
+function aclHostRequest(host, { action, file, source, input }) {
+  return new Promise((resolve, reject) => {
+    if (host.failure) {
+      reject(host.failure);
+      return;
+    }
+    const payload = input ?? Buffer.alloc(0);
+    if (payload.length > ACL_TRANSPORT_LIMIT) {
+      reject(new PathBoundaryError(
+        'state-acl-failed',
+        `secure write exceeds the ${ACL_TRANSPORT_LIMIT}-byte transport bound: ${file}`,
+      ));
+      return;
+    }
+    host.seq += 1;
+    const id = String(host.seq);
+    const entry = { id, resolve, reject };
+    host.queue.push(entry);
+    setAclHostRef(host, true);
+    try {
+      host.child.stdin.write(encodeAclRequestFrame({ id, action, file, source, payload }));
+    } catch (error) {
+      // The request never reached the host, so it must leave the queue too —
+      // a stale entry would be matched against the NEXT response and turn a
+      // failed write into some other file's answer.
+      const index = host.queue.indexOf(entry);
+      if (index >= 0) host.queue.splice(index, 1);
+      failAclHost(host, 'state-acl-failed', error);
+      reject(host.failure ?? error);
+    }
+  });
+}
+
+process.once('exit', () => {
+  if (aclHost === null) return;
+  // Closing stdin is what the host waits on; the kill is the backstop for a host
+  // that is wedged inside an ACL call.
+  try { aclHost.child.stdin.end(); } catch { /* already closed */ }
+  try { aclHost.child.kill(); } catch { /* already gone */ }
+});
+
+// A host that keeps dying is worse than no host: each attempt costs a failed
+// spawn on top of the one-shot call that follows it. Three consecutive failures
+// and this process stops trying.
+const ACL_HOST_STRIKES = 3;
+let aclHostFailures = 0;
+
+// `write` is the one action that is not safely repeatable: it creates the file
+// exclusively, so a host that died after creating it but before answering has
+// already had its effect. Every other action either only reads, or re-applies
+// the same DACL, so retrying one through a fresh process cannot produce a
+// different outcome than retrying it through the same one.
+const ACL_REPEATABLE = new Set(['read', 'repair', 'verify', 'write-sids', 'sid', 'copy-acl']);
+
+async function defaultWindowsActionAsync(request) {
+  if (aclHostUnavailable || process.env.NOOSPHERE_ACL_NO_HOST) {
+    return defaultWindowsAction(request);
+  }
+  const startedAt = ACL_PROFILE === null ? 0n : process.hrtime.bigint();
+  if (aclHost === null) {
+    try {
+      aclHost = startAclHost();
+    } catch (error) {
+      // PowerShell could not be started at all. The one-shot path cannot do
+      // better, but it is the documented path and produces the historical
+      // error, so degrade to it rather than invent a new failure mode here.
+      aclHostUnavailable = true;
+      return defaultWindowsAction(request);
+    }
+  }
   try {
-    return execFileSync('powershell.exe', [
-      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-      '-File', WINDOWS_SCRIPT, action, file,
-    ], {
-      input: input ?? undefined,
-      encoding: 'buffer',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-      maxBuffer: 16 * 1024 * 1024,
-    });
+    const result = await aclHostRequest(aclHost, request);
+    aclHostFailures = 0;
+    recordAclCall('host', request.action, startedAt);
+    return result;
+  } catch (error) {
+    recordAclCall('host', request.action, startedAt);
+    // A refusal is an answer: state-acl-broad means the DACL really is wrong,
+    // and asking a second process the same question would only ask it slower.
+    // Only a transport failure is worth repeating.
+    if (error.aclTransport !== true) throw error;
+    aclHostFailures += 1;
+    if (error.code === 'state-acl-host-unavailable' || aclHostFailures >= ACL_HOST_STRIKES) {
+      aclHostUnavailable = true;
+    }
+    // The host never became a process, so nothing it was handed can have run:
+    // any action may safely be repeated one-shot. A host that died after
+    // receiving the request may already have created the file, so only a
+    // repeatable action may be retried.
+    if (error.code === 'state-acl-host-unavailable' || ACL_REPEATABLE.has(request.action)) {
+      return defaultWindowsAction(request);
+    }
+    throw error;
+  }
+}
+
+function defaultWindowsAction({ action, file, source, input }) {
+  const startedAt = ACL_PROFILE === null ? 0n : process.hrtime.bigint();
+  try {
+    return execFileSync(
+      'powershell.exe',
+      source === undefined
+        ? powershellArgs(action, file)
+        : powershellArgs(action, file, source),
+      {
+        input: input ?? undefined,
+        encoding: 'buffer',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+        maxBuffer: ACL_TRANSPORT_LIMIT,
+      },
+    );
   } catch (error) {
     const stderr = Buffer.isBuffer(error.stderr) ? error.stderr.toString('utf8') : String(error.stderr ?? '');
-    const match = stderr.match(/NOOSPHERE_ACL_ERROR:([a-z0-9-]+):([^\r\n]*)/i);
-    const code = match?.[1] ?? 'state-acl-failed';
-    const message = match?.[2] || error.message;
-    throw new PathBoundaryError(code, message, error);
+    throw aclRefusal(stderr, 'state-acl-failed', error);
+  } finally {
+    recordAclCall('spawn', action, startedAt);
   }
 }
 
 function defaultCopyWindowsAcl(source, destination) {
+  const startedAt = ACL_PROFILE === null ? 0n : process.hrtime.bigint();
   try {
-    return execFileSync('powershell.exe', [
-      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-      '-File', WINDOWS_SCRIPT, 'copy-acl', destination, source,
-    ], {
+    return execFileSync('powershell.exe', powershellArgs('copy-acl', destination, source), {
       encoding: 'buffer',
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
-      maxBuffer: 16 * 1024 * 1024,
+      maxBuffer: ACL_TRANSPORT_LIMIT,
     });
   } catch (error) {
     const stderr = Buffer.isBuffer(error.stderr) ? error.stderr.toString('utf8') : String(error.stderr ?? '');
-    const match = stderr.match(/NOOSPHERE_ACL_ERROR:([a-z0-9-]+):([^\r\n]*)/i);
-    throw new PathBoundaryError(match?.[1] ?? 'state-acl-copy-failed', match?.[2] || error.message, error);
+    throw aclRefusal(stderr, 'state-acl-copy-failed', error);
+  } finally {
+    recordAclCall('spawn', 'copy-acl', startedAt);
+  }
+}
+
+async function defaultCopyWindowsAclAsync(source, destination) {
+  try {
+    return await defaultWindowsActionAsync({
+      action: 'copy-acl', file: destination, source, input: null,
+    });
+  } catch (error) {
+    // The one-shot path reports a copy failure as state-acl-copy-failed even
+    // when the helper could not say why; the host path must not report it as
+    // something else just because the transport differs.
+    if (error instanceof PathBoundaryError && error.code === 'state-acl-failed') {
+      throw new PathBoundaryError('state-acl-copy-failed', error.message, error);
+    }
+    throw error;
   }
 }
 

@@ -11,17 +11,28 @@ const store = createFormatV2Store({ env });
 const binding = await store.createProjectBinding(process.env.CRASH_PROJECT);
 const crashAt = process.env.CRASH_AT;
 
-await store.commitTransaction({
-  binding,
-  slot: process.env.CRASH_SLOT,
-  rawBytes: process.env.CRASH_BYTES,
-  sourceOrigin: 'crash-child',
-  onStep: (state) => {
-    // SIGKILL is delivered before the write of the next boundary; the current
-    // boundary's artifact is already fsync'd (commitTransaction awaits it).
-    if (state === crashAt) process.kill(process.pid, 'SIGKILL');
-  },
-});
+const onStep = (state) => {
+  // SIGKILL is delivered before the write of the next boundary; the current
+  // boundary's artifact is already fsync'd.
+  if (state === crashAt) process.kill(process.pid, 'SIGKILL');
+};
+
+if (process.env.CRASH_TRANSITION === 'revoked') {
+  await store.commitRevocation({
+    binding,
+    slot: process.env.CRASH_SLOT,
+    sourceOrigin: `cli:trust-revoke:${process.env.CRASH_SLOT}`,
+    onStep,
+  });
+} else {
+  await store.commitTransaction({
+    binding,
+    slot: process.env.CRASH_SLOT,
+    rawBytes: process.env.CRASH_BYTES,
+    sourceOrigin: 'crash-child',
+    onStep,
+  });
+}
 
 // Reached only if crashAt never matched a boundary — signal a clean finish.
 process.exit(0);

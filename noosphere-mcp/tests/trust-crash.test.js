@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, describe, it } from 'node:test';
 
+import { AUTH_DOMAINS } from '../continuity/internal/authenticated-records.js';
 import { createTrustTestHarness } from './helpers/trust-test-harness.js';
 
 const CHILD = fileURLToPath(new URL('./helpers/crash-child.mjs', import.meta.url));
@@ -24,10 +25,10 @@ async function fixture() {
 }
 
 // Spawn the child and hard-kill it at `crashAt`. Returns once the process is dead.
-function crash({ home, project, env }, crashAt, bytes) {
+function crash({ home, project, env }, crashAt, bytes, transition = 'approved') {
   const result = spawnSync(process.execPath, [CHILD], {
     cwd: path.dirname(path.dirname(CHILD)),
-    env: { ...process.env, CRASH_HOME: home, CRASH_PROJECT: project, CRASH_SLOT: SLOT, CRASH_BYTES: bytes, CRASH_AT: crashAt, CRASH_SCOPE: env.NOOSPHERE_OWNER_SCOPE },
+    env: { ...process.env, CRASH_HOME: home, CRASH_PROJECT: project, CRASH_SLOT: SLOT, CRASH_BYTES: bytes, CRASH_AT: crashAt, CRASH_SCOPE: env.NOOSPHERE_OWNER_SCOPE, CRASH_TRANSITION: transition },
     // Bound the wait: a regression that never reaches the crash hook must fail
     // this test explicitly, not block the single-concurrency suite until the
     // global timeout. A timeout surfaces as result.error (asserted below).
@@ -78,6 +79,34 @@ describe('SEC-05 Phase 4A-R2 — real process-death recovery', () => {
     });
   }
 
+  for (const [boundary, expectedState] of [
+    ['journal-prepared', 'approved'],
+    ['record-created', 'approved'],
+    ['audit-event-created', 'approved'],
+    ['manifest-committed', 'revoked'],
+  ]) {
+    it(`SIGKILL during revocation at ${boundary}: recovers to ${expectedState}`, async () => {
+      const fx = await fixture();
+      const { harness, binding } = fx;
+      await harness.commitApproval({
+        binding,
+        slot: SLOT,
+        rawBytes: 'candidate',
+        sourceOrigin: `cli:trust-approve:${SLOT}`,
+      });
+
+      const result = crash(fx, boundary, 'unused', 'revoked');
+      assertKilled(result);
+      await fs.rm(harness.pathFor(binding, `locks/${SLOT}.lock`), { force: true });
+      await harness.recover(binding, SLOT);
+      await harness.recover(binding, SLOT);
+
+      const current = await harness.classifySlot({ binding, slot: SLOT });
+      assert.equal(current.state, expectedState);
+      assert.equal(current.generation, expectedState === 'revoked' ? 2 : 1);
+    });
+  }
+
   it('rejects a well-formed foreign-owner lock during recovery (fail-closed, no reclaim)', async () => {
     const { harness, binding } = await fixture();
     const { hmac, machineKeyId, nowIso, writeExclusive } = harness._internal;
@@ -86,8 +115,24 @@ describe('SEC-05 Phase 4A-R2 — real process-death recovery', () => {
     // A complete, MAC-valid lock under THIS machine key but a different owner: it
     // must reach and fail the ownership check as trust-lock-foreign, not bail out
     // early as malformed.
-    const fields = { format: 2, type: 'trust-lock', transactionId, projectIdentity: binding.projectIdentity, ownerScope: 'someone-else', slot: SLOT, pid: 4242, startedAt: nowIso(), keyId: machineKeyId(machineKey) };
-    const lock = { ...fields, mac: hmac(machineKey, 'trust-lock', fields), token: transactionId };
+    const fields = {
+      domain: AUTH_DOMAINS.slotLock,
+      format: 2,
+      type: 'trust-lock',
+      token: transactionId,
+      transactionId,
+      projectIdentity: binding.projectIdentity,
+      projectIdentityDigest: harness._internal.identityDigestFor(binding),
+      ownerScope: 'someone-else',
+      slot: SLOT,
+      pid: 4242,
+      startedAt: nowIso(),
+      keyId: machineKeyId(machineKey),
+    };
+    const lock = {
+      ...fields,
+      mac: hmac(machineKey, AUTH_DOMAINS.slotLock, fields),
+    };
     await writeExclusive(harness.pathFor(binding, `locks/${SLOT}.lock`), lock);
     await assert.rejects(harness.inspectLock(binding, SLOT), (e) => e.code === 'trust-lock-foreign');
     await assert.rejects(harness.recover(binding, SLOT), (e) => e.code === 'trust-lock-foreign');

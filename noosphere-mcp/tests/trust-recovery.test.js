@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
+import { AUTH_DOMAINS } from '../continuity/internal/authenticated-records.js';
 import { NORM_ALGO, NORM_VERSION } from '../continuity/memory-safety.js';
 import { canonicalize } from '../continuity/trust-store-internal.js';
 import { createTrustTestHarness } from './helpers/trust-test-harness.js';
@@ -35,19 +36,20 @@ describe('SEC-05 Phase 4A-R1 — audit-chain completeness and journal recovery',
     const eventId = crypto.randomUUID();
     const value = Buffer.from('forged');
     const at = new Date().toISOString();
+    const projectIdentityDigest = harness._internal.identityDigestFor(binding);
 
-    const rf = { format: 2, type: 'slot-record', recordId, projectIdentity: binding.projectIdentity, ownerScope: scope(), slot, generation: 2, rawHash: hash(value), contentHash: contentHash(value), normAlgo: NORM_ALGO, normVersion: NORM_VERSION, sourceOrigin: 'forge', approvalEventId: eventId, previousRecordId: null, auditEventId: eventId, approvedAt: at, keyId };
-    const record = { ...rf, mac: hmac(machineKey, 'slot-record', rf) };
+    const rf = { domain: AUTH_DOMAINS.approvedGeneration, format: 2, type: 'slot-record', recordId, projectIdentity: binding.projectIdentity, projectIdentityDigest, ownerScope: scope(), slot, generation: 2, rawHash: hash(value), contentHash: contentHash(value), normAlgo: NORM_ALGO, normVersion: NORM_VERSION, sourceOrigin: 'forge', approvalEventId: eventId, previousRecordId: null, auditEventId: eventId, approvedAt: at, keyId };
+    const record = { ...rf, mac: hmac(machineKey, AUTH_DOMAINS.approvedGeneration, rf) };
     await writeExclusive(harness.recordPath(binding, slot, 2, eventId), record);
     const recordHash = hash(canonicalize(record));
 
-    const af = { format: 2, type: 'audit-event', eventId, eventType: 'forge', projectIdentity: binding.projectIdentity, ownerScope: scope(), slot, generation: 2, recordId, recordHash, previousGeneration: 0, previousRecordId: null, previousAuditEventId: null, previousAuditEventHash: null, normAlgo: NORM_ALGO, normVersion: NORM_VERSION, rawHash: rf.rawHash, contentHash: rf.contentHash, keyId, timestamp: at };
-    const audit = { ...af, mac: hmac(machineKey, 'audit-event', af) };
+    const af = { domain: AUTH_DOMAINS.audit, format: 2, type: 'audit-event', eventId, eventType: 'forge', projectIdentity: binding.projectIdentity, projectIdentityDigest, ownerScope: scope(), slot, generation: 2, recordId, recordHash, previousGeneration: 0, previousRecordId: null, previousAuditEventId: null, previousAuditEventHash: null, normAlgo: NORM_ALGO, normVersion: NORM_VERSION, rawHash: rf.rawHash, contentHash: rf.contentHash, keyId, timestamp: at };
+    const audit = { ...af, mac: hmac(machineKey, AUTH_DOMAINS.audit, af) };
     await writeExclusive(harness.auditPath(binding, eventId), audit);
     const auditHash = hash(canonicalize(audit));
 
-    const mf = { format: 2, type: 'manifest', projectIdentity: binding.projectIdentity, ownerScope: scope(), slot, currentGeneration: 2, currentRecordId: recordId, currentRecordHash: recordHash, auditHeadId: eventId, auditHeadHash: auditHash, keyId };
-    const manifest = { ...mf, mac: hmac(machineKey, 'manifest', mf) };
+    const mf = { domain: AUTH_DOMAINS.manifest, format: 2, type: 'manifest', projectIdentity: binding.projectIdentity, projectIdentityDigest, ownerScope: scope(), slot, currentGeneration: 2, currentRecordId: recordId, currentRecordHash: recordHash, auditHeadId: eventId, auditHeadHash: auditHash, keyId };
+    const manifest = { ...mf, mac: hmac(machineKey, AUTH_DOMAINS.manifest, mf) };
     await writeExclusive(harness.manifestPath(binding, slot), manifest);
 
     assert.equal(await harness.verifyAuditChain(binding, slot), false);
@@ -59,8 +61,8 @@ describe('SEC-05 Phase 4A-R1 — audit-chain completeness and journal recovery',
     const slot = 'master-prompt';
     const { signed } = harness._internal;
     const eventId = crypto.randomUUID();
-    const fields = { format: 2, type: 'transaction-journal', transactionId: eventId, projectIdentity: binding.projectIdentity, ownerScope: harness._internal.scope(), slot, candidateGeneration: 1, priorManifestHash: null, recordId: crypto.randomUUID(), auditEventId: eventId, recordHash: harness._internal.hash('claims-a-record'), auditHash: null, state: 'record-created', keyId: harness._internal.machineKeyId(await harness.ensureMachineKey()) };
-    await harness._internal.writeExclusive(harness.journalPath(binding, eventId), await signed('transaction-journal', fields));
+    const fields = { domain: AUTH_DOMAINS.authorityJournal, format: 2, type: 'transaction-journal', transactionId: eventId, projectIdentity: binding.projectIdentity, projectIdentityDigest: harness._internal.identityDigestFor(binding), ownerScope: harness._internal.scope(), slot, candidateGeneration: 1, priorManifestHash: null, recordId: crypto.randomUUID(), auditEventId: eventId, recordHash: harness._internal.hash('claims-a-record'), auditHash: null, state: 'record-created', keyId: harness._internal.machineKeyId(await harness.ensureMachineKey()) };
+    await harness._internal.writeExclusive(harness.journalPath(binding, eventId), await signed(AUTH_DOMAINS.authorityJournal, fields));
 
     await harness.recover(binding, slot);
     await assert.rejects(fs.access(harness.journalPath(binding, eventId)));
@@ -74,8 +76,8 @@ describe('SEC-05 Phase 4A-R1 — audit-chain completeness and journal recovery',
     await harness.commitTestTransaction({ binding, slot, rawBytes: 'gen2' });
     // Re-forge a valid committed journal for the now-superseded generation 1.
     const eventId = crypto.randomUUID();
-    const fields = { format: 2, type: 'transaction-journal', transactionId: eventId, projectIdentity: binding.projectIdentity, ownerScope: harness._internal.scope(), slot, candidateGeneration: 1, priorManifestHash: null, recordId: crypto.randomUUID(), auditEventId: eventId, recordHash: harness._internal.hash('old'), auditHash: harness._internal.hash('old'), state: 'manifest-committed', keyId: harness._internal.machineKeyId(await harness.ensureMachineKey()) };
-    await harness._internal.writeExclusive(harness.journalPath(binding, eventId), await harness._internal.signed('transaction-journal', fields));
+    const fields = { domain: AUTH_DOMAINS.authorityJournal, format: 2, type: 'transaction-journal', transactionId: eventId, projectIdentity: binding.projectIdentity, projectIdentityDigest: harness._internal.identityDigestFor(binding), ownerScope: harness._internal.scope(), slot, candidateGeneration: 1, priorManifestHash: null, recordId: crypto.randomUUID(), auditEventId: eventId, recordHash: harness._internal.hash('old'), auditHash: harness._internal.hash('old'), state: 'manifest-committed', keyId: harness._internal.machineKeyId(await harness.ensureMachineKey()) };
+    await harness._internal.writeExclusive(harness.journalPath(binding, eventId), await harness._internal.signed(AUTH_DOMAINS.authorityJournal, fields));
 
     await harness.recover(binding, slot);
     await assert.rejects(fs.access(harness.journalPath(binding, eventId)));

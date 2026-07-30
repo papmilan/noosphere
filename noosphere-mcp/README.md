@@ -228,6 +228,239 @@ noosphere uninstall
 `noosphere activate` may also be used explicitly from an IDE terminal. It
 works from any nested folder inside the repository.
 
+## Owner authority commands (SEC-05 Phase 4C)
+
+These are the only commands that can change which bytes agents treat as
+authoritative instructions, and the only commands that can write a project file
+from remote memory. Everything here is owner-driven; nothing runs on your
+behalf.
+
+```text
+noosphere trust migrate
+noosphere trust approve  master-prompt|instructions|baseline
+noosphere trust revoke   master-prompt|instructions|baseline
+noosphere restore stage  master-prompt|instructions|baseline
+noosphere restore list
+noosphere restore show   <candidate-id>
+noosphere restore apply  <candidate-id>
+noosphere restore recover
+```
+
+That list is exhaustive. There is no other command, flag, environment variable,
+configuration key, HTTP endpoint, MCP tool, or hook that can approve, revoke,
+migrate, stage, apply, or consume authority state.
+
+### What each command does
+
+| Command | Effect | Interactive |
+|---|---|---|
+| `trust migrate` | Walks every eligible slot from the read-only legacy inventory and asks for a fresh, separate approval for each. Never promotes old state on its own. | yes |
+| `trust approve <slot>` | Makes the slot's **exact current bytes** authoritative. Appends generation N+1. | yes |
+| `trust revoke <slot>` | Appends an authenticated tombstone at generation N+1. No bytes for that slot are authoritative until a fresh approval, which lands at N+2. | yes |
+| `restore stage <slot>` | Fetches a candidate from remote memory and stores it, authenticated, as **untrusted** owner-local state. Changes no project file and no authority state. | yes |
+| `restore list` | Lists active candidates. Mutates nothing. | no |
+| `restore show <id>` | Shows one candidate's bytes, escaped, plus the rendering an agent would see. Mutates nothing. | no |
+| `restore apply <id>` | Replaces the slot's fixed destination file with the candidate's bytes, once. | yes |
+| `restore recover` | Completes an apply transaction that a crash left unfinished. Cannot stage, approve, revoke, or start a transaction. | no |
+
+### Fixed destinations
+
+A slot's destination is fixed in code. No argument, config key, or environment
+variable can redirect it, and a symlink at the destination is refused rather
+than followed.
+
+| Slot | Destination |
+|---|---|
+| `master-prompt` | `.noosphere/master-prompt.md` |
+| `instructions` | `.noosphere/instructions.md` |
+| `baseline` | `.noosphere/baseline.md` |
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | unexpected defect |
+| 2 | usage error — unknown verb, wrong arity, unsupported slot, non-canonical candidate ID |
+| 3 | you declined — the confirmation phrase did not match, or input was too long |
+| 4 | security refusal — no terminal, unsafe path, failed authentication, stale state, owner intervention required. For `restore apply`, see the note below: recovery may already have run. |
+
+Exit 3 and exit 4 mean **the operation you asked for** did not commit. They do
+not mean the command wrote nothing, and one case matters:
+
+> `restore apply` runs crash recovery **before** it checks for a terminal. If an
+> earlier crashed transaction was outstanding, recovery converges it — writing a
+> receipt, a consumed marker, and possibly completing a destination replacement
+> that had already committed — and only then does the apply refuse with exit 4.
+> The exit code describes the apply, not the recovery that preceded it.
+
+That ordering is deliberate: no new transaction may begin while an earlier one is
+unresolved, and the ordering must not depend on whether the caller happens to
+have a terminal. Run `noosphere restore recover` first if you want the recovery
+and the apply to be separate, auditable steps.
+
+### Replay inspection and crash locks
+
+`replay status` and `replay list` authenticate bounded replay evidence and never
+recover, clear, reset, or rewrite it. There is no replay unlock or replay-key
+repair command.
+
+A replay project or identity lock that survives process death requires owner
+intervention. A retry refuses it as `replay-lock-busy`; Noosphere never guesses
+that a lock is stale from a PID, timestamp, boot time, or pathname, and never
+deletes it automatically. After independently confirming that no replay
+operation is live and removing the surviving lock artifact, rerun the original
+production operation. That ordinary path authenticates and converges the
+incomplete replay journal before observing new content.
+
+Typed context refresh processes recalled follow-ups in response order. It does
+not launch replay observations concurrently, because every item participates
+in the same fail-fast replay project lock.
+
+### Terminal requirement
+
+Trust mutations and `restore stage` require both TTY streams before reading or
+mutating their operation state. Piped stdin, redirected stdout, CI runners, and
+agent-driven shells are refused with exit 4 before those commands read or
+change their operation state.
+
+`restore apply` runs recovery before its TTY check. Its exit 4 can therefore
+follow reads or mutations made by recovery, but
+it creates no new apply transaction for the refused request. After recovery,
+apply still requires **both** stdin and stdout to be terminals before it reads
+the requested candidate or begins its own transaction.
+
+`restore list`, `restore show`, and `restore recover` do not require a terminal:
+the first two only read. `recover` may converge authenticated journal
+transactions or the narrow authenticated pre-journal window described below; it
+cannot stage, approve, revoke, or start a new apply transaction.
+
+There is **no** `--yes`, `--force`, `--non-interactive`, or `--batch` flag; no
+environment variable that skips a confirmation; no configuration key that grants
+authority; no HTTP API, MCP tool, hook, adapter, lifecycle service, or package
+export that reaches any of these operations. The package exports exactly one
+module (`noosphere-continuity/trust-store`) and it can only answer whether bytes
+are already authoritative — it can never make them so.
+
+Read the **PTY relay residual** below before relying on the terminal check.
+
+### Candidate lifecycle
+
+Staged candidates are retained for **seven days**, then expire. Retention is
+storage, not permission: an active candidate is untrusted the entire time. Nor
+does expiry act — retention never approves, applies, revokes, or consumes
+anything, and an expired candidate is simply no longer offered.
+
+Candidates and confirmations are **one-shot**:
+
+- Applying a candidate consumes it. The same candidate can never be applied
+  twice, whether the outcome was success or failure.
+- Each apply issues one confirmation context bound to that exact candidate,
+  payload, destination observation, and transaction. It is spent by the first
+  answer, right or wrong, and cannot be replayed, rolled back, or rebound to
+  another candidate.
+
+**Restaging is required after any failed apply.** A refused, declined, or
+crashed apply consumes the candidate; run `restore stage <slot>` again to get a
+fresh one.
+
+### Applying into a revoked slot
+
+`restore apply` works on a revoked slot. It replaces the destination file and
+leaves the tombstone untouched — the restored bytes are **not** authoritative.
+Authority is never implied by a restore: it is recomputed from the live bytes
+and the current manifest afterwards, and it comes out true only when those exact
+bytes are already the current approved generation. In every other case the CLI
+says the bytes remain untrusted and points you at `noosphere trust approve`.
+
+### Crash recovery
+
+If a process dies mid-apply, recovery resolves only authenticated evidence
+before anything else can touch that slot:
+
+- Every `restore apply` runs recovery first, before the confirmation prompt,
+  before the terminal check, and before any new transaction exists. An apply
+  that is then refused — including with exit 4 for a missing terminal — can
+  have converged recovery, but it creates no new apply transaction.
+- `noosphere restore recover` runs the same pass on demand.
+
+`restore recover` may converge authenticated apply-journal transactions. It may
+also converge the narrow pre-journal crash window represented by an
+authenticated spent confirmation plus a matching `apply-in-progress` candidate,
+but only after observing no slot lock and rechecking that no journal appeared.
+Recovery is never driven by destination bytes alone. **A destination is never
+replaced twice.**
+
+A present slot lock requires owner intervention, including one whose PID is
+gone. Recovery never deletes a slot lock automatically. The owner may remove it
+only after independently confirming no transaction is live, then rerun
+recovery. This is intentionally fail-closed: a malformed, unauthenticated,
+foreign, conflicting, or merely present lock is left exactly as found.
+
+A `prepared` journal never implies a rename. An exact authenticated temporary
+may be discarded and the candidate failed; an unexpected destination
+requires owner intervention. A later authenticated journal state may finish its
+receipt and consumed marker, but never performs a second destination
+replacement. For an authenticated apply journal, the complete final recovery
+barrier is repeated while holding the slot lock before any mutation. The
+journal-less path observes no slot lock, re-enumerates journals immediately
+before candidate-only failed consumption, and never touches the destination or
+trust authority.
+
+#### Owner intervention required
+
+Recovery exits 4 with `ERR_RESTORE_OWNER_INTERVENTION_REQUIRED` when the
+evidence conflicts. The most important case:
+
+> **The destination changed after the replacement committed.** Recovery will not
+> touch it. Your file is left exactly as it is; inspect it and decide yourself.
+
+The same outcome covers a temporary file that does not match the authenticated
+payload, an unusable or unprovable lock, a candidate or confirmation that does
+not match its journal, and any unauthenticated record. In all of them nothing is
+repaired and nothing is deleted.
+
+### Refused sources
+
+An authority-capable slot must be an ordinary, readable, valid-UTF-8 file within
+the repository. These are refused rather than degraded, read through, or
+silently treated as empty:
+
+| Refused | Why |
+|---|---|
+| symlinked slot file | the target could be outside the repository or swapped after the check |
+| FIFO, device, socket | reading can block forever or return attacker-chosen bytes |
+| directory in place of the file | not a slot source |
+| malformed UTF-8 | refused before confirmation rather than decoded with replacement characters |
+| larger than 1 MiB | refused before it is read or allocated |
+| empty | there is nothing to approve; an empty approval would authorize nothing while burning a generation |
+
+A symlinked *parent directory* is supported. The distinction is deliberate: the
+slot file itself must be real.
+
+### Windows
+
+Owner-only state uses exact SID DACLs, and a replacement preserves a protected
+DACL rather than inheriting a weaker one. When another process holds the
+destination or a state file open, Windows reports a sharing violation instead of
+allowing the replace; the operation retries within a bounded budget and then
+fails closed with exit 4. It never falls back to a truncating write, and it
+never leaves a partially written destination. Reparse points on a slot path are
+refused, matching the symlink rule above.
+
+### Accepted residual: PTY relay
+
+The terminal requirement blocks piped, redirected, and scripted approval. It is
+**not** proof that a human is present. An adversary who can already run commands
+as you can allocate a pseudo-terminal, read the displayed bytes, compute the
+confirmation phrase, and answer it.
+
+This is accepted, not overlooked. The boundary Phase 4C enforces is that
+authority requires an interactive owner session on your machine — not that your
+machine is uncompromised. If an attacker has code execution as you, they can
+already edit the files these commands approve. See `SECURITY.md` for the full
+statement.
+
 ### Continuation State Protocol (CSP)
 
 `.noosphere/state.json` is the optional Git-tracked CSP v1 snapshot. It keeps

@@ -678,130 +678,30 @@ describe('Noosphere continuity CLI', () => {
     assert.match(context, /Read this before changing the project/);
   });
 
-  it('replaces a wrong local baseline with the typed Walrus baseline during restore', async () => {
+  it('retires the legacy bulk restore command without changing project slots', async () => {
     const restoreDir = await mkdtemp(
       path.join(os.tmpdir(), 'noosphere-restore-'),
     );
-    const walrusBaseline =
-      'PROJECT BASELINE: WALRUS-RESTORE-BASELINE-SENTINEL';
-    const walrusMasterPrompt =
-      'ORIGINAL TASK: WALRUS-RESTORE-MASTER-SENTINEL';
-    const walrusFollowup =
-      'LATEST USER INSTRUCTION: WALRUS-RESTORE-FOLLOWUP-SENTINEL';
-
     try {
       await execFileAsync('git', ['init'], { cwd: restoreDir });
       await runCli(['init'], restoreDir);
-
-      const configPath = path.join(
-        restoreDir,
-        '.noosphere',
-        'config.json',
-      );
-      const config = JSON.parse(await readFile(configPath, 'utf8'));
-      config.project_id = 'continuity-test';
-      config.relayer_url = serverUrl;
-      await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
-
+      const baseline = 'LOCAL BASELINE MUST REMAIN';
+      const masterPrompt = 'LOCAL MASTER PROMPT MUST REMAIN';
+      const followups = `${JSON.stringify({
+        content: 'LOCAL FOLLOWUP MUST REMAIN',
+      })}\n`;
       await writeFile(
         path.join(restoreDir, '.noosphere', 'baseline.md'),
-        'WRONG LOCAL BASELINE',
+        baseline,
       );
       await writeFile(
         path.join(restoreDir, '.noosphere', 'master-prompt.md'),
-        'WRONG LOCAL MASTER PROMPT',
+        masterPrompt,
       );
       await writeFile(
         path.join(restoreDir, '.noosphere', 'followups.jsonl'),
-        `${JSON.stringify({ content: 'WRONG LOCAL FOLLOWUP' })}\n`,
+        followups,
       );
-
-      typedRecallMemories = [
-        {
-          action_id: 'baseline-restore-test',
-          action_type: 'project-baseline',
-          content: walrusBaseline,
-          timestamp: '2026-06-15T00:00:00.000Z',
-          agent_id: 'restore-test',
-        },
-        {
-          action_id: 'master-restore-test',
-          action_type: 'master-prompt',
-          content: walrusMasterPrompt,
-          timestamp: '2026-06-15T00:00:01.000Z',
-          agent_id: 'restore-test',
-        },
-        {
-          action_id: 'followup-restore-test',
-          action_type: 'user-followup',
-          content: walrusFollowup,
-          timestamp: '2026-06-15T00:00:02.000Z',
-          agent_id: 'restore-test',
-        },
-      ];
-
-      const output = await runCli(['restore'], restoreDir);
-      assert.match(output, /baseline\.md restored from Walrus/);
-
-      const [baseline, masterPrompt, followups, context] = await Promise.all([
-        readFile(path.join(restoreDir, '.noosphere', 'baseline.md'), 'utf8'),
-        readFile(
-          path.join(restoreDir, '.noosphere', 'master-prompt.md'),
-          'utf8',
-        ),
-        readFile(
-          path.join(restoreDir, '.noosphere', 'followups.jsonl'),
-          'utf8',
-        ),
-        readFile(path.join(restoreDir, '.noosphere', 'context.md'), 'utf8'),
-      ]);
-
-      assert.equal(baseline, walrusBaseline);
-      assert.equal(masterPrompt, walrusMasterPrompt);
-      assert.match(followups, /WALRUS-RESTORE-FOLLOWUP-SENTINEL/);
-      assert.doesNotMatch(followups, /WRONG LOCAL FOLLOWUP/);
-      assert.match(
-        context,
-        /## Initial project baseline[\s\S]*WALRUS-RESTORE-BASELINE-SENTINEL/,
-      );
-      assert.doesNotMatch(context, /WRONG LOCAL BASELINE/);
-
-      typedRecallMemories = [];
-      await writeFile(
-        path.join(restoreDir, '.noosphere', 'baseline.md'),
-        'LOCAL BASELINE TO KEEP',
-      );
-      const noBaselineOutput = await runCli(['restore'], restoreDir);
-      assert.match(
-        noBaselineOutput,
-        /baseline\.md kept local; no Walrus baseline found/,
-      );
-      assert.equal(
-        await readFile(
-          path.join(restoreDir, '.noosphere', 'baseline.md'),
-          'utf8',
-        ),
-        'LOCAL BASELINE TO KEEP',
-      );
-    } finally {
-      typedRecallMemories = [];
-      await rm(restoreDir, { recursive: true, force: true });
-    }
-  });
-
-  it('restore surfaces an actionable error when the relayer is unreachable', async () => {
-    const restoreDir = await mkdtemp(
-      path.join(os.tmpdir(), 'noosphere-restore-down-'),
-    );
-    try {
-      await execFileAsync('git', ['init'], { cwd: restoreDir });
-      await runCli(['init'], restoreDir);
-
-      const configPath = path.join(restoreDir, '.noosphere', 'config.json');
-      const config = JSON.parse(await readFile(configPath, 'utf8'));
-      config.project_id = 'continuity-test';
-      config.relayer_url = 'http://127.0.0.1:1';
-      await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 
       const child = spawn(process.execPath, [cli, 'restore'], {
         cwd: restoreDir,
@@ -812,15 +712,16 @@ describe('Noosphere continuity CLI', () => {
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
-      const stderrChunks = [];
-      child.stderr.on('data', (chunk) => stderrChunks.push(chunk));
       const code = await waitForChild(child, ['restore'], {
         timeoutMs: CLI_TIMEOUT_MS,
       });
-      const stderr = Buffer.concat(stderrChunks).toString();
-      assert.notEqual(code, 0, 'restore must fail when the relayer is down');
-      assert.match(stderr, /Cannot reach the Noosphere relayer/);
-      assert.match(stderr, /noosphere setup --local/);
+      assert.equal(code, 2);
+      const after = await Promise.all([
+        readFile(path.join(restoreDir, '.noosphere', 'baseline.md'), 'utf8'),
+        readFile(path.join(restoreDir, '.noosphere', 'master-prompt.md'), 'utf8'),
+        readFile(path.join(restoreDir, '.noosphere', 'followups.jsonl'), 'utf8'),
+      ]);
+      assert.deepEqual(after, [baseline, masterPrompt, followups]);
     } finally {
       await rm(restoreDir, { recursive: true, force: true });
     }

@@ -26,12 +26,15 @@
 // re-authentication) that a child process cannot relay, which Phase 4B does not
 // implement.
 import crypto from 'node:crypto';
-import readline from 'node:readline/promises';
 
 import { normalizeUntrusted } from '../memory-safety.js';
 import { renderSlotBlock } from '../render.js';
 import { TrustStoreError } from '../trust-store-internal.js';
 import { APPROVABLE_SLOTS, resolveSlotSource, slotSourcePath } from '../slot-sources.js';
+import {
+  assertInteractiveStreams,
+  readExactConfirmation,
+} from './exact-confirmation.js';
 import { FORMAT2_SLOTS, createFormatV2Store } from './trust-format-v2.js';
 
 const MAX_CONFIRMATION_BYTES = 256;
@@ -60,12 +63,12 @@ export function confirmationPhrase(slot, rawHash) {
 // service touches the trust store at all, so a non-interactive caller leaves no
 // trace, and again inside the prompt as defence in depth.
 function assertInteractive({ input = process.stdin, output = process.stdout } = {}) {
-  if (!input.isTTY || !output.isTTY) {
-    throw new TrustStoreError(
-      'approval-requires-tty',
-      'approving a source requires an interactive terminal; run this yourself, in your own shell',
-    );
-  }
+  assertInteractiveStreams({
+    input,
+    output,
+    code: 'approval-requires-tty',
+    message: 'approving a source requires an interactive terminal; run this yourself, in your own shell',
+  });
 }
 
 // Production confirmation: interactive terminal only.
@@ -94,59 +97,16 @@ async function ttyConfirm({ slot, rawHash, contentHash, byteLength, escapedBytes
     `Type "${phrase}" to approve, anything else to abort.`,
     '',
   ].join('\n'));
-  const terminal = readline.createInterface({ input, output });
-  const abort = new AbortController();
-  let receivedBytes = 0;
-  let inputTooLong = false;
-  let lastInputByte;
-  const abortOnEnd = () => abort.abort();
-  const trackInputBytes = (chunk) => {
-    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8');
-    for (const byte of bytes) {
-      if (byte === 0x0a) {
-        // readline removes CRLF from its answer, so neither delimiter byte is
-        // confirmation input.
-        if (lastInputByte === 0x0d) receivedBytes -= 1;
-        return;
-      }
-      receivedBytes += 1;
-      lastInputByte = byte;
-      // Delay only for a possible CRLF delimiter at the exact boundary.
-      if (receivedBytes > MAX_CONFIRMATION_BYTES
-        && !(receivedBytes === MAX_CONFIRMATION_BYTES + 1 && byte === 0x0d)) {
-        inputTooLong = true;
-        abort.abort();
-        return;
-      }
-    }
-  };
-  input.on('data', trackInputBytes);
-  input.once('end', abortOnEnd);
-  try {
-    const answer = await terminal.question('> ', { signal: abort.signal });
-    if (Buffer.byteLength(answer, 'utf8') > MAX_CONFIRMATION_BYTES) {
-      throw new TrustStoreError(
-        'approval-input-too-long',
-        `approval confirmation exceeds the ${MAX_CONFIRMATION_BYTES}-byte limit`,
-      );
-    }
-    return answer === phrase;
-  } catch (error) {
-    if (inputTooLong) {
-      throw new TrustStoreError(
-        'approval-input-too-long',
-        `approval confirmation exceeds the ${MAX_CONFIRMATION_BYTES}-byte limit`,
-      );
-    }
-    if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || error?.code === 'ERR_USE_AFTER_CLOSE') {
-      return false;
-    }
-    throw error;
-  } finally {
-    input.off('data', trackInputBytes);
-    input.off('end', abortOnEnd);
-    terminal.close();
-  }
+  return readExactConfirmation({
+    input,
+    output,
+    phrase,
+    maxBytes: MAX_CONFIRMATION_BYTES,
+    ttyCode: 'approval-requires-tty',
+    ttyMessage: 'approving a source requires an interactive terminal; run this yourself, in your own shell',
+    tooLongCode: 'approval-input-too-long',
+    tooLongMessage: `approval confirmation exceeds the ${MAX_CONFIRMATION_BYTES}-byte limit`,
+  });
 }
 
 // Approve the current on-disk bytes of one slot. Returns the committed
@@ -161,9 +121,17 @@ export async function approveSlot({
   input,
   output,
   now,
+  sourceOrigin = `cli:trust-approve:${slot}`,
+  expectedCurrent,
+  afterConfirmation,
+  bindingProjectIdentity,
 } = {}) {
   if (!APPROVABLE_SLOTS.includes(slot) || !FORMAT2_SLOTS.includes(slot)) {
     throw new TrustStoreError('invalid-slot', `${slot} cannot be approved; approvable slots: ${APPROVABLE_SLOTS.join(', ')}`);
+  }
+  if (sourceOrigin !== `cli:trust-approve:${slot}` &&
+      sourceOrigin !== `cli:trust-migrate:${slot}`) {
+    throw new TrustStoreError('approval-source-invalid', 'approval source origin is invalid');
   }
   // Refuse a non-interactive caller before creating a binding or running
   // recovery: an agent that cannot approve should not be able to touch the trust
@@ -193,11 +161,20 @@ export async function approveSlot({
     rendered: renderSlotBlock(text, { authoritative: true }),
   });
   if (approved !== true) throw new TrustStoreError('approval-declined', 'approval was not confirmed; nothing was changed');
+  if (afterConfirmation) await afterConfirmation();
 
   const store = createFormatV2Store({ env, secureFileOptions, now });
-  const binding = await store.createProjectBinding(projectRoot);
+  const binding = await store.createProjectBinding(projectRoot, {
+    projectIdentity: bindingProjectIdentity,
+  });
   // A confirmed approval still fails closed on held/foreign/malformed locks and
   // uncorroborated committed journals before starting the transaction.
   await store.recover(binding, slot);
-  return store.commitTransaction({ binding, slot, rawBytes: bytes, sourceOrigin: `cli:trust-approve:${slot}` });
+  return store.commitApproval({
+    binding,
+    slot,
+    rawBytes: bytes,
+    sourceOrigin,
+    expectedCurrent,
+  });
 }

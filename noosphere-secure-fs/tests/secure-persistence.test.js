@@ -13,6 +13,7 @@ import {
   currentWindowsSid,
   readOwnerOnlyFile,
   readOwnerOnlyFileSync,
+  verifyNoForeignWriteWindows,
   verifyOwnerOnlyWindows,
   writeOwnerOnlyFileExclusive,
 } from '../index.js';
@@ -185,6 +186,77 @@ describe('shared owner-only persistence boundary', () => {
         windowsAction: () => Buffer.from('S-1-5-32-544\nS-1-5-18\nS-1-5-18'),
       }),
       ['S-1-5-18', 'S-1-5-32-544'],
+    );
+  });
+
+  // SEC-05 Phase 4C Finding 4. A restore destination is a repository file: it
+  // inherits the repository ACL, and the question is the POSIX one — can anyone
+  // but the owner modify it?
+  test('Windows destination check mirrors the POSIX write check, not owner-only', () => {
+    const dir = temporaryDirectory();
+    const target = path.join(dir, 'baseline.md');
+    fs.writeFileSync(target, 'repository content');
+    const OWNER = 'S-1-5-21-1-2-3-1001';
+    const check = (lines) => verifyNoForeignWriteWindows(target, {
+      platform: 'win32',
+      windowsAction: () => Buffer.from(lines.join('\n')),
+    });
+
+    // The shape a real repository file has: inherited ACEs, owner plus the two
+    // privileged built-ins holding write. This is what owner-only refused.
+    assert.deepEqual(
+      check([`owner:${OWNER}`, `write:${OWNER}`, 'write:S-1-5-18', 'write:S-1-5-32-544']),
+      ['S-1-5-18', OWNER, 'S-1-5-32-544'],
+    );
+    // Nobody at all holding write is trivially fine.
+    assert.deepEqual(check([`owner:${OWNER}`]), []);
+    // A foreign principal with READ ONLY never appears in the write list, so a
+    // world-readable repository file passes — exactly as 0644 does on POSIX.
+    assert.deepEqual(check([`owner:${OWNER}`, `write:${OWNER}`]), [OWNER]);
+
+    // …and a foreign principal WITH write is refused, which is the whole point.
+    for (const foreign of ['S-1-5-32-545', 'S-1-1-0', 'S-1-5-11', 'S-1-5-21-9-9-9-1002']) {
+      assert.throws(
+        () => check([`owner:${OWNER}`, `write:${OWNER}`, `write:${foreign}`]),
+        (error) => error.code === 'state-destination-foreign-write' &&
+          error.message.includes(foreign),
+        `${foreign} must not be allowed to write the destination`,
+      );
+    }
+  });
+
+  test('Windows destination check fails closed on an unreadable ACL answer', () => {
+    const dir = temporaryDirectory();
+    const target = path.join(dir, 'baseline.md');
+    fs.writeFileSync(target, 'repository content');
+    const check = (text) => verifyNoForeignWriteWindows(target, {
+      platform: 'win32',
+      windowsAction: () => Buffer.from(text),
+    });
+
+    // An unparseable answer is an unanswered question, never "no foreign writer".
+    for (const bad of [
+      '',
+      'S-1-5-18',                                  // unprefixed, the old format
+      'owner:DOMAIN\\friendly-name',
+      'owner:S-1-5-21-1\nwrite:not-a-sid',
+      'write:S-1-5-18',                            // no owner line
+      'owner:S-1-5-21-1\nowner:S-1-5-21-2',        // two owners
+      'garbage',
+    ]) {
+      assert.throws(
+        () => check(bad),
+        (error) => error.code === 'state-acl-readback-failed',
+        `must fail closed on: ${JSON.stringify(bad)}`,
+      );
+    }
+    // A non-Windows platform never spawns the helper at all.
+    assert.deepEqual(
+      verifyNoForeignWriteWindows(target, {
+        platform: 'linux',
+        windowsAction: () => { throw new Error('must not run off Windows'); },
+      }),
+      [],
     );
   });
 

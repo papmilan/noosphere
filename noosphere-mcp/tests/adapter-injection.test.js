@@ -5,9 +5,9 @@ import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
 import { buildOllamaSystemPrompt } from '../continuity/ollama.js';
+import { createFormatV2Store } from '../continuity/internal/trust-format-v2.js';
 import { renderSlotBlock } from '../continuity/render.js';
 import { isSlotAuthoritative } from '../continuity/trust-store.js';
-import { putSlotRecord } from '../continuity/trust-store-internal.js';
 
 const cp = (n) => String.fromCodePoint(n);
 
@@ -95,7 +95,14 @@ describe('SEC-05 Phase 3 — slot gating is uniform across sinks (master-prompt 
     assert.ok(quoted.includes('PINNED MASTER PROMPT (untrusted, recalled)'));
     assert.ok(quoted.includes(`> ${MP}`));
 
-    await putSlotRecord({ projectRoot: project, slot: 'master-prompt', rawBytes: MP, env });
+    const store = createFormatV2Store({ env });
+    const binding = await store.createProjectBinding(project);
+    await store.commitTransaction({
+      binding,
+      slot: 'master-prompt',
+      rawBytes: MP,
+      sourceOrigin: 'test:adapter-injection',
+    });
     const auth = await isSlotAuthoritative({ projectRoot: project, slot: 'master-prompt', rawBytes: MP, env });
     assert.equal(auth, true);
     const authoritative = buildOllamaSystemPrompt({
@@ -114,7 +121,14 @@ describe('SEC-05 Phase 3 — slot gating is uniform across sinks (master-prompt 
 
     // refreshContext gates the baseline slot on the header-stripped body, so an
     // owner record must be minted over the body to authorize it.
-    await putSlotRecord({ projectRoot: project, slot: 'baseline', rawBytes: body, env });
+    const store = createFormatV2Store({ env });
+    const binding = await store.createProjectBinding(project);
+    await store.commitTransaction({
+      binding,
+      slot: 'baseline',
+      rawBytes: body,
+      sourceOrigin: 'test:adapter-injection',
+    });
     assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'baseline', rawBytes: body, env }), true);
     // A record for the full file (with header) does NOT authorize the rendered body.
     assert.equal(await isSlotAuthoritative({ projectRoot: project, slot: 'baseline', rawBytes: fullFile, env }), false);

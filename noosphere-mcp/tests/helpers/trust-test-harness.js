@@ -6,6 +6,7 @@
 import crypto from 'node:crypto';
 
 import { createFormatV2Store } from '../../continuity/internal/trust-format-v2.js';
+import { AUTH_DOMAINS } from '../../continuity/internal/authenticated-records.js';
 import { NORM_ALGO, NORM_VERSION } from '../../continuity/memory-safety.js';
 
 const SOURCE = 'phase4a-test-harness';
@@ -32,8 +33,34 @@ export function createTrustTestHarness({ env = process.env, secureFileOptions = 
     const eventId = crypto.randomUUID();
     const machineKey = await store.ensureMachineKey();
     const raw = Buffer.isBuffer(rawBytes) ? rawBytes : Buffer.from(String(rawBytes), 'utf8');
-    const fields = { format: 2, type: 'audit-event', eventId, eventType: 'orphan-test', projectIdentity: binding.projectIdentity, ownerScope: scope(), slot, generation: 1, recordId: crypto.randomUUID(), recordHash: hash('absent-record'), previousGeneration: 0, previousRecordId: null, previousAuditEventId: null, previousAuditEventHash: null, normAlgo: NORM_ALGO, normVersion: NORM_VERSION, rawHash: hash(raw), contentHash: contentHash(raw), keyId: machineKeyId(machineKey), timestamp: nowIso() };
-    await writeExclusive(store.auditPath(binding, eventId), { ...fields, mac: hmac(machineKey, 'audit-event', fields) });
+    const fields = {
+      domain: AUTH_DOMAINS.audit,
+      format: 2,
+      type: 'audit-event',
+      eventId,
+      eventType: 'orphan-test',
+      projectIdentity: binding.projectIdentity,
+      projectIdentityDigest: store._internal.identityDigestFor(binding),
+      ownerScope: scope(),
+      slot,
+      generation: 1,
+      recordId: crypto.randomUUID(),
+      recordHash: hash('absent-record'),
+      previousGeneration: 0,
+      previousRecordId: null,
+      previousAuditEventId: null,
+      previousAuditEventHash: null,
+      normAlgo: NORM_ALGO,
+      normVersion: NORM_VERSION,
+      rawHash: hash(raw),
+      contentHash: contentHash(raw),
+      keyId: machineKeyId(machineKey),
+      timestamp: nowIso(),
+    };
+    await writeExclusive(store.auditPath(binding, eventId), {
+      ...fields,
+      mac: hmac(machineKey, AUTH_DOMAINS.audit, fields),
+    });
   }
 
   return Object.freeze({ ...store, commitTestTransaction, writeOrphanAudit });

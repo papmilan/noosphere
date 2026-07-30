@@ -53,6 +53,105 @@ jobs:
 
       - run: npm audit --audit-level=high
 
+  # The SEC-05 shards are their own tri-platform job rather than extra steps on
+  # the full-suite job. Appending them behind `npm run check` pushed one job
+  # toward GitHub's 6 h ceiling and twice cut the run off before any shard had
+  # run, back when every owner-only ACL operation on windows-latest cost its own
+  # PowerShell start. They stay separate now that the ACL helper is a persistent
+  # host: they run in parallel, each with its own budget, and a boundary breach
+  # still fails within seconds.
+  sec05-shards:
+    name: SEC-05 shards / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    defaults:
+      run:
+        working-directory: noosphere-mcp
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: noosphere-mcp/package-lock.json
+
+      - run: npm ci
+
+      # Same monorepo sibling-directory import as the full-suite job: the restore
+      # and replay entry points boot noosphere-relayer's source.
+      - working-directory: noosphere-relayer
+        run: npm ci
+
+      # SEC-05 Phase 4C: the authority cutover, the restore state machines, and
+      # the writer-surface boundary. `npm run check` runs these files too, but
+      # only inside a long full suite; a boundary breach must fail in seconds,
+      # and a platform cell in SEC-05-PHASE-4C-VERIFICATION.md is only evidence
+      # if the shard that produced it is named and reproducible.
+      #
+      # The per-test timeout is 1800 s: these tests spawn real children, and on
+      # windows-latest each owner-only ACL operation still costs a round trip to
+      # the helper host. It was briefly 3600 s because restore-recovery.test.js
+      # ran 130-230 s per crash boundary there — 1777 s for the file — when every
+      # one of those operations paid its own PowerShell start. Serving them from
+      # a persistent host brought that file to ~59 s, so the stopgap is retired;
+      # see .github/workflows/windows-acl-profile.yml to re-measure.
+      - name: SEC-05 Phase 4C trust and restore
+        run: >-
+          node --test --test-concurrency=1 --test-timeout=1800000
+          tests/trust-domain-separation.test.js
+          tests/trust-record-splicing.test.js
+          tests/trust-concurrency.test.js
+          tests/trust-phase4c-cutover.test.js
+          tests/trust-revocation.test.js
+          tests/trust-migration.test.js
+          tests/trust-crash.test.js
+          tests/trust-project-binding.test.js
+          tests/restore-cli.test.js
+          tests/restore-store.test.js
+          tests/restore-confirmation.test.js
+          tests/restore-apply.test.js
+          tests/restore-recovery.test.js
+          tests/restore-recovery-cli-crash.test.js
+          tests/restore-recovery-cli-convergence.test.js
+          tests/restore-recovery-cli-hostile-review.test.js
+          tests/restore-recovery-cli-lock-policy.test.js
+          tests/restore-receipt.test.js
+          tests/restore-boundary.test.js
+          tests/operator-docs.test.js
+          tests/trust-api-boundary.test.js
+          tests/phase4c-conformance.test.js
+
+      # SEC-05 Phase 5: replay identity, recovery, retention, presentation,
+      # restore suppression, read-only boundaries, and all 26 deterministic
+      # mutants run as one explicit release shard on Linux, macOS, and Windows.
+      - name: SEC-05 Phase 5 replay ledger
+        run: >-
+          node --test --test-concurrency=1 --test-timeout=1800000
+          tests/phase5-conformance.test.js
+          tests/replay-api-boundary.test.js
+          tests/replay-cli-boundary.test.js
+          tests/replay-context-refresh.test.js
+          tests/replay-crash.test.js
+          tests/replay-domain-separation.test.js
+          tests/replay-identity-separation.test.js
+          tests/replay-identity.test.js
+          tests/replay-key-lifecycle.test.js
+          tests/replay-lock-hierarchy.test.js
+          tests/replay-mutation.test.js
+          tests/replay-ordinary-recall.test.js
+          tests/replay-production-recovery.test.js
+          tests/replay-restore-suppression.test.js
+          tests/replay-retention.test.js
+          tests/replay-schema.test.js
+          tests/replay-state.test.js
+          tests/replay-store.test.js
+
   project-memory-postgres:
     name: noosphere-remote-mcp-postgres
     runs-on: ubuntu-latest

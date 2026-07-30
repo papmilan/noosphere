@@ -1,0 +1,113 @@
+# Manual profiler for the Windows owner-only ACL path.
+#
+# Windows has no ACL API in Node, so the exact-SID DACL is applied and verified
+# by an external process, and that process's STARTUP — not its ACL work — is
+# what made windows-latest run `npm run check` for hours against ~5 minutes on
+# ubuntu and macos. This workflow measures that claim rather than asserting it:
+# the same test file runs twice on the same runner, once through the persistent
+# ACL host and once with NOOSPHERE_ACL_NO_HOST=1, which forces the historical
+# one process per operation.
+#
+# Dispatch-only. It exists so the next person to touch the ACL path can
+# re-measure in one click instead of re-deriving the method.
+name: Windows ACL profile
+
+# workflow_dispatch only becomes selectable once this file is on the default
+# branch, which is no help while the ACL change is still on a branch. So the
+# trigger is opt-in by branch name: push any branch ending in /acl-profile to
+# measure. Nothing else runs it, and no ordinary branch pays for it.
+on:
+  workflow_dispatch:
+    inputs:
+      files:
+        description: Test files to profile
+        default: tests/restore-recovery.test.js
+        required: false
+  push:
+    branches: ['**/acl-profile']
+
+jobs:
+  profile:
+    name: ${{ matrix.transport }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - transport: persistent-host
+            no_host: ''
+          - transport: process-per-call
+            no_host: '1'
+
+    defaults:
+      run:
+        working-directory: noosphere-mcp
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: noosphere-mcp/package-lock.json
+
+      - run: npm ci
+
+      - working-directory: noosphere-relayer
+        run: npm ci
+
+      # A syntax error in the helper would otherwise surface as every Windows
+      # ACL test failing several minutes in. Parse it first.
+      - name: Parse the ACL helper
+        shell: pwsh
+        working-directory: noosphere-secure-fs
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./windows-owner-only.ps1), [ref]$null, [ref]$errors)
+          if ($errors) { $errors | ForEach-Object { $_.ToString() }; exit 1 }
+          'windows-owner-only.ps1 parses'
+
+      # The floor everything else is measured against: what one bare PowerShell
+      # start costs on this runner, with nothing else in it.
+      - name: PowerShell startup floor
+        shell: pwsh
+        run: |
+          $runs = 10
+          $elapsed = Measure-Command {
+            for ($i = 0; $i -lt $runs; $i++) {
+              powershell.exe -NoLogo -NoProfile -NonInteractive -Command exit | Out-Null
+            }
+          }
+          "startup mean: {0:N0} ms over {1} spawns" -f ($elapsed.TotalMilliseconds / $runs), $runs
+
+      # NOOSPHERE_ACL_PROFILE makes secure-fs print a per-action call count and
+      # cost on stderr at exit, for this process and for every child these tests
+      # spawn. The totals below are summed across all of them.
+      - name: Profile
+        env:
+          NOOSPHERE_ACL_PROFILE: '1'
+          NOOSPHERE_ACL_NO_HOST: ${{ matrix.no_host }}
+        shell: pwsh
+        run: |
+          $started = Get-Date
+          node --test --test-concurrency=1 --test-timeout=3600000 `
+            ${{ github.event.inputs.files || 'tests/restore-recovery.test.js' }} 2>&1 |
+            Tee-Object -Variable output
+          $status = $LASTEXITCODE
+          $wall = ((Get-Date) - $started).TotalSeconds
+          $calls = 0
+          $ms = 0.0
+          foreach ($line in $output) {
+            if ("$line" -match 'NOOSPHERE_ACL_PROFILE total .*calls=(\d+) ms=(\d+)') {
+              $calls += [int]$Matches[1]
+              $ms += [double]$Matches[2]
+            }
+          }
+          "transport:   ${{ matrix.transport }}"
+          "wall clock:  {0:N1} s" -f $wall
+          "ACL calls:   {0}" -f $calls
+          "ACL time:    {0:N1} s ({1:N1}% of wall)" -f ($ms / 1000), (100 * $ms / 1000 / $wall)
+          "per call:    {0:N1} ms" -f $(if ($calls -gt 0) { $ms / $calls } else { 0 })
+          exit $status
