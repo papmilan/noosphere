@@ -27,6 +27,44 @@ import { parseReplayCatalog } from './schema.js';
 
 const KEY_FILE_BYTES = REPLAY_KEY_HEX_BYTES + 1;
 
+// The three ways "a concurrent writer replaced this file while I was reading
+// it" reaches us. During pristine first use every agent racing to create the
+// key and catalog produces exactly this, so refusing on it turns ordinary
+// concurrency into a hard failure — the observed symptom was a ~40% failure
+// rate creating a key from several processes at once.
+//
+// These say the bytes moved, never that they are untrusted: an ownership, ACL,
+// or containment violation raises a different code and still propagates on the
+// first occurrence. Every retry re-reads and re-authenticates from scratch, so
+// a genuinely corrupt or hostile file keeps failing and still ends up thrown.
+const TRANSIENT_READ_CODES = new Set([
+  // secure-fs: file identity changed between opening and reading it.
+  'state-file-changed',
+  // secure-fs: the lstat snapshot moved across an inspection.
+  'state-destination-changed',
+  // this module: the bytes differed between the two stable-read inspections.
+  'replay-state-changed',
+]);
+
+const READ_RETRY_ATTEMPTS = 32;
+
+// Retry an owner-only read for as long as a writer keeps moving the file
+// underneath it. Bounded: a writer that never settles fails closed with the
+// last error rather than spinning forever.
+async function retryWhileChanging(operation) {
+  let lastError;
+  for (let attempt = 0; attempt < READ_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!TRANSIENT_READ_CODES.has(error.code)) throw error;
+      lastError = error;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+  }
+  throw lastError;
+}
+
 function replayKeyError(code, message) {
   return new TrustStoreError(code, message);
 }
@@ -76,7 +114,10 @@ function decodeReplayKey(raw) {
   return key;
 }
 
-async function readStableOwnerOnly(file, {
+// One attempt at a torn-free read: inspect, read, inspect, and refuse unless
+// all three agree. Callers go through readStableOwnerOnly, which retries this
+// while a concurrent writer keeps changing the answer.
+async function readStableOwnerOnlyOnce(file, {
   maxBytes,
   secureFileOptions,
 }) {
@@ -104,16 +145,24 @@ async function readStableOwnerOnly(file, {
   return raw;
 }
 
+function readStableOwnerOnly(file, options) {
+  return retryWhileChanging(() => readStableOwnerOnlyOnce(file, options));
+}
+
 async function replayRootEntries(env, secureFileOptions) {
   const root = replayRootPath(env);
   const contained = await assertContainedChain(homeDir(env), root);
   if (contained === null) return null;
-  await inspectOwnerOnlyDestination(
-    replayKeyPath(env),
-    {
-      ...secureFileOptions,
-      maxBytes: KEY_FILE_BYTES,
-    },
+  // The key is being created by a peer as often as not during first use, so
+  // this boundary check races exactly like the reads below it.
+  await retryWhileChanging(() =>
+    inspectOwnerOnlyDestination(
+      replayKeyPath(env),
+      {
+        ...secureFileOptions,
+        maxBytes: KEY_FILE_BYTES,
+      },
+    ),
   );
   return fs.readdir(root);
 }
@@ -124,9 +173,9 @@ async function readAndVerifyCatalog({
   secureFileOptions,
 }) {
   let lastError;
-  for (let attempt = 0; attempt < 32; attempt += 1) {
+  for (let attempt = 0; attempt < READ_RETRY_ATTEMPTS; attempt += 1) {
     try {
-  const raw = await readStableOwnerOnly(replayCatalogPath(env), {
+      const raw = await readStableOwnerOnly(replayCatalogPath(env), {
         maxBytes: REPLAY_METADATA_BYTES,
         secureFileOptions,
       });
@@ -136,8 +185,11 @@ async function readAndVerifyCatalog({
         expectedKeyId: replayKeyId(key),
       });
     } catch (error) {
+      // Reads that tore mid-flight are absorbed by readStableOwnerOnly. What
+      // reaches here is a catalog that parsed as damaged — which a peer part
+      // way through writing it also looks like, so re-read once it settles.
+      // A truly corrupt catalog fails every attempt and is thrown below.
       if (![
-        'state-file-changed',
         'record-corrupt',
         'record-non-canonical',
       ].includes(error.code)) {
@@ -249,10 +301,15 @@ export async function ensureReplayKey({
     },
   );
   await ensureRealDirectoryPath(replayRootPath(env));
-  await inspectOwnerOnlyDestination(replayKeyPath(env), {
-    ...secureFileOptions,
-    maxBytes: KEY_FILE_BYTES,
-  });
+  // Racing peers are creating this very file, so tolerate it moving here too.
+  // Losing the creation race below is already handled; failing this inspection
+  // would reject the loser before it ever gets the chance to re-read.
+  await retryWhileChanging(() =>
+    inspectOwnerOnlyDestination(replayKeyPath(env), {
+      ...secureFileOptions,
+      maxBytes: KEY_FILE_BYTES,
+    }),
+  );
   const entries = await fs.readdir(replayRootPath(env));
   if (entries.length !== 0) {
     throw replayKeyError(
