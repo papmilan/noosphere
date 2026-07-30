@@ -15,8 +15,9 @@
 > administrator compromise, unsupported filesystem semantics) are accepted by
 > design and tracked in
 > [noosphere-relayer/SECURITY-FOLLOWUPS.md](../../noosphere-relayer/SECURITY-FOLLOWUPS.md),
-> not open findings. SEC-05 is the next active security milestone; the repository
-> is not public-ready while SEC-05 remains open.
+> not open findings. SEC-05 closed on 2026-07-30 (PR #35, merge commit
+> `c54189b`); the remaining public-release blocker is SEC-01b, tracked in
+> [noosphere-relayer/SECURITY-FOLLOWUPS.md](../../noosphere-relayer/SECURITY-FOLLOWUPS.md).
 
 ## Identity and DACL policy
 

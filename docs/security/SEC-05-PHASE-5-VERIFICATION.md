@@ -2,12 +2,31 @@
 
 ## Status
 
-Phase 5 implementation is a **release candidate**. SEC-05 remains open and the
-repository remains **not public-ready** until the exact proposed head passes
-Linux, macOS, and Windows CI and receives an independent hostile security review
-with no Critical or Important finding.
+Phase 5 is **complete and SEC-05 is closed**. The final head
+`d6dc0b6b2bbe5cd2d777fcd589769d3cb79e3857` satisfied both closure gates:
 
-Implementation candidate before this evidence record:
+- **Tri-platform exact-head CI**:
+  [run 30526063300](https://github.com/papmilan/noosphere/actions/runs/30526063300)
+  passed on Linux, macOS, and Windows, including the dedicated `sec05-shards`
+  job (Phase 4C and Phase 5 suites) on all three platforms.
+- **Independent hostile security review** at the same exact head reported
+  **no Critical, Important, or Minor finding**
+  ([review comment](https://github.com/papmilan/noosphere/pull/35#issuecomment-5128585599)).
+  An earlier clean hostile re-review at intermediate head `d157db9` covered the
+  crash-lock and serialized-refresh remediation; the final review verified the
+  delta since then, including the persistent Windows ACL helper's trust
+  boundary.
+
+Merged in [PR #35](https://github.com/papmilan/noosphere/pull/35), merge commit
+`c54189b6882c481d91ab71ef2af5a63378890223`.
+
+One hardening observation from the final review is recorded as a non-finding:
+the manual Windows ACL profiler workflow interpolates its `workflow_dispatch`
+file input into PowerShell. Dispatch requires repository write-level trust and
+the workflow exposes no secrets, so this creates no new privilege boundary;
+allowlist or array-based argument construction remains a robustness follow-up.
+
+Implementation candidate at the start of this evidence record:
 `f9795d6` (`ci(security): gate phase 5 on every platform`).
 
 ## Implemented controls

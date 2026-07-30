@@ -1,7 +1,12 @@
 {
   "version": 1,
-  "status": "done",
-  "current_task": "Correct CSP v1 durable/runtime architecture",
-  "next_action": "Review the corrected uncommitted CSP v1 implementation",
-  "blocker": null
+  "status": "in_progress",
+  "current_task": "SEC-05 closed (PR #35 merged as c54189b); documentation closeout",
+  "next_action": "Land docs/sec-05-closeout (SECURITY.md, Phase 5 verification record, SEC-03 boundary doc, SECURITY-FOLLOWUPS.md, CHANGELOG close-out), then start SEC-01b same-origin redirect enforcement - the last public-release blocker",
+  "blocker": null,
+  "pending_checkpoint_fingerprint": "3bd176c7b4e9fdeabf8aa67c221f3abc729dd5f342fd101f8f30d5c7965eea1b",
+  "last_checkpoint_at": "2026-07-30T11:04:24.777Z",
+  "last_blob_id": null,
+  "last_checkpoint_pending": true,
+  "last_workspace_fingerprint": "d11974c1203d9dc479213958b0f3a91b0be60c3aafb39e8627a3de38682bf33a"
 }

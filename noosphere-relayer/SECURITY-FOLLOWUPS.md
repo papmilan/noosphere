@@ -149,9 +149,10 @@ repair-before-read, pre-write ACL enforcement, and lifecycle-installed runtime
 packaging are all verified by mandatory Windows/Ubuntu/macOS CI. The items under
 "Accepted residual risks" above are disclosed by design, not open findings.
 
-SEC-05 (semantic-memory prompt/control injection) remains **open** and is the
-active security milestone. Per the security mandate, the repository is **not
-public-ready** while SEC-05 remains open.
+SEC-05 (semantic-memory prompt/control injection) is **CLOSED** as of
+2026-07-30 (see "SEC-05 Phase 5 — replay-ledger release gate" below). The
+remaining public-release blocker is SEC-01b (same-origin redirect enforcement,
+above).
 
 ## SEC-05 Phase 5 — replay-ledger release gate
 
@@ -167,8 +168,23 @@ one key; missing, replacement, or corrupt key material with any surviving replay
 state fails closed without mutation. There is no reset, reinitialize, rotate,
 repair, recovery, import, or export surface.
 
-Local verification and the 26-mutant/conformance evidence are recorded in
+Local verification, the 26-mutant/conformance evidence, and the closure gates
+are recorded in
 [`docs/security/SEC-05-PHASE-5-VERIFICATION.md`](../docs/security/SEC-05-PHASE-5-VERIFICATION.md).
-SEC-05 remains **open** and the repository remains **not public-ready** until
-exact-head Linux, macOS, and Windows CI pass and an independent exact-head
-hostile review reports no Critical or Important finding.
+
+**SEC-05 is CLOSED** as of 2026-07-30: final head `d6dc0b6` passed exact-head
+Linux, macOS, and Windows CI
+([run 30526063300](https://github.com/papmilan/noosphere/actions/runs/30526063300))
+and an independent exact-head hostile review reported no Critical, Important,
+or Minor finding. Merged in
+[PR #35](https://github.com/papmilan/noosphere/pull/35), merge commit
+`c54189b`.
+
+## Remaining before public-ready
+
+- **SEC-01b — same-origin redirect enforcement** (above) is now the only open
+  public-release blocker.
+- Future hardening, not blockers: the DNS-rebinding residual (above) and the
+  Windows ACL profiler workflow's `workflow_dispatch` input interpolation into
+  PowerShell (write-level dispatch trust; allowlist or array-based argument
+  construction recommended — noted by the SEC-05 Phase 5 final review).
