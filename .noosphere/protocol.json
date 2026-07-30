@@ -4,9 +4,13 @@
   "project_id": "noosphere",
   "namespace": "noosphere-noosphere",
   "files": {
+    "state": ".noosphere/state.json",
+    "baseline": ".noosphere/baseline.md",
     "context": ".noosphere/context.md",
     "journal": ".noosphere/journal.md",
-    "instructions": "NOOSPHERE.md"
+    "master_prompt": ".noosphere/master-prompt.md",
+    "followups": ".noosphere/followups.jsonl",
+    "instructions": ".noosphere/instructions.md"
   },
   "interfaces": [
     "filesystem",
