@@ -7,7 +7,13 @@ and the credential-bearing MemWal client is not constructed for an unapproved
 origin. The following residuals are **explicitly out of scope** for that PR and
 tracked here.
 
-## SEC-01b — Same-origin redirect enforcement (implemented)
+## SEC-01b — Same-origin redirect enforcement (CLOSED)
+
+**SEC-01b is CLOSED** as of 2026-07-30: merged in
+[PR #37](https://github.com/papmilan/noosphere/pull/37), merge commit
+`5d9c788`, after exact-head tri-platform CI passed and an independent
+exact-head review reported no blocking finding. The guard and its packaging
+fix (`13ec04e`) ship in the published package.
 
 **Implemented boundary.** `relayer-fetch-guard.js` wraps the global `fetch`
 once `WalrusMemoryAdapter.getClient()` has passed the SEC-01 origin gate:
@@ -45,7 +51,7 @@ text being stored; for `recall` it is the query. The signature is bound to a
 specific timestamp/nonce/message, so it is not a reusable bearer, but the
 payload/query is sensitive.
 
-**Why it is a public-release blocker.** A fully closed SEC-01 must guarantee that
+**Why it was a public-release blocker.** A fully closed SEC-01 must guarantee that
 credential-bearing (signed) traffic and its payload never reach an origin the
 owner did not approve, even via a redirect from an approved origin.
 
@@ -79,7 +85,8 @@ not let tracked project config select a destination, which is the SEC-01 threat.
 
 **Why future, not this PR.** Closing it requires resolve-and-pin or blocking
 hosts that resolve to private ranges — a networking-layer change orthogonal to the
-origin-approval boundary. Track alongside SEC-01b as public-release hardening.
+origin-approval boundary. Tracked as post-release defense-in-depth hardening, not
+a public-release blocker (see "Public-readiness status" below).
 
 ## SEC-03 — filesystem boundary coverage inventory
 
@@ -168,9 +175,9 @@ packaging are all verified by mandatory Windows/Ubuntu/macOS CI. The items under
 "Accepted residual risks" above are disclosed by design, not open findings.
 
 SEC-05 (semantic-memory prompt/control injection) is **CLOSED** as of
-2026-07-30 (see "SEC-05 Phase 5 — replay-ledger release gate" below). The
-remaining public-release blocker is SEC-01b (same-origin redirect enforcement,
-above).
+2026-07-30 (see "SEC-05 Phase 5 — replay-ledger release gate" below).
+SEC-01b (same-origin redirect enforcement, above) is **CLOSED** as of the same
+date. No public-release security blocker remains.
 
 ## SEC-05 Phase 5 — replay-ledger release gate
 
@@ -198,12 +205,27 @@ or Minor finding. Merged in
 [PR #35](https://github.com/papmilan/noosphere/pull/35), merge commit
 `c54189b`.
 
-## Remaining before public-ready
+## Public-readiness status
 
-- **SEC-01b — same-origin redirect enforcement** (above) is implemented by
-  `relayer-fetch-guard.js` and its regression suite; it closes when that change
-  merges with green tri-platform CI.
-- Future hardening, not blockers: the DNS-rebinding residual (above) and the
-  Windows ACL profiler workflow's `workflow_dispatch` input interpolation into
-  PowerShell (write-level dispatch trust; allowlist or array-based argument
-  construction recommended — noted by the SEC-05 Phase 5 final review).
+**No open public-release security blocker.** As of 2026-07-30 every identified
+blocker is closed, each implemented, independently reviewed at its exact
+proposed head, and merged after its required CI gates passed:
+
+| Item | Status | Merge |
+|---|---|---|
+| SEC-01 — repository-controlled credential destination | CLOSED | [PR #21](https://github.com/papmilan/noosphere/pull/21) (`3eb484a`) |
+| SEC-01b — same-origin redirect enforcement | CLOSED | [PR #37](https://github.com/papmilan/noosphere/pull/37) (`5d9c788`) |
+| SEC-03 — filesystem boundary | CLOSED | [PR #24](https://github.com/papmilan/noosphere/pull/24) (`33c2737`) |
+| SEC-05 — semantic-memory prompt/control injection | CLOSED | [PR #35](https://github.com/papmilan/noosphere/pull/35) (`c54189b`) |
+
+### Post-release defense-in-depth (non-blocking)
+
+- **DNS-rebinding residual** (above): resolve-and-pin, or refuse hostnames that
+  resolve into private/loopback/link-local ranges. Networking-layer change,
+  orthogonal to the origin-approval boundary.
+- **Windows ACL profiler workflow**: `workflow_dispatch` input is interpolated
+  into PowerShell. Write-level dispatch trust only; allowlist or array-based
+  argument construction recommended (noted by the SEC-05 Phase 5 final review).
+
+Accepted residual risks disclosed elsewhere in this document remain disclosed by
+design and are not open findings.

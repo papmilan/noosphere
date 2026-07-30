@@ -1,12 +1,12 @@
 {
   "version": 1,
   "status": "in_progress",
-  "current_task": "SEC-05 closed (PR #35 merged as c54189b); documentation closeout",
-  "next_action": "Land docs/sec-05-closeout (SECURITY.md, Phase 5 verification record, SEC-03 boundary doc, SECURITY-FOLLOWUPS.md, CHANGELOG close-out), then start SEC-01b same-origin redirect enforcement - the last public-release blocker",
+  "current_task": "Closure documentation pass done: SECURITY-FOLLOWUPS.md now records SEC-01/01b/03/05 all CLOSED and 'Remaining before public-ready' is replaced by a 'Public-readiness status' section with the two non-blocking defense-in-depth items",
+  "next_action": "Commit the closure-documentation pass and decide public release; post-release hardening backlog: DNS-rebinding resolve-and-pin, ACL-profiler workflow_dispatch input allowlisting",
   "blocker": null,
-  "pending_checkpoint_fingerprint": "3bd176c7b4e9fdeabf8aa67c221f3abc729dd5f342fd101f8f30d5c7965eea1b",
-  "last_checkpoint_at": "2026-07-30T11:04:24.777Z",
+  "pending_checkpoint_fingerprint": "08185e4515ef298d0beace0c3515e9f558cc47f13ac8314cba5008f25c35bbb0",
+  "last_checkpoint_at": "2026-07-30T13:25:59.372Z",
   "last_blob_id": null,
   "last_checkpoint_pending": true,
-  "last_workspace_fingerprint": "d11974c1203d9dc479213958b0f3a91b0be60c3aafb39e8627a3de38682bf33a"
+  "last_workspace_fingerprint": "ad0fe0ece7a7e65dd687277a016319fbd517656f7eccfaf901e048c71c62bfe6"
 }
