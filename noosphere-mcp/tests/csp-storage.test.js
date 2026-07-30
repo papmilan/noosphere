@@ -293,6 +293,56 @@ describe('CSP storage and runtime-state migration', () => {
     await assert.rejects(readFile(lock), (error) => error.code === 'ENOENT');
   });
 
+  it('retries a Windows permission answer instead of failing the lock', async () => {
+    const root = await tempRoot();
+    await mkdir(cspPaths(root).dir);
+    let attempts = 0;
+    const value = await withCspLock(root, async () => 'committed', {
+      platform: 'win32',
+      openImpl: async (...args) => {
+        attempts += 1;
+        // Windows reports a lock another handle still holds — or one pending
+        // delete — as EPERM where POSIX reports EEXIST.
+        if (attempts === 1) throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+        return open(...args);
+      },
+    });
+    assert.equal(value, 'committed');
+    assert.equal(attempts, 2);
+  });
+
+  it('still refuses a permission error that never clears', async () => {
+    const root = await tempRoot();
+    await mkdir(cspPaths(root).dir);
+    // Retrying must not turn a genuine ACL problem into a generic timeout.
+    await assert.rejects(
+      withCspLock(root, async () => 'unreachable', {
+        platform: 'win32',
+        openImpl: async () => {
+          throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+        },
+      }),
+      (error) => error.code === 'EACCES',
+    );
+  });
+
+  it('does not retry a permission error off Windows', async () => {
+    const root = await tempRoot();
+    await mkdir(cspPaths(root).dir);
+    let attempts = 0;
+    await assert.rejects(
+      withCspLock(root, async () => 'unreachable', {
+        platform: 'linux',
+        openImpl: async () => {
+          attempts += 1;
+          throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+        },
+      }),
+      (error) => error.code === 'EPERM',
+    );
+    assert.equal(attempts, 1);
+  });
+
   it('leaves valid CSP state untouched', async () => {
     const root = await tempRoot();
     const { dir, state, runtime } = cspPaths(root);
