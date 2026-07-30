@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 
 import { LocalOwnerIdentity, localOwnerScope } from '../src/local-identity.js';
 import { createLocalStdioServer } from '../src/stdio-server.js';
-import { spawnBin, startStdioClient, structured } from './harness.js';
+import { spawnBin, startStdioClient, structured, temporaryStateFile } from './harness.js';
 
 describe('Local single-user identity', () => {
   it('is deterministic, namespaced, and within the owner-scope bound', () => {
@@ -23,9 +23,11 @@ describe('Local single-user identity', () => {
   });
 });
 
+// These two write, so they run against an isolated store rather than the CLI's
+// real one under the owner's home directory.
 describe('Local STDIO single-user semantics', () => {
   it('ignores any ownerScope-looking field in tool input (identity cannot be spoofed by arguments)', async () => {
-    const s = await startStdioClient();
+    const s = await startStdioClient({ stateFile: await temporaryStateFile() });
     try {
       // An injected ownerScope is inert: the server derives the owner from the
       // fixed local identity, never from arguments. The project is created and
@@ -40,7 +42,7 @@ describe('Local STDIO single-user semantics', () => {
   });
 
   it('marks recalled content as untrusted persisted data over STDIO', async () => {
-    const s = await startStdioClient();
+    const s = await startStdioClient({ stateFile: await temporaryStateFile() });
     try {
       const project = structured(await s.client.callTool({ name: 'create_project', arguments: { name: 'Trust Check' } })).project;
       const latest = structured(await s.client.callTool({ name: 'get_latest_checkpoint', arguments: { project_id: project.id } }));

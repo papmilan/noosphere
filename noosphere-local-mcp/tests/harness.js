@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { mkdtemp, realpath } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,8 +23,23 @@ const BIN = path.resolve(fileURLToPath(new URL('../bin/noosphere-local-mcp.js', 
 // Test-only launcher: the production CLI, but with a fixed clock injected via the
 // existing `now` seam. Used for deterministic parity; never shipped.
 const FIXED_CLOCK_LAUNCHER = path.resolve(fileURLToPath(new URL('./fixtures/stdio-fixed-clock.js', import.meta.url)));
+// Test-only launcher: the production startup path against a caller-supplied
+// durable store, so restarts can be proven without touching real user state.
+const FILE_STORE_LAUNCHER = path.resolve(fileURLToPath(new URL('./fixtures/stdio-file-store.js', import.meta.url)));
 
 export const structured = (result) => result.structuredContent;
+
+// An isolated durable store for any test that writes. Tests must never touch
+// the CLI's real default store under the owner's home directory: that is live
+// user state, and sharing it would also make results depend on earlier runs.
+//
+// The temp root is resolved first because `os.tmpdir()` is `/var/...` on macOS,
+// a symlink to `/private/var`, and the owner-only boundary refuses symlinked
+// path components.
+export async function temporaryStateFile() {
+  const root = await mkdtemp(path.join(await realpath(os.tmpdir()), 'local-mcp-store-'));
+  return path.join(root, 'project-memory.json');
+}
 
 export function clock(startIso = '2026-07-20T10:00:00.000Z') {
   let current = startIso;
@@ -63,10 +80,13 @@ export async function startHttpClient({ now } = {}) {
 // A real Local STDIO client: spawns the bin as a child process (the exact way an
 // MCP host launches it) and connects an SDK client over stdio. Nothing is stubbed
 // — this exercises the published CLI entry point.
-export async function startStdioClient({ nowIso } = {}) {
+export async function startStdioClient({ nowIso, stateFile } = {}) {
   // A fixed instant → the test-only fixed-clock launcher (deterministic parity);
-  // otherwise the real production CLI, exercised as an MCP host would.
-  const args = nowIso ? [FIXED_CLOCK_LAUNCHER, nowIso] : [BIN];
+  // a state file → the test-only durable-store launcher; otherwise the real
+  // production CLI, exercised as an MCP host would.
+  let args = [BIN];
+  if (nowIso) args = [FIXED_CLOCK_LAUNCHER, nowIso];
+  if (stateFile) args = [FILE_STORE_LAUNCHER, stateFile];
   const transport = new StdioClientTransport({ command: process.execPath, args });
   const client = new Client({ name: 'stdio-client', version: '0.0.0' }, { capabilities: {} });
   await client.connect(transport);

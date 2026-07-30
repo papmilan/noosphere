@@ -50,6 +50,19 @@ function listTupleValues(root, values) {
   return [...valuesMap.values()].map((value) => structuredClone(value));
 }
 
+// Snapshot helpers. `Object.fromEntries`/`Object.entries` create and read own
+// properties, so a record keyed `__proto__` round-trips as data instead of
+// touching any prototype; Map keys are inherently pollution-safe on the way back.
+function mapToObject(map) {
+  return Object.fromEntries([...map].map(([key, value]) => [key, value instanceof Map ? mapToObject(value) : value]));
+}
+
+function objectToMap(value, depth, validateLeaf) {
+  if (value === undefined || value === null) return new Map();
+  if (typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid-snapshot');
+  return new Map(Object.entries(value).map(([key, entry]) => [key, depth > 1 ? objectToMap(entry, depth - 1, validateLeaf) : validateLeaf(entry)]));
+}
+
 function deleteOwnerProjectRecords(root, ownerScope, projectId) {
   deleteTuple(root, [ownerScope, projectId]);
 }
@@ -98,6 +111,16 @@ function assertReceiptProjectId(projectId) {
   if (projectId !== undefined && (typeof projectId !== 'string' || projectId.length < 1 || projectId.length > 128)) throw new Error('invalid-project-id');
 }
 
+// Idempotency receipts have no record schema, so restoring one checks the
+// fields the repository itself relies on. `result` stays opaque: it is whatever
+// the recorded operation returned.
+function validateReceipt(receipt) {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) throw new Error('invalid-idempotency');
+  if (typeof receipt.requestHash !== 'string' || receipt.requestHash.length < 1 || receipt.requestHash.length > 512) throw new Error('invalid-idempotency');
+  assertReceiptProjectId(receipt.projectId);
+  return receipt;
+}
+
 export class ProjectMemoryRepository {
   async createProject() { throw new Error('repository-method-not-implemented'); }
   async getProject() { throw new Error('repository-method-not-implemented'); }
@@ -120,6 +143,34 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
   #sessions = new Map();
   #checkpoints = new Map();
   #idempotency = new Map();
+
+  // Serialization seam for persistent ports that reuse this implementation —
+  // see @noosphere/local-mcp's file-backed repository. The tuple maps stay
+  // private; callers receive plain nested objects they can serialize.
+  snapshot() {
+    return {
+      projects: mapToObject(this.#projects),
+      sessions: mapToObject(this.#sessions),
+      checkpoints: mapToObject(this.#checkpoints),
+      idempotency: mapToObject(this.#idempotency),
+    };
+  }
+
+  // Replace all state with a previously taken snapshot. Every record is
+  // re-validated on the way in: a persisted store is untrusted data, so a
+  // corrupted or hand-edited file fails closed here rather than surfacing as an
+  // invalid record later. Nothing is assigned until all four sections validate,
+  // so a rejected snapshot leaves the repository on its previous state.
+  restore(snapshot = {}) {
+    const projects = objectToMap(snapshot.projects, 2, validateProject);
+    const sessions = objectToMap(snapshot.sessions, 3, validateSession);
+    const checkpoints = objectToMap(snapshot.checkpoints, 3, validateCheckpoint);
+    const idempotency = objectToMap(snapshot.idempotency, 3, validateReceipt);
+    this.#projects = projects;
+    this.#sessions = sessions;
+    this.#checkpoints = checkpoints;
+    this.#idempotency = idempotency;
+  }
 
   async createProject({ ownerScope, project } = {}) {
     assertOwnerScope(ownerScope);
