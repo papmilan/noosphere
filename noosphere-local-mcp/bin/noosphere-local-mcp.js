@@ -30,11 +30,20 @@ process.on('SIGINT', () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
 
 const { createLocalStdioServer } = await import('../src/stdio-server.js');
+const { FileProjectMemoryRepository } = await import('../src/file-repository.js');
+
 // Always the real system clock. There is no environment or CLI override — a
 // fixed clock is supplied only via the injected `now` seam of
 // createLocalStdioServer, used by the test-only fixture launcher.
-server = createLocalStdioServer();
-server.start().catch((error) => {
+//
+// The CLI is the one place that chooses durable storage: the library default
+// stays in-memory so embedding code (and the test fixtures) touch no disk. A
+// corrupt or unreadable store fails closed here rather than silently starting
+// empty and overwriting it on the first write.
+try {
+  server = createLocalStdioServer({ repository: await FileProjectMemoryRepository.open() });
+  await server.start();
+} catch (error) {
   process.stderr.write(`noosphere-local-mcp failed to start: ${error && error.message ? error.message : error}\n`);
   process.exit(1);
-});
+}

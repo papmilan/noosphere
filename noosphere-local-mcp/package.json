@@ -8,13 +8,14 @@
     "noosphere-local-mcp": "bin/noosphere-local-mcp.js"
   },
   "scripts": {
-    "check": "node --check bin/noosphere-local-mcp.js && node --check src/stdio-server.js && node --check src/local-identity.js",
+    "check": "node --check bin/noosphere-local-mcp.js && node --check src/stdio-server.js && node --check src/local-identity.js && node --check src/file-repository.js",
     "test": "npm run check && node --test tests/*.test.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@noosphere/remote-mcp-contracts": "file:../noosphere-remote-mcp",
-    "@noosphere/remote-mcp-server": "file:../noosphere-remote-mcp-server"
+    "@noosphere/remote-mcp-server": "file:../noosphere-remote-mcp-server",
+    "@noosphere/secure-fs": "file:../noosphere-secure-fs"
   },
   "devDependencies": {
     "jose": "^6.0.0"
