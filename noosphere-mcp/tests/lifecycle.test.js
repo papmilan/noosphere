@@ -370,14 +370,23 @@ describe('Noosphere macOS lifecycle installer', () => {
     }
   });
 
-  it('doctor still passes against a relayer too old to report upload health', async () => {
+  it('treats a relayer too old to report upload health exactly like a healthy one', async () => {
     const fakeHome = await makeFakeHome({ '.zshrc': '' });
     const noosphereHome = path.join(fakeHome, '.noosphere');
-    // No `failing` field: the check must not invent a failure from its absence.
-    const stub = await readyStub(200, {
+    // A relayer predating the upload-health fields, and its modern equivalent
+    // reporting an idle queue. The claim is relative on purpose: absence must
+    // not contribute a failure. Asserting an absolute exit code here would
+    // instead measure whatever else this fake home happens to fail, which is
+    // why every other case in this block only ever asserts a failing code.
+    const legacy = await readyStub(200, {
       success: true,
       memory: { ready: true },
       queue: { pending: 12 },
+    });
+    const modern = await readyStub(200, {
+      success: true,
+      memory: { ready: true },
+      queue: { pending: 12, failing: 0, max_attempts: 0, last_error: null },
     });
 
     try {
@@ -386,16 +395,27 @@ describe('Noosphere macOS lifecycle installer', () => {
         NOOSPHERE_TEST_PLATFORM: 'darwin',
       });
 
-      const { stdout, code } = await runInstaller('doctor', {
-        ...baseEnv(fakeHome, noosphereHome),
-        NOOSPHERE_TEST_PLATFORM: 'darwin',
-        NOOSPHERE_RELAYER_URL: stub.url,
-      });
+      const run = async (url) =>
+        runInstaller('doctor', {
+          ...baseEnv(fakeHome, noosphereHome),
+          NOOSPHERE_TEST_PLATFORM: 'darwin',
+          NOOSPHERE_RELAYER_URL: url,
+        });
 
-      assert.equal(JSON.parse(stdout).relayer_ready.queue_failing, null);
-      assert.equal(code, 0);
+      const older = await run(legacy.url);
+      const current = await run(modern.url);
+
+      // Absent reads as unknown, never as broken.
+      assert.equal(JSON.parse(older.stdout).relayer_ready.queue_failing, null);
+      assert.equal(JSON.parse(current.stdout).relayer_ready.queue_failing, 0);
+      assert.equal(
+        older.code,
+        current.code,
+        'a missing queue-health field must not change doctor’s verdict',
+      );
     } finally {
-      await stub.close();
+      await legacy.close();
+      await modern.close();
       await rm(fakeHome, { recursive: true, force: true });
     }
   });
