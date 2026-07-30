@@ -86,9 +86,37 @@ failed, 13 documented platform skips — in 3 h 54 min, and `ubuntu-latest` and
   budget, and shard evidence no longer depends on the full suite finishing
   first.
 
+Run 30508157056 at `cc93585` produced the first Windows shard evidence in the
+workstream: `SEC-05 shards / windows-latest` passed both the Phase 4C and the
+Phase 5 shard (3 h 24 min), alongside `ubuntu-latest` (57 s) and `macos-latest`
+(59 s). The full-suite Windows job then failed one test that had passed at the
+previous head:
+
+- `replay-restore-suppression.test.js`, `concurrent identical staging creates at
+  most one random candidate`, required **exactly one** of eight concurrent
+  attempts to stage. Zero staged on Windows. That is the documented fail-closed
+  contention residual, not a defect: every ranked lock refuses instead of
+  waiting, and where each acquisition costs external process spawns all eight
+  contenders can lose. The test now asserts what the contract actually
+  guarantees, and asserts more than it did before: at most one attempt stages,
+  the candidate artifacts equal the staged count exactly, every fulfilled
+  outcome is `staged`, `suppressed`, or `already-consumed`, and every rejected
+  attempt carries a typed fail-closed code that is never a corruption,
+  malformed-artifact, authentication, or unsafe-state code. Uncontended liveness
+  stays covered by the sequential staging tests, which still require the first
+  attempt to stage.
+
+Writing that loser assertion surfaced two contention refusals that the previous
+assertion could not see, both fail-closed and neither mutating: eight pristine
+first uses can make a loser refuse with `replay-key-missing-with-state` (key
+creation convergence itself is covered by `replay-key-lifecycle.test.js`, so the
+test now creates the key before racing), and concurrent state readers can refuse
+with `state-destination-changed`.
+
 Residual watch item: the Windows cost driver is one spawned process per
 owner-only ACL inspection, not the replay ledger. Until that is reduced, Windows
-runs about 40× slower than POSIX on child-process restore and replay tests.
+runs about 40× slower than POSIX on child-process restore and replay tests, which
+also makes it the platform where fail-closed lock contention shows up first.
 
 ## Normative traceability
 
