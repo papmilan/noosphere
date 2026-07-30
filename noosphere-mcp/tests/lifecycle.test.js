@@ -300,7 +300,7 @@ describe('Noosphere macOS lifecycle installer', () => {
     const stub = await readyStub(200, {
       success: true,
       memory: { ready: true },
-      queue: { pending: 0 },
+      queue: { pending: 0, failing: 0, max_attempts: 0, last_error: null },
     });
 
     try {
@@ -320,9 +320,102 @@ describe('Noosphere macOS lifecycle installer', () => {
         ok: true,
         memory_ready: true,
         queue_pending: 0,
+        queue_failing: 0,
+        queue_last_error: null,
       });
     } finally {
       await stub.close();
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it('doctor fails when a reachable relayer has been failing to upload', async () => {
+    const fakeHome = await makeFakeHome({ '.zshrc': '' });
+    const noosphereHome = path.join(fakeHome, '.noosphere');
+    // The shape that used to pass silently, observed on a real install: the
+    // service is up, /ready answers 200, memory reports ready — and 27k writes
+    // have been retried for days without landing. A depth alone cannot say so.
+    const stub = await readyStub(200, {
+      success: true,
+      memory: { ready: true },
+      queue: {
+        pending: 27118,
+        failing: 456,
+        max_attempts: 6258,
+        last_error: 'Walrus Memory server error (503): uploads are paused',
+      },
+    });
+
+    try {
+      await runInstallerOk('install', {
+        ...baseEnv(fakeHome, noosphereHome),
+        NOOSPHERE_TEST_PLATFORM: 'darwin',
+      });
+
+      const { stdout, code } = await runInstaller('doctor', {
+        ...baseEnv(fakeHome, noosphereHome),
+        NOOSPHERE_TEST_PLATFORM: 'darwin',
+        NOOSPHERE_RELAYER_URL: stub.url,
+      });
+
+      const ready = JSON.parse(stdout).relayer_ready;
+      assert.equal(ready.ok, true, 'the relayer really is reachable and ready');
+      assert.equal(ready.queue_failing, 456);
+      // The upstream reason is what makes the failure actionable.
+      assert.match(ready.queue_last_error, /uploads are paused/);
+      assert.equal(code, 1, 'a stuck upload queue is not a healthy install');
+    } finally {
+      await stub.close();
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it('treats a relayer too old to report upload health exactly like a healthy one', async () => {
+    const fakeHome = await makeFakeHome({ '.zshrc': '' });
+    const noosphereHome = path.join(fakeHome, '.noosphere');
+    // A relayer predating the upload-health fields, and its modern equivalent
+    // reporting an idle queue. The claim is relative on purpose: absence must
+    // not contribute a failure. Asserting an absolute exit code here would
+    // instead measure whatever else this fake home happens to fail, which is
+    // why every other case in this block only ever asserts a failing code.
+    const legacy = await readyStub(200, {
+      success: true,
+      memory: { ready: true },
+      queue: { pending: 12 },
+    });
+    const modern = await readyStub(200, {
+      success: true,
+      memory: { ready: true },
+      queue: { pending: 12, failing: 0, max_attempts: 0, last_error: null },
+    });
+
+    try {
+      await runInstallerOk('install', {
+        ...baseEnv(fakeHome, noosphereHome),
+        NOOSPHERE_TEST_PLATFORM: 'darwin',
+      });
+
+      const run = async (url) =>
+        runInstaller('doctor', {
+          ...baseEnv(fakeHome, noosphereHome),
+          NOOSPHERE_TEST_PLATFORM: 'darwin',
+          NOOSPHERE_RELAYER_URL: url,
+        });
+
+      const older = await run(legacy.url);
+      const current = await run(modern.url);
+
+      // Absent reads as unknown, never as broken.
+      assert.equal(JSON.parse(older.stdout).relayer_ready.queue_failing, null);
+      assert.equal(JSON.parse(current.stdout).relayer_ready.queue_failing, 0);
+      assert.equal(
+        older.code,
+        current.code,
+        'a missing queue-health field must not change doctor’s verdict',
+      );
+    } finally {
+      await legacy.close();
+      await modern.close();
       await rm(fakeHome, { recursive: true, force: true });
     }
   });

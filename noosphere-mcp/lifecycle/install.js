@@ -273,7 +273,12 @@ async function doctor() {
     !checks.relayer_service ||
     !checks.manager_service ||
     !checks.credentials ||
-    !checks.relayer_ready.ok
+    !checks.relayer_ready.ok ||
+    // A reachable relayer whose uploads keep failing is the case every
+    // presence check misses: the service is up, /ready answers 200, and the
+    // backlog grows for days while doctor reports all-green. Retried-and-still
+    // -queued writes are not a healthy system, so they fail the run too.
+    checks.relayer_ready.queue_failing > 0
   ) {
     process.exitCode = 1;
   }
@@ -298,6 +303,11 @@ async function relayerReadiness(envFile) {
       ok: response.ok,
       memory_ready: body?.memory?.ready ?? null,
       queue_pending: body?.queue?.pending ?? null,
+      // A depth alone reads the same whether the queue is draining or stuck.
+      // These say which, and `queue_failing` decides the exit code below. A
+      // relayer too old to report them leaves null, which never fails the run.
+      queue_failing: body?.queue?.failing ?? null,
+      queue_last_error: body?.queue?.last_error ?? null,
       // The upstream reason is the point of asking; pass it through verbatim
       // rather than flattening it into another opaque failure.
       ...(response.ok
