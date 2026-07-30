@@ -31,15 +31,29 @@ const STALE_BLOCK = `<!-- noosphere:continuity:start -->
 <!-- noosphere:continuity:end -->
 `;
 
+// The CLI locates a project with `git rev-parse --show-toplevel` and treats any
+// git failure as "not a git project", which it then skips quietly with status 0.
+// Inherited GIT_* variables therefore turn a broken fixture into a silent no-op,
+// so drop them and give the child a git environment that depends on nothing
+// outside the temp project.
+function childEnv(home) {
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')),
+  );
+  return {
+    ...env,
+    NOOSPHERE_HOME: home,
+    HOME: home,
+    USERPROFILE: home,
+    GIT_CONFIG_GLOBAL: path.join(home, 'gitconfig'),
+    GIT_CONFIG_SYSTEM: path.join(home, 'gitconfig'),
+  };
+}
+
 async function noosphere(root, home, ...args) {
   const child = spawn(process.execPath, [cli, ...args], {
     cwd: root,
-    env: {
-      ...process.env,
-      NOOSPHERE_HOME: home,
-      HOME: home,
-      USERPROFILE: home,
-    },
+    env: childEnv(home),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const chunks = [];
@@ -67,10 +81,14 @@ async function upgradedProject({ adapters = [] } = {}) {
     await fs.mkdtemp(path.join(os.tmpdir(), 'noosphere-adapter-home-')),
   );
   temporary.push(root, home);
-  await execFileAsync('git', ['init', '-q', '.'], { cwd: root });
-  await execFileAsync('git', ['config', 'user.email', 't@t'], { cwd: root });
-  await execFileAsync('git', ['config', 'user.name', 't'], { cwd: root });
-  await execFileAsync('git', ['commit', '-q', '--allow-empty', '-m', 'init'], { cwd: root });
+  // Build the repository with the same environment the CLI will use, so the
+  // fixture cannot succeed under an environment the CLI never sees.
+  await fs.writeFile(path.join(home, 'gitconfig'), '');
+  const git = (...args) => execFileAsync('git', args, { cwd: root, env: childEnv(home) });
+  await git('init', '-q', '.');
+  await git('config', 'user.email', 't@t');
+  await git('config', 'user.name', 't');
+  await git('commit', '-q', '--allow-empty', '-m', 'init');
 
   await fs.mkdir(path.join(root, '.noosphere'), { recursive: true });
   await fs.writeFile(
@@ -92,12 +110,12 @@ async function upgradedProject({ adapters = [] } = {}) {
     await fs.writeFile(path.join(root, file), STALE_BLOCK);
   }
 
-  // Assert the fixture is what the CLI will see. A project the CLI cannot read
-  // fails every assertion below for a reason none of them describe.
-  const toplevel = (
-    await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: root })
-  ).stdout.trim();
-  assert.equal(toplevel, root, 'git and the test must agree on the project root');
+  // Assert the fixture is what the CLI will see, through the CLI's own
+  // environment. Checking git from the test process instead hid the first
+  // failure of this suite: activate could not find the project, skipped it, and
+  // exited 0, so every assertion below failed while describing file contents.
+  const toplevel = (await git('rev-parse', '--show-toplevel')).stdout.trim();
+  assert.equal(toplevel, root, 'git and the CLI must agree on the project root');
   assert.ok(
     JSON.parse(await fs.readFile(path.join(root, '.noosphere', 'config.json'), 'utf8'))
       .project_id,
