@@ -5,6 +5,7 @@ import {
   SuiJsonRpcClient,
 } from '@mysten/sui/jsonRpc';
 import { loadCredentialsIntoEnv } from './credentials.js';
+import { installRelayerFetchGuard } from './relayer-fetch-guard.js';
 import { assertApprovedRelayerOrigin } from './relayer-origins.js';
 
 loadCredentialsIntoEnv();
@@ -98,6 +99,10 @@ export class WalrusMemoryAdapter {
       builtinOrigins: Object.values(WALRUS_NETWORKS).map((n) => n.relayerUrl),
       home: this.home,
     });
+    // SEC-01b: the approved origin's channel refuses every redirect, so signed
+    // headers and payloads are never replayed against an origin the gate above
+    // did not approve. Installed only after the gate passes.
+    installRelayerFetchGuard(this.config.relayerUrl);
     if (!this.client) {
       this.client = this.createClient({
         key: this.config.privateKey,
