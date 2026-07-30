@@ -54,6 +54,58 @@ const LOCAL_RUNTIME_EXCLUDES = [
   '.noosphere/*.tmp',
   '.noosphere/*.lock',
 ];
+// Every staged write in this module publishes a file by hard-linking an
+// existing source onto a destination that must not already exist. exFAT, FAT32
+// and most SMB mounts have no hard links and answer link() with ENOTSUP, which
+// leaves CSP persistence completely unusable on an external drive.
+//
+// linkOrCopy keeps the two properties the call sites depend on — the
+// destination ends up holding the source's bytes, and an existing destination
+// is refused rather than clobbered — and falls back to an exclusive byte copy
+// where links are unavailable.
+//
+// ponytail: a copy is not inode-identical, so a crash mid-copy can leave a
+// short destination where a link would have left none. Every caller removes the
+// source only after this resolves, and every recovery path compares digests, so
+// a partial file surfaces as a mismatch and never as accepted data.
+const LINK_UNSUPPORTED = new Set([
+  'ENOTSUP',
+  'EOPNOTSUPP',
+  'EPERM',
+  'EXDEV',
+  'EMLINK',
+]);
+
+async function linkOrCopy(source, target, linkImpl = link) {
+  try {
+    await linkImpl(source, target);
+    return;
+  } catch (error) {
+    // EEXIST is a real answer about the destination, not a missing capability.
+    if (error.code === 'EEXIST' || !LINK_UNSUPPORTED.has(error.code)) throw error;
+  }
+
+  const raw = await readRawFile(source);
+  if (raw === null) {
+    throw Object.assign(
+      new Error(`Refusing to copy a source that disappeared: ${source}`),
+      { code: 'ENOENT' },
+    );
+  }
+  try {
+    await writeOwnerOnlyFileExclusive(target, raw.bytes);
+  } catch (error) {
+    // Normalize onto the code every caller's link path already handles.
+    if (error.code === 'state-file-exists') {
+      throw Object.assign(new Error(error.message), {
+        code: 'EEXIST',
+        cause: error,
+      });
+    }
+    throw error;
+  }
+}
+
 const LEGACY_RUNTIME_FIELDS = new Set([
   'baseline',
   'last_checkpoint_fingerprint',
@@ -113,9 +165,13 @@ export async function migrateLegacyRuntimeState(root, options = {}) {
     const validated = validateState(parsed);
     if (validated.ok) return { migrated: false, reason: 'csp-state-present' };
     if (isPlainObject(parsed) && Object.hasOwn(parsed, 'version')) {
-      throw cspError('csp-schema-invalid', 'CSP state does not match a supported schema', {
-        errors: validated.errors,
-      });
+      const split = splitContaminatedState(parsed);
+      if (split === null) {
+        throw cspError('csp-schema-invalid', 'CSP state does not match a supported schema', {
+          errors: validated.errors,
+        });
+      }
+      return migrateContaminatedState(paths, raw, split, options);
     }
     if (!isLegacyRuntimeState(parsed)) {
       throw cspError(
@@ -128,7 +184,7 @@ export async function migrateLegacyRuntimeState(root, options = {}) {
     if (runtime === null) {
       await options.beforeMove?.();
       try {
-        await link(paths.state, paths.runtime);
+        await linkOrCopy(paths.state, paths.runtime, options.linkImpl);
       } catch (error) {
         if (error.code !== 'EEXIST') throw error;
         const racedRuntime = await readRawFile(paths.runtime);
@@ -161,6 +217,70 @@ export async function migrateLegacyRuntimeState(root, options = {}) {
     await syncDirectoryPath(paths.dir);
     return { migrated: true, reason: 'identical-runtime-retained' };
   });
+}
+
+// A pre-2.4 writer kept runtime telemetry inside state.json next to the CSP
+// fields. That file names version 1 but fails validation on the extra keys, and
+// the branch above used to dead-end every CSP command against it with no repair
+// path at all — `state restore`, `checkpoint`, `journal` and even `init` all
+// refused, so only hand-editing recovered the project.
+//
+// Split the two halves when the offending keys are exactly the telemetry ones
+// this module already knows about and the CSP remainder validates on its own.
+// Anything else still refuses rather than guessing at the user's data — a
+// hand-written status typo, for instance, is reported, never rewritten.
+function splitContaminatedState(parsed) {
+  const state = {};
+  const telemetry = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (LEGACY_RUNTIME_FIELDS.has(key)) telemetry[key] = value;
+    else state[key] = value;
+  }
+  if (Object.keys(telemetry).length === 0) return null;
+  const validated = validateState(state);
+  return validated.ok ? { state: validated.state, telemetry } : null;
+}
+
+async function migrateContaminatedState(paths, raw, split, options) {
+  const telemetryBytes = Buffer.from(
+    `${JSON.stringify(split.telemetry, null, 2)}\n`,
+    'utf8',
+  );
+  const runtime = await readRawFile(paths.runtime);
+  if (runtime === null) {
+    await options.beforeMove?.();
+    await writeOwnerOnlyFileExclusive(paths.runtime, telemetryBytes);
+  } else if (!runtime.bytes.equals(telemetryBytes)) {
+    throw cspError(
+      'runtime-state-migration-conflict',
+      'Telemetry inside state.json differs from runtime-state.json; refusing to discard either file',
+    );
+  }
+
+  // Telemetry lands first so a crash between the two writes re-enters this
+  // function and finds an identical runtime destination rather than a conflict.
+  // rename() replaces state.json atomically and, unlike link(), works on every
+  // filesystem Noosphere runs on.
+  const stateBytes = Buffer.from(
+    `${JSON.stringify(split.state, null, 2)}\n`,
+    'utf8',
+  );
+  const temporary = path.join(
+    paths.dir,
+    `.state-${process.pid}-${randomUUID()}.tmp`,
+  );
+  try {
+    await writeOwnerOnlyFileExclusive(temporary, stateBytes);
+    const current = await readRawFile(paths.state);
+    if (current === null || !current.bytes.equals(raw.bytes)) {
+      throw cspError('csp-write-stale', 'state.json changed during migration');
+    }
+    await rename(temporary, paths.state);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
+  await syncDirectoryPath(paths.dir);
+  return { migrated: true, reason: 'legacy-telemetry-split' };
 }
 
 export async function ensureRuntimeStateIgnored(root) {
@@ -380,7 +500,7 @@ async function detachFileIfIdentity(paths, file, expectedBytes, label) {
     return;
   }
   try {
-    await link(detached, file);
+    await linkOrCopy(detached, file);
     await rm(detached);
   } catch (restoreError) {
     throw cspError(
@@ -462,7 +582,7 @@ function digest(bytes) {
 async function replaceWithoutOverwrite(paths, target, temporary, bytes, expectedIdentity) {
   if (expectedIdentity === null) {
     try {
-      await link(temporary, target);
+      await linkOrCopy(temporary, target);
     } catch (error) {
       if (error.code === 'EEXIST') {
         throw cspError('csp-write-stale', `${path.basename(target)} appeared at commit`);
@@ -495,7 +615,7 @@ async function replaceWithoutOverwrite(paths, target, temporary, bytes, expected
   }
 
   try {
-    await link(temporary, target);
+    await linkOrCopy(temporary, target);
   } catch (error) {
     if (error.code === 'EEXIST') {
       await rm(backup);
@@ -510,7 +630,7 @@ async function replaceWithoutOverwrite(paths, target, temporary, bytes, expected
 
 async function restoreDisplacedFile(target, backup, message) {
   try {
-    await link(backup, target);
+    await linkOrCopy(backup, target);
     await rm(backup);
   } catch (error) {
     throw cspError('csp-write-recovery-required', `${message}; preserved displaced data at ${backup}`, {
@@ -544,7 +664,7 @@ async function recoverInterruptedWrites(paths) {
     const currentIdentity = current === null ? null : digest(current.bytes);
     const displacedIdentity = displaced === null ? null : digest(displaced.bytes);
     if (current === null && displaced !== null) {
-      await link(backup, target);
+      await linkOrCopy(backup, target);
       await rm(backup);
       continue;
     }

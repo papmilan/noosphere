@@ -306,4 +306,101 @@ describe('CSP storage and runtime-state migration', () => {
     assert.deepEqual(await readFile(state), bytes);
     await assert.rejects(readFile(runtime), (error) => error.code === 'ENOENT');
   });
+
+  it('splits CSP state that a pre-2.4 writer contaminated with telemetry', async () => {
+    const root = await tempRoot();
+    const { dir, state, runtime } = cspPaths(root);
+    await mkdir(dir);
+    const telemetry = {
+      pending_checkpoint_fingerprint: 'abc',
+      last_checkpoint_at: '2026-07-30T14:00:00.000Z',
+      last_blob_id: null,
+      last_checkpoint_pending: true,
+      last_workspace_fingerprint: 'def',
+    };
+    await writeFile(
+      state,
+      `${JSON.stringify({ ...validState(), ...telemetry })}\n`,
+    );
+
+    assert.deepEqual(await migrateLegacyRuntimeState(root), {
+      migrated: true,
+      reason: 'legacy-telemetry-split',
+    });
+    assert.deepEqual(await loadState(root), validState());
+    assert.deepEqual(JSON.parse(await readFile(runtime, 'utf8')), telemetry);
+
+    // Re-entering must be a no-op rather than a second migration.
+    assert.deepEqual(await migrateLegacyRuntimeState(root), {
+      migrated: false,
+      reason: 'csp-state-present',
+    });
+  });
+
+  it('reports the offending fields instead of splitting an unrecognized state', async () => {
+    const root = await tempRoot();
+    const { dir, state } = cspPaths(root);
+    await mkdir(dir);
+    // A hand-written status typo is not telemetry contamination. It must be
+    // named, never silently rewritten.
+    const contents = `${JSON.stringify({
+      ...validState(),
+      status: 'in_progress',
+      last_blob_id: null,
+    })}\n`;
+    await writeFile(state, contents);
+
+    await assert.rejects(migrateLegacyRuntimeState(root), (error) => {
+      assert.equal(error.code, 'csp-schema-invalid');
+      assert.ok(
+        error.errors.some((issue) => issue.path === '$.status'),
+        'expected the invalid status to be reported',
+      );
+      return true;
+    });
+    assert.equal(await readFile(state, 'utf8'), contents);
+  });
+
+  it('migrates legacy telemetry on a filesystem without hard links', async () => {
+    const root = await tempRoot();
+    const { dir, state, runtime } = cspPaths(root);
+    await mkdir(dir);
+    const legacy = { last_checkpoint_at: '2026-07-30T10:00:00.000Z', last_blob_id: null };
+    await writeFile(state, `${JSON.stringify(legacy)}\n`);
+
+    // exFAT, FAT32 and most SMB mounts answer link() with ENOTSUP.
+    assert.deepEqual(
+      await migrateLegacyRuntimeState(root, {
+        linkImpl: async () => {
+          throw Object.assign(new Error('operation not supported'), {
+            code: 'ENOTSUP',
+          });
+        },
+      }),
+      { migrated: true, reason: 'legacy-state-moved' },
+    );
+    assert.deepEqual(JSON.parse(await readFile(runtime, 'utf8')), legacy);
+    await assert.rejects(readFile(state), (error) => error.code === 'ENOENT');
+  });
+
+  it('refuses to clobber an existing destination when links are unavailable', async () => {
+    const root = await tempRoot();
+    const { dir, state, runtime } = cspPaths(root);
+    await mkdir(dir);
+    await writeFile(state, `${JSON.stringify({ last_blob_id: 'AAA' })}\n`);
+    const occupied = `${JSON.stringify({ last_blob_id: 'BBB' })}\n`;
+    await writeFile(runtime, occupied);
+
+    await assert.rejects(
+      migrateLegacyRuntimeState(root, {
+        linkImpl: async () => {
+          throw Object.assign(new Error('operation not supported'), {
+            code: 'ENOTSUP',
+          });
+        },
+      }),
+      /refusing to discard either file/,
+    );
+    assert.equal(await readFile(runtime, 'utf8'), occupied);
+  });
 });

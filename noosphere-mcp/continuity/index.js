@@ -312,6 +312,14 @@ try {
   }
 } catch (error) {
   console.error(`Noosphere continuity: ${error.message}`);
+  // A schema rejection already knows which fields are wrong. Printing only the
+  // headline left the user with an unrecoverable file and nothing to act on.
+  if (Array.isArray(error.errors) && error.errors.length > 0) {
+    console.error(`  file: ${path.join('.noosphere', 'state.json')}`);
+    for (const issue of error.errors) {
+      console.error(`  ${issue.path}: ${issue.message} (${issue.code})`);
+    }
+  }
   process.exitCode = error.exitCode
     ?? (command === 'trust' && error.message === '--path requires a value.' ? 2 : null)
     ?? (command === 'trust' || command === 'restore'
