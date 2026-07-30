@@ -15,6 +15,10 @@ const packageRoot = path.resolve(
 const cli = path.join(packageRoot, 'continuity', 'index.js');
 const temporary = [];
 
+function normalizeSeparators(value) {
+  return value.replaceAll('\\', '/');
+}
+
 after(async () => {
   await Promise.all(
     temporary.map((directory) => fs.rm(directory, { recursive: true, force: true })),
@@ -124,8 +128,14 @@ async function upgradedProject({ adapters = [] } = {}) {
   // environment. Checking git from the test process instead hid the first
   // failure of this suite: activate could not find the project, skipped it, and
   // exited 0, so every assertion below failed while describing file contents.
+  // git reports the toplevel with forward slashes on Windows while mkdtemp and
+  // path.join produce backslashes, so compare the paths, not the separators.
   const toplevel = (await git('rev-parse', '--show-toplevel')).stdout.trim();
-  assert.equal(toplevel, root, 'git and the CLI must agree on the project root');
+  assert.equal(
+    normalizeSeparators(toplevel),
+    normalizeSeparators(root),
+    'git and the CLI must agree on the project root',
+  );
   assert.ok(
     JSON.parse(await fs.readFile(path.join(root, '.noosphere', 'config.json'), 'utf8'))
       .project_id,
