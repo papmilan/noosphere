@@ -12,6 +12,10 @@
 # re-measure in one click instead of re-deriving the method.
 name: Windows ACL profile
 
+# workflow_dispatch only becomes selectable once this file is on the default
+# branch, which is no help while the ACL change is still on a branch. So the
+# trigger is opt-in by branch name: push any branch ending in /acl-profile to
+# measure. Nothing else runs it, and no ordinary branch pays for it.
 on:
   workflow_dispatch:
     inputs:
@@ -19,6 +23,8 @@ on:
         description: Test files to profile
         default: tests/restore-recovery.test.js
         required: false
+  push:
+    branches: ['**/acl-profile']
 
 jobs:
   profile:
