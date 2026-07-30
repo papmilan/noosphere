@@ -34,20 +34,38 @@ const STALE_BLOCK = `<!-- noosphere:continuity:start -->
 async function noosphere(root, home, ...args) {
   const child = spawn(process.execPath, [cli, ...args], {
     cwd: root,
-    env: { ...process.env, NOOSPHERE_HOME: home, HOME: home },
+    env: {
+      ...process.env,
+      NOOSPHERE_HOME: home,
+      HOME: home,
+      USERPROFILE: home,
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const chunks = [];
   child.stdout.on('data', (chunk) => chunks.push(chunk));
   child.stderr.on('data', (chunk) => chunks.push(chunk));
   const code = await new Promise((resolve) => child.once('close', resolve));
-  return { code, output: Buffer.concat(chunks).toString('utf8') };
+  const output = Buffer.concat(chunks).toString('utf8');
+  // A CLI invocation that fails silently turns every later assertion into a
+  // riddle about file contents. Surface the command, its status and its output
+  // at the point it went wrong.
+  assert.equal(code, 0, `noosphere ${args.join(' ')} exited ${code}:\n${output}`);
+  return { code, output };
 }
 
 /** A registered project carrying the stale adapter block, as an upgrade finds it. */
 async function upgradedProject({ adapters = [] } = {}) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'noosphere-adapter-'));
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'noosphere-adapter-home-'));
+  // The CLI derives the project root from `git rev-parse --show-toplevel`,
+  // which reports the physical path. Temp directories sit behind a symlink on
+  // several platforms, so resolve here or the test and the CLI disagree about
+  // where the project is.
+  const root = await fs.realpath(
+    await fs.mkdtemp(path.join(os.tmpdir(), 'noosphere-adapter-')),
+  );
+  const home = await fs.realpath(
+    await fs.mkdtemp(path.join(os.tmpdir(), 'noosphere-adapter-home-')),
+  );
   temporary.push(root, home);
   await execFileAsync('git', ['init', '-q', '.'], { cwd: root });
   await execFileAsync('git', ['config', 'user.email', 't@t'], { cwd: root });
@@ -73,6 +91,18 @@ async function upgradedProject({ adapters = [] } = {}) {
   for (const file of ['CLAUDE.md', 'AGENTS.md', 'GEMINI.md']) {
     await fs.writeFile(path.join(root, file), STALE_BLOCK);
   }
+
+  // Assert the fixture is what the CLI will see. A project the CLI cannot read
+  // fails every assertion below for a reason none of them describe.
+  const toplevel = (
+    await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: root })
+  ).stdout.trim();
+  assert.equal(toplevel, root, 'git and the test must agree on the project root');
+  assert.ok(
+    JSON.parse(await fs.readFile(path.join(root, '.noosphere', 'config.json'), 'utf8'))
+      .project_id,
+    'fixture config.json must be readable',
+  );
   return { root, home };
 }
 
@@ -144,9 +174,8 @@ describe('managed adapter refresh on activate', () => {
   it('still prunes when a selection is asserted explicitly', async () => {
     const { root, home } = await upgradedProject();
     await noosphere(root, home, 'activate', '--quiet');
-    const result = await noosphere(root, home, 'adapters', '--only', 'claude');
+    await noosphere(root, home, 'adapters', '--only', 'claude');
 
-    assert.equal(result.code, 0, result.output);
     assert.ok(await fs.readFile(path.join(root, 'CLAUDE.md'), 'utf8'));
     await assert.rejects(
       fs.readFile(path.join(root, 'GEMINI.md'), 'utf8'),
