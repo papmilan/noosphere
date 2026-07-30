@@ -7,9 +7,24 @@ and the credential-bearing MemWal client is not constructed for an unapproved
 origin. The following residuals are **explicitly out of scope** for that PR and
 tracked here.
 
-## SEC-01b — Same-origin redirect enforcement (public-release blocker)
+## SEC-01b — Same-origin redirect enforcement (implemented)
 
-**Residual.** The gate approves the *initial* configured origin. Once the MemWal
+**Implemented boundary.** `relayer-fetch-guard.js` wraps the global `fetch`
+once `WalrusMemoryAdapter.getClient()` has passed the SEC-01 origin gate:
+every request aimed at the approved origin is sent `redirect: 'manual'`, and
+**any** redirect status (301/302/303/307/308) is refused with a typed
+`relayer-redirect-refused` error before a follow-up request exists to send.
+Same-origin redirects are refused too, deliberately more strictly than the
+expected boundary below: the request signature covers the exact path and
+query, so a redirected signed request is unverifiable at its destination by
+design — a redirecting relayer is malfunctioning or hostile either way.
+Requests to every other origin (embeddings API, Walrus aggregator, Sui RPC)
+pass through byte-for-byte untouched. Regression:
+`tests/relayer-redirect-guard.test.js` proves the refusal happens before any
+bytes reach the redirect target, that the error never contains the payload or
+signature, and that `getClient()` installs the guard.
+
+**Original residual (for the record).** The gate approves the *initial* configured origin. Once the MemWal
 client makes a request, redirect handling happens **inside the
 `@mysten-incubation/memwal` SDK's `fetch`**, which uses the default
 `redirect: 'follow'` with no same-origin policy. A trusted-but-compromised (or
@@ -34,12 +49,15 @@ payload/query is sensitive.
 credential-bearing (signed) traffic and its payload never reach an origin the
 owner did not approve, even via a redirect from an approved origin.
 
-**Expected implementation boundary.** Wrap the client's `fetch` (or pass a
-`redirect: 'error'` / manual-redirect policy) so that: redirects are not
-auto-followed across origins; any redirect whose `Location` resolves to a
-different normalized origin than the approved one is rejected before the request
-is re-sent; same-origin redirects (if any) re-pass the SEC-01 gate. This lives at
-the SDK-fetch seam, not in `relayer-origins.js`.
+**Expected implementation boundary (as originally tracked).** Wrap the client's
+`fetch` (or pass a `redirect: 'error'` / manual-redirect policy) so that:
+redirects are not auto-followed across origins; any redirect whose `Location`
+resolves to a different normalized origin than the approved one is rejected
+before the request is re-sent; same-origin redirects (if any) re-pass the
+SEC-01 gate. This lives at the SDK-fetch seam, not in `relayer-origins.js`.
+The implemented guard is stricter on the last point: same-origin redirects are
+refused outright instead of re-gated, because the per-request signature cannot
+survive a path change.
 
 ## DNS-rebinding residual (future hardening, not a SEC-01 reopen)
 
@@ -182,8 +200,9 @@ or Minor finding. Merged in
 
 ## Remaining before public-ready
 
-- **SEC-01b — same-origin redirect enforcement** (above) is now the only open
-  public-release blocker.
+- **SEC-01b — same-origin redirect enforcement** (above) is implemented by
+  `relayer-fetch-guard.js` and its regression suite; it closes when that change
+  merges with green tri-platform CI.
 - Future hardening, not blockers: the DNS-rebinding residual (above) and the
   Windows ACL profiler workflow's `workflow_dispatch` input interpolation into
   PowerShell (write-level dispatch trust; allowlist or array-based argument
