@@ -65,7 +65,7 @@ budget.
 | 3 boundary tests: `replay-api-boundary` (2), `replay-cli-boundary` (1) | `new URL(import.meta.url).pathname` is `/D:/…` on Windows, and `path.resolve` turns that into `D:\D:\…`, so the package root did not exist and the CLI child never spawned. | Resolve the package root with `fileURLToPath`. |
 | `replay-key-lifecycle` pristine-key test | POSIX mode bits do not carry owner-only intent on Windows, where Node reports `0o666`. The key is written by `writeOwnerOnlyFileExclusive`, whose Windows path sets the exact SID DACL. | Assert through the existing `tests/file-security.js` `assertOwnerOnlyFile` helper; `tests/windows-acl.test.js` remains the DACL evidence. |
 | 9 of the 26 mutants in `replay-mutation` — exactly the 9 whose anchors span lines | `windows-latest` checks out with `core.autocrlf=true`. CRLF text cannot match an exact multi-line `\n` source anchor, so those mutants were reported as missing anchors rather than as killed mutants. | A repository `.gitattributes` pinning `* text=auto eol=lf`, so every platform checks out the bytes the digests, anchors, and mutants are written against. |
-| `restore-recovery.test.js` (Phase 4C) timed out at 1 800 s | Every crash boundary spawns real children and each owner-only ACL inspection costs an external process on Windows: 130–230 s per boundary there versus a few seconds on POSIX. Its ten boundaries all passed but summed to 1 777 s, overrunning the per-test budget for the file itself. | Raise the per-test timeout to 3 600 s in `check`, `test`, and both SEC-05 CI shards. |
+| `restore-recovery.test.js` (Phase 4C) timed out at 1 800 s | Every crash boundary spawns real children and each owner-only ACL inspection costs an external process on Windows: 130–230 s per boundary there versus a few seconds on POSIX. Its ten boundaries all passed but summed to 1 777 s, overrunning the per-test budget for the file itself. | Raised the per-test timeout to 3 600 s as a stopgap, then removed the cost itself — see "Windows ACL cost" below — and returned the budget to 1 800 s. |
 
 Run 30493832013 at `ba65d81` then took the Windows job further than any earlier
 head: `npm run check` **passed** on `windows-latest` — 862 tests, 849 passed, 0
@@ -113,10 +113,39 @@ creation convergence itself is covered by `replay-key-lifecycle.test.js`, so the
 test now creates the key before racing), and concurrent state readers can refuse
 with `state-destination-changed`.
 
-Residual watch item: the Windows cost driver is one spawned process per
-owner-only ACL inspection, not the replay ledger. Until that is reduced, Windows
-runs about 40× slower than POSIX on child-process restore and replay tests, which
-also makes it the platform where fail-closed lock contention shows up first.
+## Windows ACL cost
+
+The residual watch item above — one spawned process per owner-only ACL
+operation — was measured rather than estimated, and then removed.
+
+Run 30520811266 runs `restore-recovery.test.js` twice on `windows-latest`, once
+through the persistent ACL helper host and once with `NOOSPHERE_ACL_NO_HOST=1`,
+which forces the previous process-per-call behaviour. Same commit, same runner
+class, same 7 930 ACL operations:
+
+| | process per call | persistent host |
+| --- | --- | --- |
+| Whole file (19 tests) | 3 026.9 s | **58.6 s** |
+| Ten crash boundaries | 1 838.5 s (144–211 s each) | **36.2 s** (2.7–4.2 s each) |
+| Mean per ACL operation | 315.7 ms | **4.0 ms** |
+| Share of wall clock in ACL operations | 82.7 % | 54.4 % |
+
+The same job measures the floor those numbers are explained by: **350–357 ms**
+for one bare `powershell.exe -NoProfile -Command exit` on that runner. The old
+mean per operation was 315.7 ms against a 350 ms floor, so essentially the
+entire cost was starting the process, not applying or verifying the DACL. Paying
+that start once per Node process instead of once per file operation is the whole
+of the change; what is applied and verified is unchanged, and
+`tests/windows-acl.test.js` now cross-checks the two transports by writing
+through the host and verifying the exact SID DACL through a one-shot invocation.
+
+`NOOSPHERE_ACL_PROFILE=1` prints per-action counts and cost at process exit, and
+`.github/workflows/windows-acl-profile.yml` re-runs this comparison; push a
+branch ending in `/acl-profile` to trigger it.
+
+Not measured: the full `npm run check` on Windows, which took ~3 h 54 min at
+`ba65d81`. Reads are 7 276 of the 7 930 operations in the file above, so a large
+drop is expected there too, but this workstream has not yet produced that number.
 
 ## Normative traceability
 
