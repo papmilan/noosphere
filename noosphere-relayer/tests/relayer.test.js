@@ -859,6 +859,14 @@ describe('Noosphere memory API', () => {
     assert.ok(openApi.paths['/v1/projects/{project_id}/acp/snapshots']);
     assert.ok(openApi.paths['/v1/projects/{project_id}/acp/heads']);
     assert.ok(openApi.paths['/v1/projects/{project_id}/acp/history']);
+    assert.ok(openApi.paths['/v1/projects/{project_id}/recall'].get);
+    assert.ok(openApi.paths['/v1/local/projects/state'].get);
+    assert.ok(openApi.paths['/v1/local/projects/{project_id}/pause'].post);
+    assert.ok(openApi.paths['/v1/local/projects/{project_id}/resume'].post);
+    assert.ok(openApi.paths['/v1/local/projects/{project_id}/forget'].post);
+    assert.ok(openApi.paths['/v1/local/projects/{project_id}/retry'].post);
+    assert.ok(openApi.paths['/v1/local/credentials/status'].get);
+    assert.ok(openApi.paths['/v1/local/credentials/setup'].post);
   });
 
   it('runs the setup smoke test against the Walrus adapter contract', async () => {
