@@ -1369,7 +1369,106 @@ function buildOpenApiDocument(baseUrl) {
           },
         },
       },
+      '/v1/local/projects/state': {
+        get: {
+          security: [{ bearerAuth: [] }],
+          operationId: 'getLocalProjectStates',
+          summary:
+            'Get checkpoint and pending-upload state for every local project',
+          responses: {
+            200: { description: 'Per-project state and pending counts' },
+            404: { description: 'Unavailable on non-loopback deployments' },
+          },
+        },
+      },
+      '/v1/local/projects/{project_id}/pause': {
+        post: {
+          security: [{ bearerAuth: [] }],
+          operationId: 'pauseLocalProject',
+          summary: 'Stop watching a local project without forgetting it',
+          responses: {
+            200: { description: 'Project paused' },
+            404: { description: 'Unavailable on non-loopback deployments' },
+          },
+        },
+      },
+      '/v1/local/projects/{project_id}/resume': {
+        post: {
+          security: [{ bearerAuth: [] }],
+          operationId: 'resumeLocalProject',
+          summary: 'Resume watching a paused local project',
+          responses: {
+            200: { description: 'Project resumed' },
+            404: { description: 'Unavailable on non-loopback deployments' },
+          },
+        },
+      },
+      '/v1/local/projects/{project_id}/forget': {
+        post: {
+          security: [{ bearerAuth: [] }],
+          operationId: 'forgetLocalProject',
+          summary: 'Unregister a local project from this installation',
+          responses: {
+            200: { description: 'Project unregistered' },
+            404: { description: 'Unavailable on non-loopback deployments' },
+          },
+        },
+      },
+      '/v1/local/projects/{project_id}/retry': {
+        post: {
+          security: [{ bearerAuth: [] }],
+          operationId: 'retryLocalProjectUpload',
+          summary: 'Retry the newest pending upload for a local project',
+          responses: {
+            202: { description: 'Retry initiated or re-queued' },
+            404: {
+              description:
+                'No pending job, or unavailable on non-loopback deployments',
+            },
+            409: { description: 'Job is terminal or already active' },
+          },
+        },
+      },
+      '/v1/local/credentials/status': {
+        get: {
+          security: [{ bearerAuth: [] }],
+          operationId: 'getLocalCredentialStatus',
+          summary: 'Report which memory backend and credentials are configured',
+          responses: {
+            200: { description: 'Backend, account, and network status' },
+            404: { description: 'Unavailable on non-loopback deployments' },
+          },
+        },
+      },
+      '/v1/local/credentials/setup': {
+        post: {
+          security: [{ bearerAuth: [] }],
+          operationId: 'setupLocalCredentials',
+          summary: 'Select a memory backend and store Walrus credentials',
+          responses: {
+            201: { description: 'Backend configured' },
+            404: { description: 'Unavailable on non-loopback deployments' },
+            422: { description: 'Invalid or unverifiable credentials' },
+          },
+        },
+      },
       '/v1/projects/{project_id}/recall': {
+        get: {
+          security: [{ bearerAuth: [] }],
+          operationId: 'recallProjectMemoryByQuery',
+          summary: 'Semantically recall project memories',
+          parameters: [
+            {
+              name: 'q',
+              in: 'query',
+              required: true,
+              schema: { type: 'string' },
+            },
+            { name: 'limit', in: 'query', schema: { type: 'integer' } },
+            { name: 'action_type', in: 'query', schema: { type: 'string' } },
+          ],
+          responses: { 200: { description: 'Relevant memories' } },
+        },
         post: {
           security: [{ bearerAuth: [] }],
           operationId: 'recallProjectMemory',
