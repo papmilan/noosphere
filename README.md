@@ -388,6 +388,7 @@ Recall and context:
 
 ```http
 POST /v1/projects/payments-api/recall
+GET  /v1/projects/payments-api/recall?q=duplicate%20payments&limit=10
 GET  /v1/projects/payments-api/context?q=duplicate%20payments&format=text
 GET  /v1/projects/payments-api/bootstrap
 ```
