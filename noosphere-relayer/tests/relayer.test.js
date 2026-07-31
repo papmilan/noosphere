@@ -236,11 +236,20 @@ describe('Noosphere memory API', () => {
       assert.equal(result.memory_backend, 'walrus-memory');
       assert.equal(result.network, 'testnet');
       assert.equal(result.smoke.blob_id, 'blob-setup');
+      // Only the delegate key is persisted to the credential store. The
+      // account id and network are identifiers that stay in the owner-only
+      // .env, which is also what keeps the payload under the 128-byte ceiling
+      // of the macOS secure prompt.
       assert.deepEqual(JSON.parse(storedPayloads[0]), {
-        MEMWAL_ACCOUNT_ID: `0x${'1'.repeat(64)}`,
         MEMWAL_PRIVATE_KEY: 'a'.repeat(64),
-        MEMWAL_NETWORK: 'testnet',
       });
+      assert.ok(
+        storedPayloads[0].length < 128,
+        'the stored payload must fit the macOS secure prompt',
+      );
+      // The running process still needs all three; only persistence narrows.
+      assert.equal(process.env.MEMWAL_ACCOUNT_ID, `0x${'1'.repeat(64)}`);
+      assert.equal(process.env.MEMWAL_NETWORK, 'testnet');
       assert.equal(reloaded, true);
     } finally {
       Object.assign(localCredentialService, originalService);
