@@ -6,11 +6,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { readRegistry } from './registry.js';
+import { canStart, recordExit } from './restart-policy.js';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const cli = path.resolve(directory, '..', 'continuity', 'index.js');
 const ideBridge = path.resolve(directory, 'ide-bridge.js');
 const children = new Map();
+// path -> { consecutiveFailures, retryAt } for watchers that exited non-zero.
+const restarts = new Map();
 const pollMs = Number(process.env.NOOSPHERE_MANAGER_POLL_MS || 5_000);
 let stopping = false;
 let ideBridgeChild = null;
@@ -41,12 +44,20 @@ async function reconcile() {
     if (!enabled.has(root)) {
       child.kill('SIGTERM');
       children.delete(root);
+      restarts.delete(root);
     }
+  }
+
+  for (const root of restarts.keys()) {
+    if (!enabled.has(root)) restarts.delete(root);
   }
 
   for (const project of enabled.values()) {
     if (children.has(project.path)) continue;
     if (!(await exists(project.path))) continue;
+    // A watcher that keeps failing at startup is backed off rather than
+    // respawned every reconcile tick.
+    if (!canStart(restarts.get(project.path))) continue;
     startWatcher(project);
   }
 }
@@ -73,6 +84,7 @@ function startIdeBridge() {
 }
 
 function startWatcher(project) {
+  const startedAt = Date.now();
   const child = spawn(process.execPath, [cli, 'watch'], {
     cwd: project.path,
     env: {
@@ -88,11 +100,22 @@ function startWatcher(project) {
   );
   child.once('exit', (code, signal) => {
     children.delete(project.path);
-    if (!stopping && code !== 0) {
-      console.error(
-        `[manager] Watcher exited for ${project.path} (${signal || code})`,
-      );
+    if (stopping) return;
+    if (code === 0) {
+      restarts.delete(project.path);
+      return;
     }
+    const record = recordExit(
+      restarts.get(project.path),
+      Date.now() - startedAt,
+    );
+    restarts.set(project.path, record);
+    console.error(
+      `[manager] Watcher exited for ${project.path} (${signal || code}); ` +
+        `retry ${record.consecutiveFailures} in ${Math.round(
+          (record.retryAt - Date.now()) / 1000,
+        )} s`,
+    );
   });
 }
 
