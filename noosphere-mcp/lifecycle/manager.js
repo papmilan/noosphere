@@ -5,7 +5,8 @@ import { access } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { readRegistry } from './registry.js';
+import { noosphereHome, readRegistry } from './registry.js';
+import { maxLogBytes, rotateLogs } from './log-rotation.js';
 import { canStart, recordExit } from './restart-policy.js';
 import { recordManagerStart } from './service-state.js';
 
@@ -17,6 +18,8 @@ const children = new Map();
 // path -> { consecutiveFailures, retryAt } for watchers that exited non-zero.
 const restarts = new Map();
 const pollMs = Number(process.env.NOOSPHERE_MANAGER_POLL_MS || 5_000);
+const logsDirectory = path.join(noosphereHome(), 'logs');
+const logRotateMs = Number(process.env.NOOSPHERE_LOG_ROTATE_MS || 60_000);
 let stopping = false;
 let ideBridgeChild = null;
 
@@ -36,6 +39,21 @@ await reconcile();
 const timer = setInterval(() => {
   void reconcile();
 }, pollMs);
+
+// The manager is the only always-running process that can cap these files;
+// nothing else outlives a service restart. It rotates the relayer's logs too,
+// which needs no cooperation from the relayer because copy-and-truncate leaves
+// the descriptors alone.
+const logTimer = setInterval(() => {
+  void rotateLogs(logsDirectory, maxLogBytes())
+    .then((rotated) => {
+      for (const name of rotated) console.log(`[manager] Rotated ${name}`);
+    })
+    .catch((error) => {
+      console.error(`[manager] Log rotation failed: ${error.message}`);
+    });
+}, logRotateMs);
+logTimer.unref();
 
 process.once('SIGINT', stop);
 process.once('SIGTERM', stop);
@@ -141,6 +159,7 @@ function stop() {
   if (stopping) return;
   stopping = true;
   clearInterval(timer);
+  clearInterval(logTimer);
   for (const child of children.values()) child.kill('SIGTERM');
   children.clear();
   if (ideBridgeChild) ideBridgeChild.kill('SIGTERM');
