@@ -867,16 +867,24 @@ async function processPendingJob(job) {
     {
       attempts: uploadAttempts,
       baseDelayMs: uploadRetryBaseMs,
-      shouldRetry: (error) => !isRateLimited(error)
+      shouldRetry: (error) => !shouldCoolDown(error)
         && (job.kind !== 'acp-snapshot' || isRetryableExactError(error)),
       onFailure: async (error) => {
         if (job.kind === 'acp-snapshot' && !isRetryableExactError(error)) return;
         const current = await runtimeStore.getPending(job.key);
-        const delay = retryDelayFor(error, (current?.attempts || 0) + 1);
+        const cooling = shouldCoolDown(error);
+        let delay = retryDelayFor(error, (current?.attempts || 0) + 1);
+        // When the server named its own cooldown, honour it exactly — it knows
+        // its outage better than this default does. Only when it declared an
+        // outage without a duration does the backoff need a floor, so a job
+        // with few attempts does not re-probe a second later.
+        if (cooling && retryAfterMs(error) === null) {
+          delay = Math.max(delay, queueRecoveryIntervalMs);
+        }
         await runtimeStore.markAttempt(job.key, error, {
           nextAttemptAt: Date.now() + delay,
         });
-        if (isRateLimited(error)) {
+        if (cooling) {
           queuePausedUntil = Math.max(queuePausedUntil, Date.now() + delay);
         }
       },
@@ -1023,11 +1031,17 @@ function queuedResponse(job) {
   };
 }
 
-export function retryDelayFor(error, attempt) {
+// The cooldown the server asked for, or null when it did not name one.
+export function retryAfterMs(error) {
   const retryAfter = String(error?.message || '').match(
     /retry_after_seconds["']?\s*[:=]\s*(\d+)/i,
   );
-  if (retryAfter) return Number(retryAfter[1]) * 1_000;
+  return retryAfter ? Number(retryAfter[1]) * 1_000 : null;
+}
+
+export function retryDelayFor(error, attempt) {
+  const explicit = retryAfterMs(error);
+  if (explicit !== null) return explicit;
   return Math.min(
     uploadRetryBaseMs * 2 ** Math.min(Math.max(attempt - 1, 0), 8),
     queueRetryMaxMs,
@@ -1035,7 +1049,26 @@ export function retryDelayFor(error, attempt) {
 }
 
 export function isRateLimited(error) {
+  if (Number(error?.status) === 429) return true;
   return /\b429\b|rate limit/i.test(String(error?.message || ''));
+}
+
+// An upstream that is deliberately refusing writes — a maintenance pause or a
+// plain 503. Retrying immediately cannot succeed, so this has to pause the
+// queue the same way a 429 does. Without it every pending job kept probing a
+// server that had already said it was down, which is how a stalled upload
+// backlog turned into a multi-megabyte error log.
+export function isUpstreamUnavailable(error) {
+  if (Number(error?.status) === 503) return true;
+  return /\b503\b|service unavailable|\bpaused\b/i.test(
+    String(error?.message || ''),
+  );
+}
+
+// Either signal means "stop sending for a while", which is the only thing the
+// queue needs to decide.
+export function shouldCoolDown(error) {
+  return isRateLimited(error) || isUpstreamUnavailable(error);
 }
 
 function installShutdownHandlers() {

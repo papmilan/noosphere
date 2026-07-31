@@ -899,6 +899,89 @@ describe('Noosphere memory API', () => {
     }
   });
 
+  it('classifies which upstream failures deserve a cooldown', async () => {
+    const { isUpstreamUnavailable, shouldCoolDown, retryAfterMs } =
+      await import('../index.js');
+
+    // Structured status first, message text as the fallback.
+    assert.equal(isRateLimited({ status: 429 }), true);
+    assert.equal(isUpstreamUnavailable({ status: 503 }), true);
+    assert.equal(
+      isUpstreamUnavailable(
+        new Error('Walrus Memory server error (503): uploads are paused'),
+      ),
+      true,
+    );
+
+    // The guard that matters: an ordinary failure must not pause every
+    // pending upload for the whole deployment.
+    assert.equal(shouldCoolDown(new Error('socket hang up')), false);
+    assert.equal(shouldCoolDown(new Error('Internal server error')), false);
+    assert.equal(shouldCoolDown({ status: 500 }), false);
+
+    // An explicit cooldown is honoured verbatim; absence reads as null so the
+    // caller can tell "server said 5 s" from "server said nothing".
+    assert.equal(
+      retryAfterMs(new Error('{"retry_after_seconds":300}')),
+      300_000,
+    );
+    assert.equal(retryAfterMs(new Error('no hint here')), null);
+    assert.equal(retryDelayFor(new Error('{"retry_after_seconds":7}'), 1), 7_000);
+  });
+
+  it('pauses the queue when the upstream says it is unavailable', async () => {
+    // The real message observed from Walrus Memory during a maintenance
+    // window. A 503 cannot be retried into success, so it has to behave like a
+    // 429: one attempt, then the whole queue waits. Before this was handled,
+    // every pending job burned UPLOAD_RETRY_ATTEMPTS probes against a server
+    // that had already declared itself down.
+    const originalRemember = memoryStore.remember;
+    let calls = 0;
+    memoryStore.remember = async () => {
+      calls += 1;
+      // The real body, plus a short explicit cooldown so this test does not
+      // leave the shared queue paused for the tests that follow it.
+      const error = new Error(
+        'Walrus Memory server error (503): {"error":"New uploads to Walrus Memory are paused while we conduct a security upgrade","retry_after_seconds":1}',
+      );
+      error.status = 503;
+      throw error;
+    };
+
+    try {
+      const response = await fetch(`${baseUrl}/v1/actions`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': 'upstream-unavailable-action',
+        },
+        body: JSON.stringify({
+          project_id: 'queued-project',
+          agent_id: 'codex',
+          action_type: 'checkpoint',
+          content: 'Queue this while the upstream is paused.',
+          session_id: 'queue-test',
+        }),
+      });
+      const body = await response.json();
+      assert.equal(response.status, 202);
+      assert.equal(body.pending, true);
+      assert.equal(calls, 1, 'a declared outage must not be retried in place');
+
+      const ready = await (await fetch(`${baseUrl}/ready`)).json();
+      assert.ok(
+        ready.queue.paused_until,
+        'the queue must pause instead of probing the outage per job',
+      );
+    } finally {
+      memoryStore.remember = originalRemember;
+      await runtimeStore.clear();
+      // Let the 1 s cooldown lapse; queuePausedUntil is module state and would
+      // otherwise stop the next test from ever reaching the upstream.
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+    }
+  });
+
   it('accepts a rate-limited write into the durable queue without duplication', async () => {
     const originalRemember = memoryStore.remember;
     let calls = 0;
