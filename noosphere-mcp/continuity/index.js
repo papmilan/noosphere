@@ -3296,8 +3296,11 @@ async function fileHasJournalEntries(root) {
   return journal.includes('\n## ');
 }
 
+// See the matching helper in acp/git-state.js: `--no-optional-locks` stops the
+// background watcher from taking `.git/index.lock` while the developer is
+// running their own git in the same repository.
 async function git(root, args) {
-  const { stdout } = await execFileAsync('git', args, {
+  const { stdout } = await execFileAsync('git', ['--no-optional-locks', ...args], {
     cwd: root,
     maxBuffer: 2_000_000,
   });
