@@ -7,12 +7,24 @@ import { assertApprovedRelayerOrigin } from './relayer-origins.js';
 
 loadCredentialsIntoEnv();
 
+// Mainnet moved on 2026-07-30. Walrus Memory published a brand-new contract —
+// a fresh Publish, not an upgrade — to patch a bug that let stored memories be
+// read around their encryption, and migrated existing memories onto it. A fresh
+// publish starts a new type namespace, so an account minted by the old package
+// is a different Move type from the new one and the relayer answers 401 for it.
+// Accounts therefore have new object ids too; MEMWAL_ACCOUNT_ID must be the one
+// the dashboard now shows, not the pre-migration id.
+//
+// Confirmed against the live deployment (GET https://relayer.memory.walrus.xyz/config)
+// and the publish transaction 9TH8E2hUGBhBaMfDMHxh8u5Z97881wvHrKXjdrPtww1R,
+// whose object changes created exactly this AccountRegistry. Testnet did not
+// move: relayer-staging still reports the id below.
 export const WALRUS_NETWORKS = {
   mainnet: {
     packageId:
-      '0xcee7a6fd8de52ce645c38332bde23d4a30fd9426bc4681409733dd50958a24c6',
+      '0xe7c16fbea0560e7057e2bf7422feaa4fb313749fc69c9e9092fac7a33b81d7f5',
     registryId:
-      '0x0da982cefa26864ae834a8a0504b904233d49e20fcc17c373c8bed99c75a7edd',
+      '0x8bf82c9e09e36b8d1c38298f68b7cb68e7b8762887e7592add9986d5e9cf199f',
     relayerUrl: 'https://relayer.memory.walrus.xyz',
     rpcUrl: 'https://fullnode.mainnet.sui.io:443',
   },
