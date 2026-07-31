@@ -46,6 +46,8 @@ Memory:
 
 - `POST /v1/actions` — store a memory (idempotent via `Idempotency-Key`)
 - `POST /v1/projects/:project_id/recall` — semantic recall
+- `GET /v1/projects/:project_id/recall?q=…` — the same recall over a query
+  string, with optional `limit` and `action_type`
 - `GET /v1/projects/:project_id/context` — prompt-ready context
 - `GET /v1/projects/:project_id/bootstrap` — instructions plus current context
   for any HTTP-capable agent
@@ -59,8 +61,15 @@ ACP exact state (see the
 - `/v1/projects/{project_id}/acp/heads`
 - `/v1/projects/{project_id}/acp/history`
 
-Local project control (loopback): `/v1/local/projects` with
-`pause`, `resume`, `retry`, and `forget`, plus `/v1/local/credentials`.
+Local project control (loopback only — every route below answers `404` to a
+non-loopback caller):
+
+- `GET`/`POST /v1/local/projects` — list and register watched projects
+- `GET /v1/local/projects/state` — last checkpoint, pending upload count, and
+  latest failure per project
+- `POST /v1/local/projects/:project_id/{pause,resume,retry,forget}`
+- `GET /v1/local/credentials/status` — configured memory backend and account
+- `POST /v1/local/credentials/setup` — select a backend and store credentials
 
 Discovery: `GET /.well-known/noosphere.json`, `/openapi.json`, `/health`,
 `/ready`.
