@@ -48,7 +48,11 @@ describe('credential storage', () => {
     assert.equal(calls.length, 1);
     assert.equal(calls[0].command, '/usr/bin/security');
     assert.equal(calls[0].args.includes(secret), false);
-    assert.equal(calls[0].options.input, `${secret}\n`);
+    // `security add-generic-password -w` prompts twice — for the value and for
+    // its confirmation — so the secret is written once per prompt. A single
+    // line leaves the confirmation at EOF, and security then stores nothing
+    // while still exiting 0.
+    assert.equal(calls[0].options.input, `${secret}\n${secret}\n`);
   });
 
   it('uses an owner-only file when no native keychain exists', async () => {
@@ -104,7 +108,7 @@ describe('credential storage', () => {
     assert.equal(env.MEMWAL_ACCOUNT_ID, 'from-env');
   });
 
-  it('migrates real newline-delimited env files and scrubs only credentials', async () => {
+  it('migrates only the delegate key and leaves the identifiers in place', async () => {
     const envPath = path.join(temporaryRoot, '.env');
     const store = new CredentialStore('migration', {
       platform: 'unsupported',
@@ -132,9 +136,20 @@ describe('credential storage', () => {
     const scrubbed = await readFile(envPath, 'utf8');
     assert.match(scrubbed, /PORT=3001/);
     assert.match(scrubbed, /NOOSPHERE_API_TOKEN=keep-this-setting/);
+    // The secret is the only thing that moves.
     assert.doesNotMatch(scrubbed, /MEMWAL_PRIVATE_KEY/);
-    assert.doesNotMatch(scrubbed, /MEMWAL_ACCOUNT_ID/);
-    assert.equal(JSON.parse(store.getPassword()).MEMWAL_NETWORK, 'testnet');
+    // The account id and network are identifiers, not secrets, and stay put:
+    // the store keeps only the key, which is what holds the payload under the
+    // 128-byte ceiling of the macOS secure prompt.
+    assert.match(scrubbed, /MEMWAL_ACCOUNT_ID=0x/);
+    assert.match(scrubbed, /MEMWAL_NETWORK=testnet/);
+
+    const stored = JSON.parse(store.getPassword());
+    assert.deepEqual(stored, { MEMWAL_PRIVATE_KEY: 'a'.repeat(64) });
+    assert.ok(
+      store.getPassword().length < 128,
+      'the stored payload must fit the macOS secure prompt',
+    );
   });
 
   it('runs setup noninteractively with a validated hexadecimal key', async () => {

@@ -33,7 +33,10 @@ import {
   resolveSecurityConfig,
   securityHeaders,
 } from './security.js';
-import { CredentialStore } from './credentials.js';
+import {
+  CredentialStore,
+  toStoredCredentialPayload,
+} from './credentials.js';
 import {
   ACP_LIMITS,
   canonicalize,
@@ -545,9 +548,13 @@ app.post(
       await localCredentialService.validateCredentials(credentials);
 
       const store = localCredentialService.createStore();
-      const storage = store.setPassword(JSON.stringify(credentials));
+      // Same shape the migrate path writes: the delegate key alone. The
+      // account id and network stay in .env, which is what keeps this inside
+      // the 128-byte ceiling of the macOS secure prompt.
+      const stored = toStoredCredentialPayload(credentials);
+      const storage = store.setPassword(stored);
       const verified = store.getPassword();
-      if (verified !== JSON.stringify(credentials)) {
+      if (verified !== stored) {
         throw new Error('Credential verification failed after secure storage');
       }
 

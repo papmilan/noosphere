@@ -259,3 +259,81 @@ describe('Windows DPAPI CredentialStore', () => {
     }
   });
 });
+
+// `security add-generic-password -w` (no value) prompts twice: "password data
+// for new item:" then "retype password for new item:". A single line on stdin
+// hits EOF on the retype, so security reports "passwords don't match", stores
+// nothing — and still exits 0, so no exit status revealed that the write had
+// silently done nothing.
+describe('macOS keychain credential store', () => {
+  function fakeSecurity() {
+    const entries = new Map();
+    const calls = [];
+    const run = (command, args, options = {}) => {
+      calls.push({ command, args, input: options.input });
+      const key = [
+        args[args.indexOf('-a') + 1],
+        args[args.indexOf('-s') + 1],
+      ].join(' ');
+      if (args[0] === 'add-generic-password') {
+        const lines = String(options.input ?? '').split('\n');
+        // Model the real prompt pair: the value persists only when the
+        // confirmation line matches the first one. Note the exit code stays 0
+        // either way, exactly as the real binary behaves.
+        if (lines.length < 2 || lines[0] === '' || lines[0] !== lines[1]) {
+          return { status: 0, stdout: '', stderr: 'passwords do not match\n' };
+        }
+        entries.set(key, lines[0]);
+        return { status: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'find-generic-password') {
+        if (!entries.has(key)) {
+          return { status: 44, stdout: '', stderr: 'not found\n' };
+        }
+        return { status: 0, stdout: `${entries.get(key)}\n`, stderr: '' };
+      }
+      return { status: 1, stdout: '', stderr: `unexpected ${args[0]}\n` };
+    };
+    return { run, calls };
+  }
+
+  it('answers both prompts so the secret actually persists', () => {
+    const security = fakeSecurity();
+    const store = new CredentialStore('default', {
+      platform: 'darwin',
+      run: security.run,
+    });
+    const payload = JSON.stringify({
+      MEMWAL_ACCOUNT_ID: '0xabc',
+      MEMWAL_PRIVATE_KEY: 'suiprivkey1qexample',
+      MEMWAL_NETWORK: 'mainnet',
+    });
+
+    const result = store.setPassword(payload);
+    assert.equal(result.backend, 'macos-keychain');
+    // The readback is the point: one line on stdin left this null while
+    // setPassword had already reported success to its caller.
+    assert.equal(store.getPassword(), payload);
+  });
+
+  it('keeps the secret out of argv, where any ps could read it', () => {
+    const security = fakeSecurity();
+    const store = new CredentialStore('default', {
+      platform: 'darwin',
+      run: security.run,
+    });
+    const payload = 'super-secret-delegate-key';
+    store.setPassword(payload);
+
+    const add = security.calls.find(
+      (call) => call.args[0] === 'add-generic-password',
+    );
+    assert.ok(add, 'add-generic-password must have been invoked');
+    assert.equal(
+      add.args.some((argument) => argument.includes(payload)),
+      false,
+      'the secret must travel on stdin, never as a process argument',
+    );
+    assert.equal(add.input, `${payload}\n${payload}\n`);
+  });
+});

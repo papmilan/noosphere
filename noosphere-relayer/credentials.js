@@ -11,6 +11,29 @@ const CREDENTIAL_KEYS = [
   'MEMWAL_NETWORK',
 ];
 
+// Only the delegate key is a secret; the account id and network are
+// identifiers and stay in the owner-only .env. On macOS this is not merely
+// tidier, it is the only workable shape: `security`'s safe prompt truncates at
+// 128 bytes, and a full three-field payload is around 205, so storing all of
+// them cannot use Apple's secure input path at all — the alternative is
+// publishing the key in argv, which Apple's own help calls insecure.
+//
+// Reads stay tolerant of the legacy full payload, so installs that already
+// stored all three keep working untouched.
+export const SECRET_CREDENTIAL_KEYS = ['MEMWAL_PRIVATE_KEY'];
+
+export function toStoredCredentialPayload(credentials) {
+  const stored = {};
+  for (const key of SECRET_CREDENTIAL_KEYS) {
+    const value = credentials?.[key];
+    if (typeof value === 'string' && value) stored[key] = value;
+  }
+  if (!stored.MEMWAL_PRIVATE_KEY) {
+    throw new Error('A delegate private key is required');
+  }
+  return JSON.stringify(stored);
+}
+
 export class CredentialStore {
   constructor(
     account = 'default',
@@ -39,6 +62,17 @@ export class CredentialStore {
     }
 
     if (this.platform === 'darwin') {
+      // `-w` with no value makes security prompt twice — "password data for
+      // new item:" then "retype password for new item:" — so a single line on
+      // stdin hits EOF on the retype, security reports "passwords don't match",
+      // stores nothing, and still exits 0. The write silently did nothing and
+      // no exit status revealed it; only the readback in migrateEnvironmentFile
+      // caught it, and only after the caller had been told the write succeeded.
+      // Answer both prompts.
+      //
+      // The secret stays on stdin rather than moving into `-w <value>`, which
+      // would work but publish it in the process arguments for any `ps` on the
+      // machine to read.
       this.#runChecked(
         '/usr/bin/security',
         [
@@ -50,7 +84,7 @@ export class CredentialStore {
           SERVICE_NAME,
           '-w',
         ],
-        { input: `${secret}\n` },
+        { input: `${secret}\n${secret}\n` },
       );
       return { backend: 'macos-keychain', encryptedAtRest: true };
     }
@@ -251,6 +285,8 @@ export class CredentialStore {
       return {
         present: true,
         backend: this.backendName(),
+        // Null on a secret-only payload, where these live in .env instead.
+        // Absent identifiers are the normal shape now, never a defect.
         account_id: parsed.MEMWAL_ACCOUNT_ID || null,
         network: parsed.MEMWAL_NETWORK || 'mainnet',
       };

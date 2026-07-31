@@ -6,7 +6,10 @@ import readline from 'node:readline/promises';
 import { Writable } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 
-import { CredentialStore } from '../lifecycle/credentials.js';
+import {
+  CredentialStore,
+  toStoredCredentialPayload,
+} from '../lifecycle/credentials.js';
 import { noosphereHome } from '../lifecycle/registry.js';
 import { resolveRelayerPath } from '../lifecycle/relayer-source.js';
 import {
@@ -207,8 +210,14 @@ export async function runCredentialsCommand(
         throw new Error('Stored credential payload is invalid');
       }
       console.log(
-        `Credentials present for ${status.account_id} on ${status.network} ` +
-        `(${status.backend}).`,
+        status.account_id
+          // A legacy full payload still carries its own identifiers.
+          ? `Credentials present for ${status.account_id} on ${status.network} ` +
+            `(${status.backend}).`
+          // The current shape: the store holds the delegate key alone, and the
+          // account id and network are read from the owner-only .env.
+          : `Delegate private key present (${status.backend}); ` +
+            'account id and network are read from .env.',
       );
       return;
     }
@@ -251,19 +260,23 @@ export async function migrateEnvironmentFile(
   await writeOwnerOnlyFileExclusive(backupPath, content, secureFileOptions);
 
   try {
-    store.setPassword(JSON.stringify(credentials));
-    if (store.getPassword() !== JSON.stringify(credentials)) {
+    // Only the delegate key moves. The account id and network are identifiers,
+    // not secrets, and stay in the owner-only .env — which is also what keeps
+    // the payload inside the 128-byte ceiling of the macOS secure prompt.
+    const stored = toStoredCredentialPayload(credentials);
+    store.setPassword(stored);
+    if (store.getPassword() !== stored) {
       throw new Error('Secure-store readback did not match');
     }
 
     const scrubbed = content
       .split(/\r?\n/)
-      .filter((line) => !/^\s*MEMWAL_(PRIVATE_KEY|ACCOUNT_ID|NETWORK)\s*=/.test(line))
+      .filter((line) => !/^\s*MEMWAL_PRIVATE_KEY\s*=/.test(line))
       .join('\n')
       .replace(/\n*$/, '\n');
     await atomicOwnerOnlyWrite(
       envPath,
-      `${scrubbed}# Walrus credentials are stored in the OS credential store.\n`,
+      `${scrubbed}# The delegate private key is stored in the OS credential store.\n`,
       secureFileOptions,
     );
     console.log(`Migrated credentials from ${envPath}.`);
