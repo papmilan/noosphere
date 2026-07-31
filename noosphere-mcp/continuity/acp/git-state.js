@@ -88,8 +88,14 @@ function trackedStatusLines(status) {
   return status.split('\n').filter((line) => line && !line.includes('.noosphere/'));
 }
 
+// `--no-optional-locks` keeps the watcher off `.git/index.lock`. Commands like
+// `status` and `diff` refresh the index and write it back, so a background poll
+// every couple of seconds otherwise races the developer's own git.
 async function git(root, args) {
-  const { stdout } = await execFileAsync('git', args, { cwd: root, maxBuffer: 2_000_000 });
+  const { stdout } = await execFileAsync('git', ['--no-optional-locks', ...args], {
+    cwd: root,
+    maxBuffer: 2_000_000,
+  });
   return stdout.trimEnd();
 }
 
