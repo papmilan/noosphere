@@ -20,6 +20,7 @@ import { noosphereHome } from './registry.js';
 import { resolveRelayerPath } from './relayer-source.js';
 import { CredentialStore } from './credentials.js';
 import { formatServiceInstallError } from './service-errors.js';
+import { isStale, readManagerMarker, sourceStamp } from './service-state.js';
 import { escapeRegExp, exists, npmCommand, npmSpawnOptions } from './util.js';
 import { atomicOwnerOnlyWrite, readOwnerOnlyFile } from '../continuity/secure-fs.js';
 import { secureRelayerFetch } from '../continuity/relayer-authority.js';
@@ -257,11 +258,20 @@ async function doctor() {
   const platform = await getPlatformModule();
   const platformChecks = await platform.doctorChecks(platformOpts);
 
+  const marker = await readManagerMarker();
+  const installedStamp = await sourceStamp(installedMcp).catch(() => null);
+
   const checks = {
     node: process.versions.node,
     platform: effectivePlatform,
     installed_cli: await exists(path.join(binDirectory, 'noosphere')),
     ...platformChecks,
+    manager_pid: marker?.pid ?? null,
+    manager_started_at: marker?.started_at ?? null,
+    // true = the running manager predates the installed code. null = unknown,
+    // which is not a failure: no marker yet, a manager started from a checkout,
+    // or no manager running at all.
+    manager_stale: isStale(marker, installedStamp, installedMcp),
     credentials: await configuredCredentials(path.join(installedRelayer, '.env')),
     relayer_ready: await relayerReadiness(path.join(installedRelayer, '.env')),
   };
@@ -278,7 +288,11 @@ async function doctor() {
     // presence check misses: the service is up, /ready answers 200, and the
     // backlog grows for days while doctor reports all-green. Retried-and-still
     // -queued writes are not a healthy system, so they fail the run too.
-    checks.relayer_ready.queue_failing > 0
+    checks.relayer_ready.queue_failing > 0 ||
+    // Same shape, one layer down: the service is present and running, but it
+    // is running the code from before the last install. Only `true` fails —
+    // `null` means undetermined, not unhealthy.
+    checks.manager_stale === true
   ) {
     process.exitCode = 1;
   }
