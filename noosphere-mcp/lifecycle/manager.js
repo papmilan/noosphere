@@ -7,8 +7,10 @@ import { fileURLToPath } from 'node:url';
 
 import { readRegistry } from './registry.js';
 import { canStart, recordExit } from './restart-policy.js';
+import { recordManagerStart } from './service-state.js';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
+const packageRoot = path.resolve(directory, '..');
 const cli = path.resolve(directory, '..', 'continuity', 'index.js');
 const ideBridge = path.resolve(directory, 'ide-bridge.js');
 const children = new Map();
@@ -22,6 +24,13 @@ let ideBridgeChild = null;
 if (process.env.NOOSPHERE_ENABLE_IDE_BRIDGE === '1') {
   startIdeBridge();
 }
+
+// Stamp which build this process loaded so `noosphere doctor` can tell a
+// running service apart from a running *current* service. Never fatal: an
+// unwritable marker costs a diagnostic, not the manager.
+await recordManagerStart(packageRoot).catch((error) => {
+  console.error(`[manager] Could not record runtime marker: ${error.message}`);
+});
 
 await reconcile();
 const timer = setInterval(() => {
