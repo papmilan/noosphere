@@ -1,5 +1,7 @@
 import path from 'node:path';
 
+import { noosphereHome } from './registry.js';
+
 export function formatServiceInstallError(error, context) {
   const {
     platform,
@@ -9,6 +11,7 @@ export function formatServiceInstallError(error, context) {
     installedMcp,
     installedRelayer,
   } = context;
+  const taskDefinitions = path.join(noosphereHome(), 'tasks');
   const code = error?.code || '';
   const original = error?.message || String(error);
   const commandLine = error?.commandLine || '';
@@ -45,7 +48,7 @@ export function formatServiceInstallError(error, context) {
       '',
       'If `systemctl --user` is not available, the host lacks a user',
       'systemd instance. Run the relayer manually with `noosphere run-relayer`,',
-      `or invoke node directly: ${path.join(installedRelayer, 'index.js')}`,
+      `or from its own directory, which holds its .env: cd ${installedRelayer} && node index.js`,
     );
   } else {
     if (code === 'EPERM') {
@@ -63,15 +66,17 @@ export function formatServiceInstallError(error, context) {
       '  noosphere run-relayer',
       '  noosphere run-manager',
       '',
-      'Or invoke node directly in two terminals:',
-      `  node ${path.join(installedRelayer, 'index.js')}`,
-      `  node ${path.join(installedMcp, 'lifecycle', 'manager.js')}`,
+      'Or invoke node directly in two terminals, each started from the',
+      'directory shown below. The relayer reads .env and the relative state',
+      'paths it declares from the current directory, so starting it anywhere',
+      'else silently falls back to defaults:',
+      `  ${installedRelayer}> node index.js`,
+      `  ${installedMcp}> node ${path.join('lifecycle', 'manager.js')}`,
       '',
-      'Once schtasks.exe is allowed, register the tasks manually:',
-      '  schtasks /Create /TN "\\Noosphere\\Relayer" /SC ONLOGON /RL LIMITED /F \\',
-      `    /TR "\\"node.exe\\" \\"${path.join(installedRelayer, 'index.js')}\\""`,
-      '  schtasks /Create /TN "\\Noosphere\\Manager" /SC ONLOGON /RL LIMITED /F \\',
-      `    /TR "\\"node.exe\\" \\"${path.join(installedMcp, 'lifecycle', 'manager.js')}\\""`,
+      'Once schtasks.exe is allowed, register the tasks from the definitions',
+      'written during install — they carry that working directory:',
+      `  schtasks /Create /TN "\\Noosphere\\Relayer" /F /XML "${path.join(taskDefinitions, 'Relayer.xml')}"`,
+      `  schtasks /Create /TN "\\Noosphere\\Manager" /F /XML "${path.join(taskDefinitions, 'Manager.xml')}"`,
     );
   }
 

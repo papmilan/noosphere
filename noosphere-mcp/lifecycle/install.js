@@ -21,7 +21,13 @@ import { resolveRelayerPath } from './relayer-source.js';
 import { CredentialStore } from './credentials.js';
 import { formatServiceInstallError } from './service-errors.js';
 import { isStale, readManagerMarker, sourceStamp } from './service-state.js';
-import { escapeRegExp, exists, npmCommand, npmSpawnOptions } from './util.js';
+import {
+  escapeRegExp,
+  exists,
+  npmCommand,
+  npmSpawnOptions,
+  wrapperName,
+} from './util.js';
 import { atomicOwnerOnlyWrite, readOwnerOnlyFile } from '../continuity/secure-fs.js';
 import { secureRelayerFetch } from '../continuity/relayer-authority.js';
 
@@ -74,6 +80,10 @@ const CODEX_GUARD_END = '<!-- noosphere:global-codex:end -->';
 
 const effectivePlatform =
   process.env.NOOSPHERE_TEST_PLATFORM || process.platform;
+
+// Depends on effectivePlatform, so it cannot join the path constants above.
+// Still declared before the entry-point await for the TDZ reason noted there.
+const cliWrapperPath = path.join(binDirectory, wrapperName(effectivePlatform));
 
 async function getPlatformModule() {
   switch (effectivePlatform) {
@@ -231,7 +241,7 @@ async function install() {
       ? 'Linux'
       : 'Windows';
   console.log(`Noosphere installed for this ${platformName} user.`);
-  console.log(`Command: ${path.join(binDirectory, 'noosphere')}`);
+  console.log(`Command: ${cliWrapperPath}`);
   console.log('Entering a Git project now initializes and watches it automatically.');
   console.log('Create .noosphere-ignore in a repository to opt out.');
 }
@@ -264,7 +274,7 @@ async function doctor() {
   const checks = {
     node: process.versions.node,
     platform: effectivePlatform,
-    installed_cli: await exists(path.join(binDirectory, 'noosphere')),
+    installed_cli: await exists(cliWrapperPath),
     ...platformChecks,
     manager_pid: marker?.pid ?? null,
     manager_started_at: marker?.started_at ?? null,
@@ -432,13 +442,7 @@ async function writeWrapper() {
       ? `@echo off\n"${node}" "${path.join(installedMcp, 'continuity', 'index.js')}" %*\n`
       : `#!/bin/sh\nexec "${node}" "${path.join(installedMcp, 'continuity', 'index.js')}" "$@"\n`;
 
-  const wrapperName =
-    effectivePlatform === 'win32' || effectivePlatform === 'windows'
-      ? 'noosphere.cmd'
-      : 'noosphere';
-
-  const wrapperPath = path.join(binDirectory, wrapperName);
-  await writeFile(wrapperPath, wrapperContent, { encoding: 'utf8', mode: 0o700 });
+  await writeFile(cliWrapperPath, wrapperContent, { encoding: 'utf8', mode: 0o700 });
 }
 
 // ---------------------------------------------------------------------------
@@ -537,7 +541,7 @@ end
 
 async function writePowerShellIntegration() {
   const integrationPath = path.join(shellDirectory, 'shell.ps1');
-  const noosphereCmd = path.join(binDirectory, 'noosphere.cmd');
+  const noosphereCmd = cliWrapperPath;
   await writeFile(
     integrationPath,
     `# Noosphere automatic project activation
