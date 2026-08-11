@@ -231,6 +231,44 @@ describe('Noosphere macOS lifecycle installer', () => {
     }
   });
 
+  it('reinstalls successfully when installed dependencies resolve through runtime symlinks', async () => {
+    const fakeHome = await makeFakeHome({ '.zshrc': '' });
+    const noosphereHome = path.join(fakeHome, '.noosphere');
+
+    try {
+      await runInstallerOk('install', {
+        ...baseEnv(fakeHome, noosphereHome),
+        NOOSPHERE_TEST_PLATFORM: 'darwin',
+      });
+
+      // The second installer runs from the installed tree. Its relayer's
+      // @noosphere/secure-fs file: dependency resolves back to the installed
+      // canonical copy — the exact layout that previously made cp reject a
+      // source and destination as identical.
+      const installedInstaller = path.join(
+        noosphereHome,
+        'app',
+        'noosphere-mcp',
+        'lifecycle',
+        'install.js',
+      );
+      const child = spawn(process.execPath, [installedInstaller, 'install'], {
+        env: {
+          ...process.env,
+          ...baseEnv(fakeHome, noosphereHome),
+          NOOSPHERE_TEST_PLATFORM: 'darwin',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const stderr = [];
+      child.stderr.on('data', (chunk) => stderr.push(chunk));
+      const code = await new Promise((resolve) => child.once('close', resolve));
+      assert.equal(code, 0, Buffer.concat(stderr).toString());
+    } finally {
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
   it('doctor reports expected shape for macOS', async () => {
     const fakeHome = await makeFakeHome({ '.zshrc': '' });
     const noosphereHome = path.join(fakeHome, '.noosphere');
