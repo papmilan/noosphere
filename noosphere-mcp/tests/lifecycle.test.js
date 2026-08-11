@@ -726,6 +726,32 @@ describe('Noosphere Windows lifecycle installer', () => {
     }
   });
 
+  it('doctor finds the wrapper the installer wrote on Windows', async () => {
+    // Regression: doctor probed for an extensionless `noosphere` while the
+    // installer writes `noosphere.cmd` on Windows, so installed_cli was false
+    // on every healthy Windows install and doctor always reported a failure.
+    const fakeHome = await makeFakeHome({ '.zshrc': '' });
+    const noosphereHome = path.join(fakeHome, '.noosphere');
+
+    try {
+      await runInstallerOk('install', {
+        ...baseEnv(fakeHome, noosphereHome),
+        NOOSPHERE_TEST_PLATFORM: 'windows',
+      });
+
+      await access(path.join(noosphereHome, 'bin', 'noosphere.cmd'));
+
+      const { stdout } = await runInstaller('doctor', {
+        ...baseEnv(fakeHome, noosphereHome),
+        NOOSPHERE_TEST_PLATFORM: 'windows',
+      });
+
+      assert.equal(JSON.parse(stdout).installed_cli, true);
+    } finally {
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
   it('skips schtasks and still succeeds with NOOSPHERE_SKIP_SCHTASKS=1', async () => {
     // Confirms the guard works: install should complete without schtasks.exe
     const fakeHome = await makeFakeHome();
@@ -755,6 +781,17 @@ describe('Noosphere Windows lifecycle installer', () => {
 // ---------------------------------------------------------------------------
 // Cross-platform npm spawn (regression: Windows ENOENT)
 // ---------------------------------------------------------------------------
+
+describe('CLI wrapper naming', () => {
+  it('wrapperName resolves to noosphere.cmd on Windows and noosphere elsewhere', async () => {
+    const { wrapperName } = await import('../lifecycle/util.js');
+    assert.equal(wrapperName('win32'), 'noosphere.cmd');
+    // NOOSPHERE_TEST_PLATFORM spells it `windows`; both must agree.
+    assert.equal(wrapperName('windows'), 'noosphere.cmd');
+    assert.equal(wrapperName('darwin'), 'noosphere');
+    assert.equal(wrapperName('linux'), 'noosphere');
+  });
+});
 
 describe('npm child-process invocation', () => {
   it('npmCommand resolves to npm.cmd on win32 and npm elsewhere', async () => {

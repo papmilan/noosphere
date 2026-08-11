@@ -18,6 +18,19 @@ export function escapeRegExp(value) {
 }
 
 /**
+ * Resolve the filename of the CLI wrapper in ~/.noosphere/bin. Windows needs
+ * the `.cmd` extension for the shim to run from cmd.exe and PowerShell.
+ * Every caller must agree on this name: the installer writes it, and doctor
+ * checks for it. NOOSPHERE_TEST_PLATFORM supplies `windows`, so both that
+ * spelling and Node's own `win32` have to resolve the same way.
+ */
+export function wrapperName(platform = process.platform) {
+  return platform === 'win32' || platform === 'windows'
+    ? 'noosphere.cmd'
+    : 'noosphere';
+}
+
+/**
  * Resolve the platform-specific executable name for an npm-style shim.
  * On Windows, `npm`, `npx`, `yarn`, `pnpm` live as `.cmd` batch files.
  * Node's child_process.spawn does not auto-append `.cmd`/`.bat` via
