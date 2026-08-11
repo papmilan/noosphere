@@ -1,13 +1,19 @@
 /**
  * Windows platform module — Task Scheduler service management.
- * No UAC or administrator elevation required; tasks are per-user (/RL LIMITED).
+ * No UAC or administrator elevation required; tasks are per-user
+ * (LeastPrivilege). Task definitions live in ~/.noosphere/tasks/, the
+ * counterpart to the launchd plists and systemd units on the other platforms.
  *
  * Guard: NOOSPHERE_SKIP_SCHTASKS=1 skips all schtasks.exe calls
  * (allows tests on non-Windows hosts).
  */
 
 import { execFile } from 'node:child_process';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { promisify } from 'node:util';
+
+import { noosphereHome } from '../registry.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -17,12 +23,8 @@ function skipSchtasks() {
   return process.env.NOOSPHERE_SKIP_SCHTASKS === '1';
 }
 
-/**
- * Quote a Windows path for use inside a Task Scheduler /TR argument.
- * We use double-quotes around each part.
- */
-function winQuote(value) {
-  return `"${String(value).replaceAll('"', '\\"')}"`;
+function taskDefinitionDir() {
+  return path.join(noosphereHome(), 'tasks');
 }
 
 /**
@@ -39,23 +41,28 @@ export async function installServices(opts) {
   const relayerTn = `${TASK_FOLDER}\\Relayer`;
   const managerTn = `${TASK_FOLDER}\\Manager`;
 
+  const definitionDir = taskDefinitionDir();
+  await mkdir(definitionDir, { recursive: true, mode: 0o700 });
+
+  const relayerXml = path.join(definitionDir, 'Relayer.xml');
+  const managerXml = path.join(definitionDir, 'Manager.xml');
+
+  await writeTaskDefinition(relayerXml, {
+    description: 'Noosphere Relayer',
+    command: node,
+    argument: path.join(installedRelayer, 'index.js'),
+    workingDirectory: installedRelayer,
+  });
+  await writeTaskDefinition(managerXml, {
+    description: 'Noosphere Manager',
+    command: node,
+    argument: path.join(installedMcp, 'lifecycle', 'manager.js'),
+    workingDirectory: installedMcp,
+  });
+
   if (!skipSchtasks()) {
-    await schtasks(
-      '/Create',
-      '/TN', relayerTn,
-      '/TR', `${winQuote(node)} ${winQuote(`${installedRelayer}\\index.js`)}`,
-      '/SC', 'ONLOGON',
-      '/RL', 'LIMITED',
-      '/F',
-    );
-    await schtasks(
-      '/Create',
-      '/TN', managerTn,
-      '/TR', `${winQuote(node)} ${winQuote(`${installedMcp}\\lifecycle\\manager.js`)}`,
-      '/SC', 'ONLOGON',
-      '/RL', 'LIMITED',
-      '/F',
-    );
+    await schtasks('/Create', '/TN', relayerTn, '/XML', relayerXml, '/F');
+    await schtasks('/Create', '/TN', managerTn, '/XML', managerXml, '/F');
     // Start them immediately. Failures here aren't fatal — the tasks
     // still run on next logon — but surface a warning so the user knows
     // they need to log out/in or kick them by hand.
@@ -110,6 +117,68 @@ export async function doctorChecks(_opts) {
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Write one Task Scheduler definition.
+ *
+ * schtasks /TR cannot express a working directory, so a task registered that
+ * way runs from %SystemRoot%\system32. The relayer loads its .env — and the
+ * relative state paths that .env declares — from the current directory, so it
+ * silently fell back to built-in defaults and reported itself not ready.
+ * launchd and systemd already pin WorkingDirectory; /XML is the only way to
+ * say the same thing to the Task Scheduler.
+ */
+async function writeTaskDefinition(file, definition) {
+  // schtasks /XML rejects UTF-8 without a byte order mark. UTF-16LE with a
+  // BOM is what Task Scheduler itself exports, so it always round-trips.
+  await writeFile(file, `﻿${taskXml(definition)}`, 'utf16le');
+}
+
+function taskXml({ description, command, argument, workingDirectory }) {
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>${xml(description)}</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <!-- Both tasks are daemons. The Task Scheduler default of PT72H would
+         terminate them after three days; launchd and systemd keep them up. -->
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>${xml(command)}</Command>
+      <Arguments>"${xml(argument)}"</Arguments>
+      <WorkingDirectory>${xml(workingDirectory)}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+`;
+}
+
+function xml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
 
 async function schtasks(...args) {
   try {
