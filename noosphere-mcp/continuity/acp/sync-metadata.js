@@ -1,37 +1,19 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { chmod, lstat, mkdir, open, rm } from 'node:fs/promises';
+import { chmod, lstat, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalize } from '@noosphere/acp-protocol';
 import { RECONCILIATION_POLICY_VERSION, SYNC_PROTOCOL_VERSION } from '@noosphere/acp-protocol';
 import { syncDirectoryPath } from './durability.js';
+import { withOwnerLock as acquireOwnerLock } from './owner-lock.js';
 import {
   atomicOwnerOnlyWrite,
-  readBoundedRegularFile,
   readOwnerOnlyFile,
   writeOwnerOnlyFileExclusive,
 } from '../secure-fs.js';
 
 const METADATA_FILE = 'continuity-sync.json';
-
-// SEC-05 Phase 4B-R4 — bounded, non-blocking lock read.
-//
-// A lock path lives inside the working tree, so anything that can write there
-// can plant a FIFO at it. A bare readFile then blocks forever with no error
-// code, which strands the release and stale-check paths this helper serves.
-// Locks are small JSON; the shared primitive refuses anything non-regular,
-// symlinked, or larger, and never blocks on the open.
-const MAX_LOCK_BYTES = 4096;
-
-async function readLockJson(lockPath) {
-  try {
-    const raw = await readBoundedRegularFile(lockPath, { maxBytes: MAX_LOCK_BYTES });
-    return raw === null ? null : JSON.parse(raw.toString('utf8'));
-  } catch {
-    return null;
-  }
-}
 
 const CONFIRMATION_LIMIT = 16;
 const CONFIRMATION_TTL_MS = 5 * 60 * 1000;
@@ -270,37 +252,11 @@ async function withOwnerLock(root, filename, timeoutCode, operation) {
   const directory = path.join(root, '.noosphere');
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
-  const lockPath = path.join(directory, filename);
-  const token = randomUUID();
-  let handle;
-  for (let attempt = 0; attempt < 500; attempt += 1) {
-    try {
-      handle = await open(lockPath, 'wx', 0o600);
-      await handle.writeFile(JSON.stringify({ pid: process.pid, token, created_at: Date.now() }));
-      await handle.sync();
-      break;
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      if (await staleLock(lockPath)) await rm(lockPath, { force: true });
-      else await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-  }
-  if (!handle) throw syncError(timeoutCode);
-  try { return await operation(); } finally {
-    await handle.close();
-    const current = await readLockJson(lockPath);
-    if (current?.token === token) await rm(lockPath, { force: true });
-  }
-}
-
-async function staleLock(lockPath) {
-  const lock = await readLockJson(lockPath);
-  if (!lock || !Number.isInteger(lock.pid) || typeof lock.token !== 'string') {
-    const details = await lstat(lockPath).catch(() => null);
-    return details !== null && Date.now() - details.mtimeMs > 60_000;
-  }
-  try { process.kill(lock.pid, 0); return false; }
-  catch (error) { return error.code === 'ESRCH'; }
+  return acquireOwnerLock(
+    path.join(directory, filename),
+    { onTimeout: () => syncError(timeoutCode), requireToken: true },
+    operation,
+  );
 }
 
 async function runQuarantineWriter(directory, filename, identity, marker, bytes) {
