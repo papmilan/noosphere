@@ -6,6 +6,7 @@ import {
   appendFile,
   cp,
   mkdir,
+  realpath,
   readdir,
   readFile,
   rm,
@@ -370,12 +371,13 @@ async function copyRuntime(
   entries,
   { dereference = false } = {},
 ) {
-  if (path.resolve(source) === path.resolve(destination)) return;
+  if (await sameRealPath(source, destination)) return;
   await mkdir(destination, { recursive: true, mode: 0o700 });
   for (const entry of entries) {
     const from = path.join(source, entry);
-    if (await exists(from)) {
-      await cp(from, path.join(destination, entry), {
+    const to = path.join(destination, entry);
+    if (await exists(from) && !(await sameRealPath(from, to))) {
+      await cp(from, to, {
         dereference,
         recursive: true,
         force: true,
@@ -384,6 +386,19 @@ async function copyRuntime(
           path.basename(file) !== 'node_modules',
       });
     }
+  }
+}
+
+// The installed relayer's file: dependency can be a symlink back to the
+// canonical secure-fs runtime. Comparing lexical paths alone then asks cp() to
+// copy a directory onto itself during a reinstall (ERR_FS_CP_EINVAL).
+async function sameRealPath(left, right) {
+  try {
+    return (await realpath(left)) === (await realpath(right));
+  } catch {
+    // A missing target cannot be the source. Keep the normal copy path, which
+    // creates it as needed.
+    return false;
   }
 }
 
