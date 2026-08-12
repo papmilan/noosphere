@@ -40,3 +40,7 @@ deploy/**/*.env
 .noosphere/journal.md
 noosphere-relayer/.noosphere-local-memory.json
 noosphere-relayer/.noosphere-runtime/
+
+# motion-dev MCP offline cache, regenerated on demand
+docs/motion-docs.db
+.noosphere/instructions.md
