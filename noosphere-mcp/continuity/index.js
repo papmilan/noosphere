@@ -6,7 +6,10 @@ import { createReadStream } from 'node:fs';
 import {
   access,
   mkdir,
+  readFile,
+  rm,
   stat,
+  writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +28,7 @@ import { writeHint } from '../lifecycle/ide-bridge.js';
 import { runSetupWizard, runCredentialsCommand } from './credentials-cli.js';
 import { runOllamaSession } from './ollama.js';
 import { workspaceFingerprintHex as workspaceFingerprint, observeRepository, classifyCompatibility } from './acp/git-state.js';
+import { recordCommitObservation } from './acp/commit-observations.js';
 import { readState, writeState, validateState, buildInitialState } from './acp/store.js';
 import { decodeEnvelope, encodeEnvelope } from './acp/wire.js';
 import { applyUpdate } from './acp/merge.js';
@@ -230,6 +234,12 @@ try {
       break;
     case 'journal':
       await journalFromCli(projectDir);
+      break;
+    case 'observe':
+      await observeFromCli(projectDir);
+      break;
+    case 'hooks':
+      await hooksFromCli(projectDir);
       break;
     case 'master-prompt':
       await masterPromptFromCli(projectDir);
@@ -1758,6 +1768,102 @@ async function rememberFromCli(root) {
     client: readFlag('--client') || 'generic-cli',
   });
   process.stdout.write(`${JSON.stringify(response, null, 2)}\n`);
+}
+
+// `--git-path` resolves core.hooksPath and worktree layouts, so this is correct
+// where `.git/hooks` is merely the common case.
+async function hooksDirectory(root) {
+  const { stdout } = await execFileAsync('git', ['rev-parse', '--git-path', 'hooks'], { cwd: root });
+  return path.resolve(root, stdout.trim());
+}
+
+async function hooksFromCli(root) {
+  // Declared here rather than at module scope: the command switch runs before
+  // module-level `const`s further down the file have initialized.
+  //
+  // The marker identifies a hook this tool wrote. Uninstall refuses to touch
+  // anything without it, so a developer's own post-commit hook is never removed
+  // by us.
+  const HOOK_MARKER = '# noosphere-commit-observer';
+  // Output is discarded, not just the exit status: `|| true` keeps a missing or
+  // failing CLI from mattering, but a "command not found" line printed on every
+  // single commit is exactly the kind of noise that gets a hook deleted.
+  const HOOK_LINE = 'noosphere observe --quiet --source git-hook >/dev/null 2>&1 || true';
+  const POST_COMMIT_HOOK = `#!/bin/sh
+${HOOK_MARKER}
+# Records the measured repository position after each commit.
+# Installed by \`noosphere hooks install\`; remove with \`noosphere hooks uninstall\`.
+# Failures are deliberately silent: git ignores this hook's exit status, and
+# telemetry must never be able to fail a developer's commit.
+${HOOK_LINE}
+`;
+
+  await assertGitRepository(root);
+  const sub = process.argv[3];
+  if (sub !== 'install' && sub !== 'uninstall') {
+    throw new Error('Usage: noosphere hooks <install|uninstall>');
+  }
+  const directory = await hooksDirectory(root);
+  const hook = path.join(directory, 'post-commit');
+  const existing = await readFile(hook, 'utf8').catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+
+  if (sub === 'uninstall') {
+    if (existing === null) {
+      console.log('No post-commit hook installed.');
+      return;
+    }
+    if (!existing.includes(HOOK_MARKER)) {
+      throw new Error(`Refusing to remove ${hook}: it was not installed by Noosphere.`);
+    }
+    await rm(hook, { force: true });
+    console.log(`Removed ${hook}.`);
+    return;
+  }
+
+  if (existing !== null) {
+    if (existing.includes(HOOK_MARKER)) {
+      console.log(`Already installed at ${hook}.`);
+      return;
+    }
+    // Clobbering a developer's own hook earns permanent distrust, so print the
+    // one line they need and let them place it themselves.
+    throw new Error(
+      `Refusing to overwrite the existing post-commit hook at ${hook}.\n` +
+      `Add this line to it instead:\n\n  ${HOOK_LINE}\n`,
+    );
+  }
+
+  await mkdir(directory, { recursive: true });
+  await writeFile(hook, POST_COMMIT_HOOK, { mode: 0o755 });
+  console.log(`Installed ${hook}:\n`);
+  console.log(POST_COMMIT_HOOK);
+}
+
+// Records the measured repository position. Unlike `exec checkpoint` this
+// asserts nothing about intent — see docs/design/specs/2026-08-12-inferred-continuity.md.
+//
+// Every failure is a skip, not an error: this runs from a post-commit hook, and
+// a telemetry command that reports failures on every commit gets uninstalled by
+// the developer within a day, taking the feature with it. `--quiet` is what the
+// hook uses; run it by hand without the flag to see what was recorded.
+async function observeFromCli(root) {
+  const quiet = process.argv.includes('--quiet');
+  const source = readFlag('--source') || 'cli';
+  try {
+    await assertGitRepository(root);
+    const observation = await recordCommitObservation(root, new Date().toISOString(), { source });
+    if (quiet) return;
+    if (observation === null) {
+      console.log('No commit to observe yet.');
+      return;
+    }
+    console.log(`Observed ${observation.head.slice(0, 12)} on ${observation.branch ?? 'detached HEAD'}${observation.dirty ? ' (dirty)' : ''}.`);
+  } catch (error) {
+    if (!quiet) throw error;
+  }
 }
 
 async function journalFromCli(root) {
