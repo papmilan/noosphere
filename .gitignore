@@ -44,3 +44,4 @@ noosphere-relayer/.noosphere-runtime/
 # motion-dev MCP offline cache, regenerated on demand
 docs/motion-docs.db
 .noosphere/instructions.md
+.noosphere/commit-observations.json
