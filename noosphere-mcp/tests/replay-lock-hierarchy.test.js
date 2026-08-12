@@ -94,6 +94,89 @@ test('ranked scope enforces ascending ranks, lexical peers, and reverse release'
   assert.deepEqual(released, ['identity-b', 'identity-a', 'project']);
 });
 
+// A lock file removed or tampered with underneath a live holder is
+// owner-intervention territory for that one artifact, by design. The healthy
+// locks beneath it are not: the refusal used to leave the failed entry on the
+// held stack, so every lock under it answered lock-release-order-invalid from
+// then on and no retry could unwind the scope.
+test('a refused release still unwinds the locks below it', async () => {
+  assert.ok(ranksModule, 'production lock-rank module must exist');
+  const {
+    LOCK_RANKS,
+    acquireRankedLock,
+    createRankedLockScope,
+  } = ranksModule;
+  const scope = createRankedLockScope();
+  const released = [];
+  const project = await acquireRankedLock(scope, {
+    rank: LOCK_RANKS.replayProject,
+    key: 'replay-project:p',
+    acquire: async () => ({
+      release: async () => { released.push('project'); },
+    }),
+  });
+  const identityA = await acquireRankedLock(scope, {
+    rank: LOCK_RANKS.replayIdentity,
+    key: 'replay-identity:p:a',
+    acquire: async () => ({
+      release: async () => { released.push('identity-a'); },
+    }),
+  });
+  const identityB = await acquireRankedLock(scope, {
+    rank: LOCK_RANKS.replayIdentity,
+    key: 'replay-identity:p:b',
+    acquire: async () => ({
+      release: async () => {
+        throw Object.assign(
+          new Error('lock disappeared before release'),
+          { code: 'replay-lock-malformed' },
+        );
+      },
+    }),
+  });
+
+  await assert.rejects(
+    identityB.release(),
+    error => error.code === 'replay-lock-malformed',
+  );
+  await identityA.release();
+  await project.release();
+  assert.deepEqual(released, ['identity-a', 'project']);
+});
+
+// A release thrown out of a `finally` replaces the error that explains what
+// actually went wrong, so the caller sees "lock disappeared" instead of the
+// failure that ended the operation.
+test('releasing held locks never reports over the failure that caused it', async () => {
+  assert.ok(ranksModule, 'production lock-rank module must exist');
+  const { releaseHeldLocks } = ranksModule;
+  const released = [];
+  const locks = () => [
+    {
+      release: async () => {
+        throw Object.assign(
+          new Error('lock disappeared before release'),
+          { code: 'replay-lock-malformed' },
+        );
+      },
+    },
+    { release: async () => { released.push('healthy'); } },
+  ];
+
+  await assert.rejects(
+    releaseHeldLocks(locks(), undefined),
+    error => error.code === 'replay-lock-malformed',
+  );
+  assert.deepEqual(released, ['healthy']);
+
+  const cause = Object.assign(
+    new Error('observation failed'),
+    { code: 'replay-observation-failed' },
+  );
+  await releaseHeldLocks(locks(), cause);
+  assert.deepEqual(released, ['healthy', 'healthy']);
+});
+
 test('same-rank locks reject non-lexical order before acquisition', async () => {
   assert.ok(ranksModule, 'production lock-rank module must exist');
   const {

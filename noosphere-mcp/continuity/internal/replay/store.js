@@ -28,7 +28,10 @@ import {
 import {
   acquireReplayCatalogLock,
 } from './lock.js';
-import { createRankedLockScope } from './lock-ranks.js';
+import {
+  createRankedLockScope,
+  releaseHeldLocks,
+} from './lock-ranks.js';
 import {
   parseReplayCatalog,
   parseReplayManifest,
@@ -181,6 +184,7 @@ export async function ensureReplayProject({
   const key = await ensureReplayKey({ env });
   const scope = createRankedLockScope();
   const catalogLock = await acquireReplayCatalogLock({ scope, env, key });
+  let operationFailure;
   try {
     const catalog = await readCatalog({ env, key });
     const paths = replayProjectPaths({ env, projectIdentityDigest });
@@ -226,8 +230,11 @@ export async function ensureReplayProject({
       );
     }
     return Object.freeze({ key, paths });
+  } catch (error) {
+    operationFailure = error;
+    throw error;
   } finally {
-    await catalogLock.release();
+    await releaseHeldLocks([catalogLock], operationFailure);
   }
 }
 
