@@ -56,11 +56,23 @@ export async function withOwnerLock(lockPath, { onTimeout, requireToken = false 
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   let handle;
   while (!handle) {
+    // The lock is held only once its contents land. A failure after the
+    // exclusive create — ENOSPC, EIO — used to leave the loop with the
+    // descriptor still open and the empty lock file still on disk: the process
+    // leaked a handle, and every other waiter sat out ORPHAN_LOCK_MS for a lock
+    // nobody held. Publish `handle` only after the write, and hand back what we
+    // created if it does not.
+    let opened;
     try {
-      handle = await open(lockPath, 'wx', 0o600);
-      await handle.writeFile(JSON.stringify({ pid: process.pid, token, created_at: Date.now() }));
-      await handle.sync();
+      opened = await open(lockPath, 'wx', 0o600);
+      await opened.writeFile(JSON.stringify({ pid: process.pid, token, created_at: Date.now() }));
+      await opened.sync();
+      handle = opened;
     } catch (error) {
+      if (opened) {
+        await opened.close().catch(() => {});
+        await rm(lockPath, { force: true }).catch(() => {});
+      }
       if (error.code !== 'EEXIST') throw error;
       if (Date.now() >= deadline) throw onTimeout();
       if (await staleLock(lockPath, requireToken)) await rm(lockPath, { force: true });
@@ -68,7 +80,8 @@ export async function withOwnerLock(lockPath, { onTimeout, requireToken = false 
     }
   }
   try { return await operation(); } finally {
-    await handle.close();
+    // A close that fails must not strand the lock file behind it.
+    await handle.close().catch(() => {});
     const current = await readLockJson(lockPath);
     if (current?.token === token) await rm(lockPath, { force: true });
   }
