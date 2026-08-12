@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, open, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -59,5 +60,37 @@ describe('ACP owner lock', () => {
     })));
 
     assert.equal(maxInside, 1);
+  });
+
+  // A disk that fills between the exclusive create and the write leaves the
+  // acquisition half-done. The descriptor must not escape with it, and neither
+  // must the empty lock file: an abandoned lock is one nobody can clear until
+  // the orphan sweep, a minute later.
+  it('closes the handle and removes the lock when the lock write fails', async () => {
+    const lockPath = path.join(await temp(), 'owner.lock');
+    const probe = await open(path.join(await temp(), 'probe'), 'w');
+    const fileHandle = Object.getPrototypeOf(probe);
+    await probe.close();
+
+    const realWriteFile = fileHandle.writeFile;
+    let leaked;
+    fileHandle.writeFile = async function failingWriteFile(...args) {
+      if (this.fd === undefined) return realWriteFile.apply(this, args);
+      leaked = this;
+      fileHandle.writeFile = realWriteFile;
+      throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
+    };
+
+    try {
+      await assert.rejects(
+        withOwnerLock(lockPath, { onTimeout }, async () => 'unreachable'),
+        (error) => error.code === 'ENOSPC',
+      );
+    } finally {
+      fileHandle.writeFile = realWriteFile;
+    }
+
+    assert.equal(leaked.fd, -1, 'the lock descriptor was left open');
+    assert.equal(existsSync(lockPath), false, 'the abandoned lock file was left behind');
   });
 });
