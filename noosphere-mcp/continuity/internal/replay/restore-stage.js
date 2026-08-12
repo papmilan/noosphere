@@ -8,6 +8,7 @@ import {
   matchRestoreCandidateByTuple,
 } from '../restore/candidate-store.js';
 import { acquireCandidateIndexLock } from '../restore/candidate-index-lock.js';
+import { releaseHeldLocks } from './lock-ranks.js';
 import { RESTORE_SLOTS } from '../restore/constants.js';
 import { recallRestoreSource } from '../restore/recall.js';
 import { assertInteractiveStreams } from '../exact-confirmation.js';
@@ -113,6 +114,7 @@ export async function stageReplayAwareRestoreCandidate({
       slot,
       candidatePayloadHash,
     });
+    let operationFailure;
     try {
       const match = await matchRestoreCandidateByTuple({
         projectRoot,
@@ -174,8 +176,11 @@ export async function stageReplayAwareRestoreCandidate({
         replayClassification: replay.classification,
         projectIdentityDigest,
       });
+    } catch (error) {
+      operationFailure = error;
+      throw error;
     } finally {
-      await indexLock.release();
+      await releaseHeldLocks([indexLock], operationFailure);
     }
   });
 }

@@ -2,7 +2,10 @@ import {
   acquireReplayIdentityLock,
   acquireReplayProjectLock,
 } from './lock.js';
-import { createRankedLockScope } from './lock-ranks.js';
+import {
+  createRankedLockScope,
+  releaseHeldLocks,
+} from './lock-ranks.js';
 import {
   listReplayJournals,
   recoverReplayJournal,
@@ -40,6 +43,7 @@ export async function withReplayOperation({
     projectIdentityDigest,
   });
   const identityLocks = [];
+  let operationFailure;
   try {
     const journals = await listReplayJournals({
       env,
@@ -113,8 +117,13 @@ export async function withReplayOperation({
       onStep,
     });
     return await callback(Object.freeze({ env, key, paths, scope }));
+  } catch (error) {
+    operationFailure = error;
+    throw error;
   } finally {
-    for (const lock of identityLocks.reverse()) await lock.release();
-    await projectLock.release();
+    await releaseHeldLocks(
+      [...identityLocks].reverse().concat(projectLock),
+      operationFailure,
+    );
   }
 }

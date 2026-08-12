@@ -91,6 +91,22 @@ function assertAcquisitionOrder(state, rank, key) {
   }
 }
 
+// Release locks in the order given, refusals included. A lock whose file was
+// removed or tampered with is owner-intervention territory by design; the
+// healthy locks under it are not, and stopping at the first refusal turns one
+// artifact the owner must clear into the whole stack. The first refusal is
+// still reported — but never in place of `operationFailure`, because a release
+// error thrown out of a `finally` replaces the error that explains what
+// actually went wrong.
+export async function releaseHeldLocks(locks, operationFailure) {
+  let releaseFailure;
+  for (const lock of locks) {
+    try { await lock.release(); }
+    catch (error) { releaseFailure ??= error; }
+  }
+  if (releaseFailure && !operationFailure) throw releaseFailure;
+}
+
 export async function acquireRankedLock(scope, {
   rank,
   key,
@@ -142,9 +158,19 @@ export async function acquireRankedLock(scope, {
           'locks must be released in reverse acquisition order',
         );
       }
-      await entry.underlying.release();
-      state.held.pop();
-      entry.released = true;
+      // The held stack tracks acquisition order, not what is on disk. When the
+      // underlying release refuses — a lock file removed or tampered with
+      // underneath us — the error still propagates, but the entry comes off the
+      // stack so the locks below it can still be released. Leaving it there made
+      // every one of them answer lock-release-order-invalid from then on, so a
+      // single refusal stranded the whole scope rather than one artifact, and no
+      // retry could unwind it.
+      try {
+        await entry.underlying.release();
+      } finally {
+        state.held.pop();
+        entry.released = true;
+      }
     },
   });
 }
