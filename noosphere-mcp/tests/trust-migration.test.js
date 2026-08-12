@@ -144,7 +144,7 @@ function countOccurrences(haystack, needle) {
  * which returns the string to send or null to keep waiting. Resolves
  * `{ stdout, code }`; rejects like execFile on a non-zero exit.
  */
-function driveLinuxPty(context, command, next, expected = 2) {
+function driveLinuxPty(context, command, next, expected = 2, timeoutMs = 120_000) {
   return new Promise((resolve, reject) => {
     const child = spawn('script', ['-q', '-e', '-c', command.map(shellQuote).join(' '), '/dev/null'], {
       cwd: context.project,
@@ -152,6 +152,21 @@ function driveLinuxPty(context, command, next, expected = 2) {
     });
     let transcript = '';
     let sent = 0;
+    // Nothing below settles this promise unless `script` exits, and `script`
+    // only exits once its stdin is closed (see the send loop). A ceremony that
+    // prints fewer prompts than expected therefore used to hang here forever:
+    // the phrase count never reached `expected`, stdin stayed open, script sat
+    // blocked on a read nobody would answer, and the shard burned the full
+    // 1800s test timeout before CI killed the orphaned script/node pair. Bound
+    // it, and report the transcript and how far the ceremony actually got, so
+    // the next occurrence is a diagnosable failure in seconds instead.
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(Object.assign(
+        new Error(`migrate PTY did not exit within ${timeoutMs}ms after ${sent}/${expected} phrases`),
+        { stdout: transcript },
+      ));
+    }, timeoutMs);
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {
       transcript += chunk;
@@ -165,8 +180,9 @@ function driveLinuxPty(context, command, next, expected = 2) {
         if (sent === expected) child.stdin.end();
       }
     });
-    child.on('error', reject);
+    child.on('error', (error) => { clearTimeout(timer); reject(error); });
     child.on('close', (code) => {
+      clearTimeout(timer);
       child.stdin.destroy();
       if (code === 0) resolve({ stdout: transcript, code });
       else reject(Object.assign(new Error(`migrate exited ${code}`), { code, stdout: transcript }));
