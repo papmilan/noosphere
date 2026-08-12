@@ -17,10 +17,13 @@ const execFileAsync = promisify(execFile);
 const CLI = fileURLToPath(new URL('../continuity/index.js', import.meta.url));
 const temporary = [];
 
-// Drives the real CLI. NOOSPHERE_HOME is redirected so a suite that spawns the
-// binary cannot write into the developer's own state.
+// Drives the real CLI. `--path` is not optional here: the CLI resolves its
+// project directory as --path > NOOSPHERE_PROJECT_DIR > INIT_CWD > cwd, and npm
+// sets INIT_CWD, so under `npm test` a cwd-only invocation would operate on the
+// checkout instead of this fixture — installing a hook into the real repository
+// and reporting success. NOOSPHERE_HOME is redirected for the same reason.
 async function hooks(root, sub) {
-  return execFileAsync(process.execPath, [CLI, 'hooks', sub], {
+  return execFileAsync(process.execPath, [CLI, 'hooks', sub, '--path', root], {
     cwd: root,
     env: { ...process.env, NOOSPHERE_HOME: path.join(root, 'home') },
   });
@@ -98,9 +101,13 @@ describe('commit observations', () => {
     const root = await repository();
     await hooks(root, 'install');
     const hook = path.join(root, '.git', 'hooks', 'post-commit');
-    const details = await fs.stat(hook);
-
-    assert.equal(Boolean(details.mode & 0o100), true, 'hook must be executable');
+    // Windows has no meaningful executable bit and Git for Windows runs hooks
+    // through sh regardless, so this is asserted only where it decides whether
+    // the hook runs at all.
+    if (process.platform !== 'win32') {
+      const details = await fs.stat(hook);
+      assert.equal(Boolean(details.mode & 0o100), true, 'hook must be executable');
+    }
     const body = await fs.readFile(hook, 'utf8');
     assert.match(body, /noosphere observe --quiet --source git-hook/);
     // Failure must be invisible: git ignores the exit status anyway, and a line

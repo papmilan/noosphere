@@ -5,11 +5,10 @@ import { execFile, spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import {
   access,
+  chmod,
   mkdir,
-  readFile,
   rm,
   stat,
-  writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1805,10 +1804,11 @@ ${HOOK_LINE}
   }
   const directory = await hooksDirectory(root);
   const hook = path.join(directory, 'post-commit');
-  const existing = await readFile(hook, 'utf8').catch((error) => {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  });
+  // Bounded and reparse-checked rather than a bare read: `.git/hooks` is a
+  // classic place to plant a symlink, and a hook that is one is refused by the
+  // write below rather than followed.
+  const raw = await readBoundedRegularFile(hook, { maxBytes: 64 * 1024 }).catch(() => null);
+  const existing = raw === null ? null : raw.toString('utf8');
 
   if (sub === 'uninstall') {
     if (existing === null) {
@@ -1837,7 +1837,13 @@ ${HOOK_LINE}
   }
 
   await mkdir(directory, { recursive: true });
-  await writeFile(hook, POST_COMMIT_HOOK, { mode: 0o755 });
+  // atomicWrite, not writeFile: it refuses a reparse point at the destination,
+  // which is the guarantee that matters when the destination lives in .git.
+  // It also carries an existing file's mode forward but leaves a NEW file at
+  // the umask default, so the executable bit has to be set explicitly or git
+  // silently never runs the hook.
+  await atomicWrite(hook, POST_COMMIT_HOOK);
+  if (process.platform !== 'win32') await chmod(hook, 0o755);
   console.log(`Installed ${hook}:\n`);
   console.log(POST_COMMIT_HOOK);
 }
