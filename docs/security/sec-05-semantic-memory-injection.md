@@ -1,9 +1,22 @@
 # SEC-05 — Semantic-memory prompt/control injection: threat model & plan
 
-> **Status: DESIGN v4 (REMEDIATED, no implementation started).** SEC-01 and
-> SEC-03 are CLOSED. SEC-05 is the active security milestone and the last
-> public-release blocker. This document is the pre-implementation design, threat
-> model, and PR roadmap. No implementation code is changed by this document.
+> **Status: HISTORICAL — DESIGN v4, implemented and closed.** This is the
+> pre-implementation threat model, design, and PR roadmap that SEC-05 was built
+> from, written 2026-07-23 and preserved as authored. It changes no
+> implementation code.
+>
+> SEC-05 has since shipped and closed, along with SEC-01, SEC-01b, and SEC-03.
+> The §7 roadmap was followed phase for phase: Phase 1 authenticated trust store
+> (#25), Phase 2 normalizer closure (#27), Phase 3 sink unification (#28),
+> Phase 4 restore/approval/generations (#29–#34), Phase 5 retrieval authenticity
+> and replay (#35). Read the roadmap, the open questions in §8, and every
+> "active milestone" or "no implementation started" framing below as the state of
+> the world on the date of writing, not as current. For what actually shipped,
+> see `SEC-05-PHASE-5-SPEC.md` and the phase verification documents beside it.
+>
+> The threat model (§2), attack inventory (§3), architecture (§4), and security
+> invariants (§5) remain the reference for why the shipped design is shaped the
+> way it is.
 >
 > **v4** closes the final review's majors/minors atop v3: full trust-store
 > rollback classified as an explicit out-of-scope accepted residual (§4.8.1),
