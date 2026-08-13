@@ -135,6 +135,36 @@ describe('commit observations', () => {
     assert.equal(await fs.readFile(hook, 'utf8'), mine, 'foreign hook must be untouched');
   });
 
+  it('keeps its telemetry out of git in a project that never gitignored it', async () => {
+    const root = await repository();
+    await recordCommitObservation(root, '2026-08-13T00:00:00.000Z');
+
+    // The fixture has no .gitignore at all, which is the situation in every
+    // project except the one this feature was developed in: installing the hook
+    // there used to leave an untracked file after the first commit.
+    const visible = async () => {
+      const { stdout } = await execFileAsync(
+        'git',
+        ['status', '--porcelain=v1', '--untracked-files=all'],
+        { cwd: root },
+      );
+      return /commit-observations\.json/.test(stdout);
+    };
+    assert.equal(await visible(), false);
+
+    // And a file left by an older build stays hidden, which the writing path
+    // alone could not do: every later run on an unchanged position dedupes and
+    // returns before any write.
+    await fs.rm(path.join(root, '.git', 'info', 'exclude'));
+    assert.equal(await visible(), true, 'precondition: without the exclude it is visible');
+    assert.deepEqual(
+      await recordCommitObservation(root, '2026-08-13T00:00:01.000Z'),
+      (await readCommitObservations(root)).at(-1),
+      'an unchanged position is a repeat observation, not a new one',
+    );
+    assert.equal(await visible(), false, 'a duplicate observation still refreshes the exclude');
+  });
+
   it('survives a corrupt telemetry file rather than failing a read', async () => {
     const root = await repository();
     await recordCommitObservation(root, '2026-08-12T00:00:00.000Z');

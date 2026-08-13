@@ -1,6 +1,7 @@
 import path from 'node:path';
 
 import { atomicOwnerOnlyWrite, readBoundedRegularFile } from '../secure-fs.js';
+import { ensureRuntimeStateIgnored } from '../csp/storage.js';
 import { observeRepository } from './git-state.js';
 
 // A commit observation records where the tree WAS. It carries no step, no
@@ -52,6 +53,12 @@ export async function readCommitObservations(root) {
  * repository), which is a skip rather than a failure.
  */
 export async function recordCommitObservation(root, now, { source = 'git-hook' } = {}) {
+  // Before the deduplication below, not after it: this runs from a hook in
+  // projects that never edited a .gitignore for this file, and a repeat
+  // observation of an already-recorded position returns early. Refreshing the
+  // exclude only on the writing path leaves a file written by an older build
+  // untracked-but-visible forever, because every later run is a duplicate.
+  await ensureRuntimeStateIgnored(root);
   const observed = await observeRepository(root);
   if (!observed.head) return null;
   const observation = {

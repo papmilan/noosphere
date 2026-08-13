@@ -200,6 +200,19 @@ describe('journal drafts', () => {
     assert.equal(await journalText(root), before);
   });
 
+  it('keeps a pending draft out of git in a project that never gitignored it', async () => {
+    const root = await repository();
+    await commit(root, 'first');
+    await journal(root, 'draft');
+
+    const { stdout } = await execFileAsync(
+      'git',
+      ['status', '--porcelain=v1', '--untracked-files=all'],
+      { cwd: root },
+    );
+    assert.doesNotMatch(stdout, /pending-journal\.md/);
+  });
+
   it('discards a pending draft on request', async () => {
     const root = await repository();
     await commit(root, 'first');

@@ -11,6 +11,7 @@ import {
   removeRepositoryFile,
 } from '../secure-fs.js';
 import { assertInteractiveStreams, readExactConfirmation } from '../internal/exact-confirmation.js';
+import { ensureRuntimeStateIgnored } from '../csp/storage.js';
 import { readCommitObservations } from './commit-observations.js';
 
 // Item 4 of docs/design/specs/2026-08-12-inferred-continuity.md: a journal
@@ -71,6 +72,10 @@ export async function readJournalDraft(root) {
 }
 
 export async function writeJournalDraft(root, text) {
+  // Same reason as the observations file: a draft is unconfirmed local work,
+  // and a project that never added a .gitignore line for it must not find one
+  // untracked the first time it drafts.
+  await ensureRuntimeStateIgnored(root);
   await atomicRepositoryWrite(pendingJournalPath(root), text, { root });
 }
 
