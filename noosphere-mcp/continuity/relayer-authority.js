@@ -146,7 +146,40 @@ export async function secureRelayerFetch(url, options = {}, { env = process.env,
   if (authority.authenticate && token) {
     headers.authorization = `Bearer ${token}`;
   }
-  return fetchImpl(url, { ...options, headers, redirect: 'error' });
+  try {
+    return await fetchImpl(url, { ...options, headers, redirect: 'error' });
+  } catch (error) {
+    // Authority refusals are thrown above this, so only transport failures
+    // reach here and only they are relabelled.
+    throw describeRelayerFailure(error, authority.origin);
+  }
+}
+
+// Node answers every transport failure with the same bare `fetch failed`
+// TypeError and hides the reason in `cause`: ECONNREFUSED, a DNS miss, a TLS
+// error and a refused redirect are indistinguishable in the message. Twenty-one
+// of those reached a manager log saying nothing about what could not be reached
+// or why, and the installer had grown its own private unwrapping to compensate.
+//
+// The cause is the part worth reading, so it goes in the message, next to the
+// origin the request was actually for.
+function describeRelayerFailure(error, origin) {
+  const detail = error?.cause?.code
+    ?? error?.cause?.message
+    ?? error?.message
+    ?? 'unknown error';
+  const message = `relayer request to ${origin} failed: ${detail}`;
+  // A TypeError's message is writable, so the original error keeps its class,
+  // its cause and its stack — callers that check for one still see one. A
+  // DOMException's is not (AbortSignal.timeout rejects with one), so that path
+  // gets a wrapper carrying the original as its cause.
+  try {
+    error.message = message;
+    if (error.message === message) return error;
+  } catch {
+    // Fall through to the wrapper below.
+  }
+  return Object.assign(new Error(message, { cause: error }), { name: error?.name ?? 'Error' });
 }
 
 // The single decision point. Returns { origin, authenticate } when the request may
