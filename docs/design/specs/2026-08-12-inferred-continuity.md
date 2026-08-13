@@ -1,7 +1,12 @@
 # Inferred continuity — telemetry-backed state without the logging ceremony
 
-Status: DESIGN. No implementation started. Item 3 is specified for build; items
-1, 4, and 6 are scoped but deferred; items 2 and 5 are rejected with reasons.
+Status: BUILT (items 1, 3, 4, 6). Items 2 and 5 remain rejected with reasons.
+The design below is preserved as written; where the build diverged, the reason
+is in the commit that diverged. Item 3 landed as a commit observation rather
+than an execution envelope (#67), item 4 as hash-bound journal drafts (#68),
+item 6 as a separate inferred lane rather than a field on tracked CSP (#69),
+and item 1 as a loopback-only local model whose output can only ever reach that
+lane. §5's success criterion has not been measured yet.
 
 ## 1. The problem, measured
 
@@ -55,10 +60,10 @@ may do so.
 
 | # | Idea | Verdict |
 |---|------|---------|
-| 3 | Save points on build events | **Build now** — specified below |
-| 4 | Retroactive journal draft + confirmation | Deferred, scoped in §6 |
-| 1 | Infer state from git/file telemetry | Deferred, constrained in §6 |
-| 6 | Confidence-tagged lazy state | Deferred, respecified as provenance in §6 |
+| 3 | Save points on build events | **Built** — specified below; shipped as commit observations |
+| 4 | Retroactive journal draft + confirmation | **Built** — scoped in §6 |
+| 1 | Infer state from git/file telemetry | **Built** — constrained in §6 |
+| 6 | Confidence-tagged lazy state | **Built** — respecified as provenance in §6 |
 | 2 | Shell history as telemetry | **Rejected** — §7 |
 | 5 | Reactive ACP handoffs built at receive time | **Rejected** — §7 |
 
