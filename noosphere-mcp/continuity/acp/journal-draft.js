@@ -10,7 +10,7 @@ import {
   readBoundedRegularFile,
   removeRepositoryFile,
 } from '../secure-fs.js';
-import { readExactConfirmation } from '../internal/exact-confirmation.js';
+import { assertInteractiveStreams, readExactConfirmation } from '../internal/exact-confirmation.js';
 import { readCommitObservations } from './commit-observations.js';
 
 // Item 4 of docs/design/specs/2026-08-12-inferred-continuity.md: a journal
@@ -160,6 +160,16 @@ export async function confirmJournalDraft({
 // Interactive only, for the same reason the trust ceremony is: an agent that can
 // draft must not also be able to approve its own draft. There is no --yes.
 async function ttyConfirm({ text, rawHash, phrase, draftPath, byteLength, input, output }) {
+  // Checked before anything is printed, matching approval-service: a scripted
+  // caller should get one refusal, not the whole draft echoed into its log
+  // followed by a refusal.
+  assertInteractiveStreams({
+    input,
+    output,
+    code: 'journal-confirm-requires-tty',
+    message:
+      'confirming a journal draft requires an interactive terminal; run this yourself, in your own shell',
+  });
   output.write([
     '',
     `Draft:  ${draftPath}`,

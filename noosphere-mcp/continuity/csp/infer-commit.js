@@ -37,6 +37,21 @@ const GIT_MAX_BUFFER = 8_000_000;
 
 const execFileAsync = promisify(execFile);
 
+// Asking for a shape in the prompt does not get one. On a real 29 KB commit,
+// qwen2.5-coder:14b ignored the instruction and wrote a prose summary of the
+// diff; with `format: 'json'` it produced valid JSON of the wrong shape —
+// specifically, it mirrored an object shape it had just read *in the diff*,
+// which is a small demonstration of why the output filter exists. A schema is
+// what actually constrains the keys, so it is sent as one.
+const RESPONSE_SCHEMA = {
+  type: 'object',
+  properties: {
+    current_task: { type: ['string', 'null'] },
+    next_action: { type: ['string', 'null'] },
+  },
+  required: ['current_task', 'next_action'],
+};
+
 const SYSTEM_PROMPT = [
   'You summarize one Git commit into a guess about what the author is working on.',
   '',
@@ -48,6 +63,11 @@ const SYSTEM_PROMPT = [
   'Answer with a single JSON object and nothing else:',
   '{"current_task": <string or null>, "next_action": <string or null>}',
   '',
+  // Prompt wording was tuned against qwen2.5-coder:14b on two real commits from
+  // this repository and left where it started: naming the author explicitly
+  // produced "code-review", and adding a worked example produced "diffusion".
+  // Suggestion quality tracks the model, not the phrasing, so this stays plain
+  // and the owner filters — see the note on yield in §5's review.
   'current_task: what the author appears to be working on, one short sentence.',
   'next_action: the next step the commit implies, one short sentence, or null',
   'when the commit does not imply one. Use null rather than guessing wildly.',
@@ -82,6 +102,7 @@ export async function inferFromCommit(root, {
     host: resolvedHost,
     model,
     stream: false,
+    format: RESPONSE_SCHEMA,
     messages: buildInferenceMessages(commit),
     ...(fetchImpl ? { fetchImpl } : {}),
   });
@@ -182,11 +203,17 @@ async function readCommit(root, rev) {
   if (meta === null) return null;
   const [head, date, ...message] = meta.split('\n');
   if (!/^[0-9a-f]{40}$/u.test(head ?? '')) return null;
-  const stat = await git(root, ['show', '--stat', '--format=', rev]).catch(() => '');
-  // Best-effort: a commit whose patch is too large to buffer still yields a
-  // usable summary from its message and stat.
-  const patch = await git(root, ['show', '--patch', '--no-color', '--no-ext-diff', '--format=', rev])
-    .catch(() => '');
+  const stat = await git(root, ['show', '--stat', '--first-parent', '--format=', rev]).catch(() => '');
+  // `--first-parent` because `git show` on a merge defaults to a combined diff,
+  // which is empty for a clean merge: without it, every PR merge — the majority
+  // of commits on this repository's main — reaches the model as a subject line
+  // and nothing else.
+  //
+  // Best-effort beyond that: a commit whose patch is too large to buffer still
+  // yields a usable summary from its message and stat.
+  const patch = await git(root, [
+    'show', '--patch', '--no-color', '--no-ext-diff', '--first-parent', '--format=', rev,
+  ]).catch(() => '');
   return {
     head,
     date,

@@ -201,6 +201,9 @@ describe('inferred CSP state', () => {
 
     assert.notEqual(failure, null, 'promote must refuse a non-interactive caller');
     assert.match(failure.stderr, /requires an interactive terminal/);
+    // Refused before anything is printed: a scripted caller should not find the
+    // proposal echoed into its log ahead of the refusal.
+    assert.equal(failure.stdout, '');
     assert.equal(await loadState(root), null, 'nothing may be adopted without confirmation');
     assert.equal((await readInferredState(root)).next_action.value, 'run the suite');
   });
