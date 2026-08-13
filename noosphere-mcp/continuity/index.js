@@ -689,11 +689,11 @@ export async function watchProject(root, options = {}) {
   let stopped = false;
   const handleWatchError = async (error) => {
     if (stopped) return;
-    if (await gitDirectoryUnreachable(root)) {
+    if (await watchRootUnreachable(root)) {
       stopped = true;
       console.warn(
         `Noosphere continuity: ${config.project_id} is no longer reachable at ${root} `
-        + '(the disk was unmounted or the repository was removed); stopping this watcher. '
+        + '(the disk was unmounted or the directory was removed); stopping this watcher. '
         + 'It resumes automatically once the path is back.',
       );
       stopWatching();
@@ -786,11 +786,28 @@ export async function watchProject(root, options = {}) {
   });
 }
 
-// The git directory rather than the root: it covers an unmounted volume and a
-// repository that was deleted underneath the watcher, and it is one call either
-// way. A worktree's `.git` is a file, which access() answers the same.
-async function gitDirectoryUnreachable(root) {
-  return access(path.join(root, '.git')).then(() => false, () => true);
+// The watched directory itself, NOT `root/.git`.
+//
+// Probing `.git` looked strictly better — it seemed to cover both an unmounted
+// volume and a deleted repository for the same single call. It does not:
+// `assertGitRepository` accepts any path *inside* a work tree, so a watcher
+// rooted at a subdirectory has no `root/.git` at all and every healthy one
+// answered "unreachable". The first ordinary background failure — a relayer
+// that is merely down — then stopped it with a message blaming an unmounted
+// disk, and because the process exits 0 with the path still present, the
+// manager cleared its restart record and respawned it every five seconds with
+// the backoff bypassed.
+//
+// The failure being detected is a spawn whose *working directory* is gone, so
+// the working directory is the thing to probe. That also keeps the promise the
+// message makes: when this is true the manager skips the project, and it starts
+// it again when the path returns.
+//
+// A `.git` deleted under a still-present root is deliberately not covered: it
+// cannot be told apart from the subdirectory case, and guessing wrong there is
+// what caused this.
+async function watchRootUnreachable(root) {
+  return access(root).then(() => false, () => true);
 }
 
 async function prepareAutomaticBaseline(root, config) {
