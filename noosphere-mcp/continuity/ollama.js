@@ -290,7 +290,7 @@ export function buildOllamaHandoff(model, transcript) {
   ].join('\n\n');
 }
 
-function normalizeOllamaHost(host) {
+export function normalizeOllamaHost(host) {
   let value = String(host || DEFAULT_OLLAMA_HOST).trim();
   if (!/^https?:\/\//i.test(value)) value = `http://${value}`;
   value = value.replace(/\/+$/, '');

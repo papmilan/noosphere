@@ -114,6 +114,7 @@ import {
   updateRuntimeState,
 } from './csp/storage.js';
 import { recordRuntimeObservation } from './csp/runtime.js';
+import { inferFromCommit } from './csp/infer-commit.js';
 import {
   clearInferredFields,
   INFERRED_CLI_FIELDS,
@@ -250,6 +251,9 @@ try {
       break;
     case 'observe':
       await observeFromCli(projectDir);
+      break;
+    case 'infer':
+      await inferFromCli(projectDir);
       break;
     case 'hooks':
       await hooksFromCli(projectDir);
@@ -1882,6 +1886,36 @@ async function observeFromCli(root) {
     }
     console.log(`Observed ${observation.head.slice(0, 12)} on ${observation.branch ?? 'detached HEAD'}${observation.dirty ? ' (dirty)' : ''}.`);
   } catch (error) {
+    if (!quiet) throw error;
+  }
+}
+
+// Item 1 of docs/design/specs/2026-08-12-inferred-continuity.md. Deliberately
+// its own command rather than a line inside the post-commit hook: this spends a
+// model run on every invocation, and a hook that quietly starts inference on
+// each commit is a cost the developer never opted into. Add it to the hook by
+// hand — `noosphere infer --quiet >/dev/null 2>&1 || true` — once it is earning
+// its keep on this machine.
+async function inferFromCli(root) {
+  const quiet = process.argv.includes('--quiet');
+  try {
+    await assertGitRepository(root);
+    const { commit, recorded } = await inferFromCommit(root, {
+      rev: readFlag('--commit') || 'HEAD',
+      model: readFlag('--model') || process.env.NOOSPHERE_INFER_MODEL,
+    });
+    if (quiet) return;
+    const fields = Object.keys(recorded);
+    if (fields.length === 0) {
+      console.log(`No usable suggestion for ${commit.slice(0, 12)}.`);
+      return;
+    }
+    for (const field of fields) console.log(`Inferred ${field}: ${recorded[field].value}`);
+    console.log('Nothing here is canonical. Review with `noosphere state inferred`,');
+    console.log('adopt with `noosphere state promote`, drop with `noosphere state inferred clear`.');
+  } catch (error) {
+    // Same contract as `observe`: usable from a hook, so a missing model, a
+    // stopped Ollama, or a repository with no commits is a skip and not noise.
     if (!quiet) throw error;
   }
 }
@@ -3854,6 +3888,9 @@ Commands:
               one, edit it, and append it after typing the confirmation the
               draft's own bytes generate. Interactive only, like trust approve.
   observe     Record the measured repository position now
+  infer       Ask a local Ollama model what a commit looks like and record the
+              answer as an inferred guess (--commit <rev>, --model <name>).
+              Loopback-only: it reads your diffs.
   hooks install|uninstall
               Install or remove the post-commit hook that runs observe
   master-prompt
