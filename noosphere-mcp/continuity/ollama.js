@@ -95,6 +95,14 @@ export async function chatWithOllama({
   const response = await fetchImpl(`${normalizeOllamaHost(host)}/api/chat`, {
     method: 'POST',
     headers: ollamaHeaders(),
+    // Every caller vets the host before this runs — inference requires loopback,
+    // and a session sends the project's own memory — but a vetted host that
+    // answers 307 hands the request, method and body to whatever origin it
+    // names, so the check would only ever have covered the first hop. fetch
+    // follows redirects by default; secureRelayerFetch refuses them on the
+    // credentialed channel for exactly this reason, and this channel carries the
+    // same kind of content.
+    redirect: 'error',
     body: JSON.stringify({
       model,
       messages,

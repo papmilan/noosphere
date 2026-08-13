@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 
 import { normalizeUntrusted, quoteUntrustedMemory } from '../memory-safety.js';
 import { chatWithOllama, normalizeOllamaHost } from '../ollama.js';
+import { classifyHost } from '../relayer-authority.js';
 import { recordInferredField } from './inferred.js';
 
 // Item 1 of docs/design/specs/2026-08-12-inferred-continuity.md, and the item
@@ -187,9 +188,16 @@ function assertLocalModelHost(host, env) {
   } catch {
     throw inferenceError('inference-host-invalid', `OLLAMA_HOST is not a valid URL: ${host}`);
   }
-  const loopback = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(hostname)
-    || hostname.startsWith('127.');
-  if (!loopback) {
+  // classifyHost, not a hand-rolled check. The hand-rolled one tested
+  // `hostname.startsWith('127.')`, which is a prefix test where an address test
+  // is required: `127.evil.example` and `127.0.0.1.attacker.example` are DNS
+  // names an attacker controls, and both passed, so the whole commit body —
+  // private code, whatever a diff happens to contain — was POSTed to them. The
+  // relayer's classifier parses the host as an address instead, and already
+  // handles dotted-quad, IPv4-mapped IPv6, bracketed IPv6 and the reserved
+  // `.localhost` TLD. Short forms (`127.1`, `2130706433`) arrive here already
+  // normalized to `127.0.0.1` by the WHATWG URL parser.
+  if (classifyHost(hostname) !== 'loopback') {
     throw inferenceError(
       'inference-host-not-local',
       `Refusing to send commit content to ${hostname}: inference reads your diffs, `

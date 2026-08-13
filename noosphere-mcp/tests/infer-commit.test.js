@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -151,6 +152,71 @@ describe('inference from a commit', () => {
 
     assert.equal(requests.length, 0, 'nothing may be sent before the host check');
     assert.deepEqual(await readInferredState(root), {});
+  });
+
+  // The guard used to be `hostname.startsWith('127.')`, a prefix test where an
+  // address test is required. Every name below is one an attacker can register
+  // and point anywhere; each one passed, and the whole commit body went to it.
+  const ideographic = String.fromCodePoint(0x3002);
+  for (const host of [
+    'http://127.evil.example:11434',
+    'http://127.0.0.1.attacker.example:11434',
+    'http://localhost.attacker.example:11434',
+    // U+3002 IDEOGRAPHIC FULL STOP, which IDNA maps to "." before the host is read.
+    `http://127.0.0.1${ideographic}evil.example:11434`,
+  ]) {
+    it(`refuses ${new URL(host).hostname}, which is not an address`, async () => {
+      const root = await repository();
+      const { fetchImpl, requests } = model('{"current_task": "anything"}');
+
+      await assert.rejects(
+        inferFromCommit(root, { model: 'test-model', host, env: {}, fetchImpl }),
+        /not loopback/,
+      );
+      assert.equal(requests.length, 0, 'nothing may be sent to a non-loopback host');
+    });
+  }
+
+  it('still accepts the loopback forms a URL normalizes', async () => {
+    for (const host of ['http://127.0.0.1:11434', 'http://localhost:11434', 'http://127.1:11434']) {
+      const root = await repository();
+      const { fetchImpl, requests } = model('{"current_task": "Building the parser"}');
+      await inferFromCommit(root, { model: 'test-model', host, env: {}, fetchImpl });
+      assert.equal(requests.length, 1, `${host} must be allowed`);
+    }
+  });
+
+  // The host check covers the request it makes, not where that request ends up.
+  // A vetted loopback endpoint answering 307 would otherwise hand the commit
+  // body to whatever origin it names, method and body preserved.
+  it('refuses a redirect rather than forwarding the commit body', async () => {
+    const root = await repository();
+    const received = [];
+    const offBox = http.createServer((request, response) => {
+      let body = '';
+      request.on('data', (chunk) => { body += chunk; });
+      request.on('end', () => { received.push(body); response.end('{}'); });
+    });
+    await new Promise((resolve) => offBox.listen(0, '127.0.0.1', resolve));
+    const offBoxPort = offBox.address().port;
+
+    const redirector = http.createServer((_request, response) => {
+      response.writeHead(307, { location: `http://127.0.0.1:${offBoxPort}/api/chat` });
+      response.end();
+    });
+    await new Promise((resolve) => redirector.listen(0, '127.0.0.1', resolve));
+    const redirectorPort = redirector.address().port;
+
+    const failure = await inferFromCommit(root, {
+      model: 'test-model',
+      host: `http://127.0.0.1:${redirectorPort}`,
+      env: {},
+    }).then(() => null, (error) => error);
+
+    offBox.close();
+    redirector.close();
+    assert.notEqual(failure, null, 'a redirected model request must fail');
+    assert.deepEqual(received, [], 'the commit body must not reach the redirect target');
   });
 
   it('sends to a remote host only with the explicit opt-in', async () => {
