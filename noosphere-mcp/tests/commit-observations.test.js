@@ -118,6 +118,62 @@ describe('commit observations', () => {
     assert.match(second.stdout, /Already installed/);
   });
 
+  // The suite used to assert only the hook file's *text*, so nothing ever let
+  // git run it — which is how it shipped resolving the wrong project. npm
+  // exports INIT_CWD to every lifecycle script, and the CLI reads it, so a
+  // commit made from any `npm run …` recorded into whatever directory npm was
+  // started from rather than into the repository being committed to.
+  it('records into its own repository even when INIT_CWD names another one', async () => {
+    const mine = await repository();
+    const elsewhere = await repository();
+    await hooks(mine, 'install');
+
+    // The installed hook invokes bare `noosphere`, which is not on PATH here.
+    // Substitute the interpreter and script path only — every argument,
+    // including the `--path` under test, stays exactly as installed.
+    const hook = path.join(mine, '.git', 'hooks', 'post-commit');
+    const installed = await fs.readFile(hook, 'utf8');
+    assert.match(installed, /--path "\$\(git rev-parse --show-toplevel\)"/);
+    await fs.writeFile(
+      hook,
+      installed.replace(/^noosphere /m, `"${process.execPath}" "${CLI}" `),
+      { mode: 0o755 },
+    );
+
+    await fs.writeFile(path.join(mine, 'file.txt'), 'two\n');
+    await execFileAsync('git', ['commit', '--quiet', '-am', 'second'], {
+      cwd: mine,
+      // Exactly what npm exports when a commit is made from `npm run …`.
+      env: { ...process.env, INIT_CWD: elsewhere, NOOSPHERE_HOME: path.join(mine, 'home') },
+    });
+
+    const head = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: mine })).stdout.trim();
+    const observed = await readCommitObservations(mine);
+    assert.deepEqual(
+      await readCommitObservations(elsewhere),
+      [],
+      'a commit here must not be recorded as a position over there',
+    );
+    assert.equal(observed.length, 1, 'the committed repository must get the observation');
+    assert.equal(observed[0].head, head);
+  });
+
+  it('repairs a hook it wrote before the project path was pinned', async () => {
+    const root = await repository();
+    await hooks(root, 'install');
+    const hook = path.join(root, '.git', 'hooks', 'post-commit');
+    const current = await fs.readFile(hook, 'utf8');
+    // An older body: ours by marker, but missing --path and therefore recording
+    // into whatever INIT_CWD names. A developer has no reason to suspect the
+    // file needs replacing, so reinstalling has to repair it.
+    await fs.writeFile(hook, current.replace(/ --path "[^"]*"/, ''), { mode: 0o755 });
+
+    const result = await hooks(root, 'install');
+
+    assert.match(result.stdout, /Updated/);
+    assert.match(await fs.readFile(hook, 'utf8'), /--path "\$\(git rev-parse --show-toplevel\)"/);
+  });
+
   it('refuses to overwrite or remove a hook it did not write', async () => {
     const root = await repository();
     const hook = path.join(root, '.git', 'hooks', 'post-commit');

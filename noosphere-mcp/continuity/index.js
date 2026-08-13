@@ -1858,7 +1858,17 @@ async function hooksFromCli(root) {
   // Output is discarded, not just the exit status: `|| true` keeps a missing or
   // failing CLI from mattering, but a "command not found" line printed on every
   // single commit is exactly the kind of noise that gets a hook deleted.
-  const HOOK_LINE = 'noosphere observe --quiet --source git-hook >/dev/null 2>&1 || true';
+  //
+  // `--path` is not optional. The CLI resolves its project as
+  // `--path > NOOSPHERE_PROJECT_DIR > INIT_CWD > cwd`, and npm exports INIT_CWD
+  // to every lifecycle script, so a commit made from any `npm run …` recorded
+  // into whatever directory npm was started from. With INIT_CWD pointing at a
+  // second repository, a commit in this one was written as an observation of
+  // that one's HEAD, and this repository got nothing — a trail that is wrong
+  // rather than merely missing. Resolved at hook runtime instead of baked in at
+  // install time, so the hook survives the repository being moved or renamed.
+  const HOOK_LINE = 'noosphere observe --quiet --source git-hook '
+    + '--path "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || true';
   const POST_COMMIT_HOOK = `#!/bin/sh
 ${HOOK_MARKER}
 # Records the measured repository position after each commit.
@@ -1896,7 +1906,18 @@ ${HOOK_LINE}
 
   if (existing !== null) {
     if (existing.includes(HOOK_MARKER)) {
-      console.log(`Already installed at ${hook}.`);
+      // Ours, but possibly an older body. A hook installed before `--path` was
+      // added keeps recording into whatever INIT_CWD names, forever, and a
+      // developer has no reason to suspect the file needs replacing — so
+      // reinstalling repairs it rather than reporting success and leaving it.
+      if (existing === POST_COMMIT_HOOK) {
+        console.log(`Already installed at ${hook}.`);
+        return;
+      }
+      await atomicWrite(hook, POST_COMMIT_HOOK);
+      if (process.platform !== 'win32') await chmod(hook, 0o755);
+      console.log(`Updated ${hook} to the current hook:\n`);
+      console.log(POST_COMMIT_HOOK);
       return;
     }
     // Clobbering a developer's own hook earns permanent distrust, so print the
