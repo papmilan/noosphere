@@ -689,11 +689,11 @@ export async function watchProject(root, options = {}) {
   let stopped = false;
   const handleWatchError = async (error) => {
     if (stopped) return;
-    if (await gitDirectoryUnreachable(root)) {
+    if (await watchRootUnreachable(root)) {
       stopped = true;
       console.warn(
         `Noosphere continuity: ${config.project_id} is no longer reachable at ${root} `
-        + '(the disk was unmounted or the repository was removed); stopping this watcher. '
+        + '(the disk was unmounted or the directory was removed); stopping this watcher. '
         + 'It resumes automatically once the path is back.',
       );
       stopWatching();
@@ -786,11 +786,28 @@ export async function watchProject(root, options = {}) {
   });
 }
 
-// The git directory rather than the root: it covers an unmounted volume and a
-// repository that was deleted underneath the watcher, and it is one call either
-// way. A worktree's `.git` is a file, which access() answers the same.
-async function gitDirectoryUnreachable(root) {
-  return access(path.join(root, '.git')).then(() => false, () => true);
+// The watched directory itself, NOT `root/.git`.
+//
+// Probing `.git` looked strictly better — it seemed to cover both an unmounted
+// volume and a deleted repository for the same single call. It does not:
+// `assertGitRepository` accepts any path *inside* a work tree, so a watcher
+// rooted at a subdirectory has no `root/.git` at all and every healthy one
+// answered "unreachable". The first ordinary background failure — a relayer
+// that is merely down — then stopped it with a message blaming an unmounted
+// disk, and because the process exits 0 with the path still present, the
+// manager cleared its restart record and respawned it every five seconds with
+// the backoff bypassed.
+//
+// The failure being detected is a spawn whose *working directory* is gone, so
+// the working directory is the thing to probe. That also keeps the promise the
+// message makes: when this is true the manager skips the project, and it starts
+// it again when the path returns.
+//
+// A `.git` deleted under a still-present root is deliberately not covered: it
+// cannot be told apart from the subdirectory case, and guessing wrong there is
+// what caused this.
+async function watchRootUnreachable(root) {
+  return access(root).then(() => false, () => true);
 }
 
 async function prepareAutomaticBaseline(root, config) {
@@ -1841,7 +1858,17 @@ async function hooksFromCli(root) {
   // Output is discarded, not just the exit status: `|| true` keeps a missing or
   // failing CLI from mattering, but a "command not found" line printed on every
   // single commit is exactly the kind of noise that gets a hook deleted.
-  const HOOK_LINE = 'noosphere observe --quiet --source git-hook >/dev/null 2>&1 || true';
+  //
+  // `--path` is not optional. The CLI resolves its project as
+  // `--path > NOOSPHERE_PROJECT_DIR > INIT_CWD > cwd`, and npm exports INIT_CWD
+  // to every lifecycle script, so a commit made from any `npm run …` recorded
+  // into whatever directory npm was started from. With INIT_CWD pointing at a
+  // second repository, a commit in this one was written as an observation of
+  // that one's HEAD, and this repository got nothing — a trail that is wrong
+  // rather than merely missing. Resolved at hook runtime instead of baked in at
+  // install time, so the hook survives the repository being moved or renamed.
+  const HOOK_LINE = 'noosphere observe --quiet --source git-hook '
+    + '--path "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || true';
   const POST_COMMIT_HOOK = `#!/bin/sh
 ${HOOK_MARKER}
 # Records the measured repository position after each commit.
@@ -1879,7 +1906,18 @@ ${HOOK_LINE}
 
   if (existing !== null) {
     if (existing.includes(HOOK_MARKER)) {
-      console.log(`Already installed at ${hook}.`);
+      // Ours, but possibly an older body. A hook installed before `--path` was
+      // added keeps recording into whatever INIT_CWD names, forever, and a
+      // developer has no reason to suspect the file needs replacing — so
+      // reinstalling repairs it rather than reporting success and leaving it.
+      if (existing === POST_COMMIT_HOOK) {
+        console.log(`Already installed at ${hook}.`);
+        return;
+      }
+      await atomicWrite(hook, POST_COMMIT_HOOK);
+      if (process.platform !== 'win32') await chmod(hook, 0o755);
+      console.log(`Updated ${hook} to the current hook:\n`);
+      console.log(POST_COMMIT_HOOK);
       return;
     }
     // Clobbering a developer's own hook earns permanent distrust, so print the
