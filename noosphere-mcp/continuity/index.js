@@ -28,6 +28,13 @@ import { runSetupWizard, runCredentialsCommand } from './credentials-cli.js';
 import { runOllamaSession } from './ollama.js';
 import { workspaceFingerprintHex as workspaceFingerprint, observeRepository, classifyCompatibility } from './acp/git-state.js';
 import { recordCommitObservation } from './acp/commit-observations.js';
+import {
+  buildJournalDraft,
+  confirmJournalDraft,
+  discardJournalDraft,
+  pendingJournalPath,
+  writeJournalDraft,
+} from './acp/journal-draft.js';
 import { readState, writeState, validateState, buildInitialState } from './acp/store.js';
 import { decodeEnvelope, encodeEnvelope } from './acp/wire.js';
 import { applyUpdate } from './acp/merge.js';
@@ -1873,6 +1880,13 @@ async function observeFromCli(root) {
 }
 
 async function journalFromCli(root) {
+  // `journal` otherwise takes free text, so these three words are unreachable as
+  // a one-word entry; `--content draft` still writes one.
+  const sub = process.argv[3];
+  if (['draft', 'confirm', 'discard'].includes(sub) && !readFlag('--content')) {
+    await journalDraftFromCli(root, sub);
+    return;
+  }
   const config = await loadConfig(root);
   const content = await readCliContent();
   const agentId =
@@ -1902,6 +1916,39 @@ async function journalFromCli(root) {
     await recordRuntimeObservation(root);
     console.log('Journal entry appended locally.');
   }
+}
+
+// Item 4 of docs/design/specs/2026-08-12-inferred-continuity.md. A confirmed
+// draft is appended locally and never shared, even under privacy.share_journal:
+// pushing machine-drafted text to remote memory is an explicit act, not a
+// side effect of confirming that a commit list is correct.
+async function journalDraftFromCli(root, sub) {
+  const pending = pendingJournalPath(root);
+
+  if (sub === 'discard') {
+    const removed = await discardJournalDraft(root);
+    console.log(removed ? `Discarded ${pending}.` : 'No pending journal draft.');
+    return;
+  }
+
+  if (sub === 'draft') {
+    const draft = await buildJournalDraft(root, new Date().toISOString());
+    if (draft === null) {
+      console.log('No observed commits are missing from the journal; nothing to draft.');
+      return;
+    }
+    // Overwrites any earlier draft: one pending draft at a time is what keeps
+    // this from becoming an inbox nobody reads.
+    await writeJournalDraft(root, draft.text);
+    console.log(draft.text);
+    console.log(`Wrote ${pending} (${draft.commits} commit${draft.commits === 1 ? '' : 's'}${draft.elided > 0 ? `, ${draft.elided} older not listed` : ''}).`);
+    console.log('Edit it to say what you were doing, then run `noosphere journal confirm`.');
+    return;
+  }
+
+  const { bytes } = await confirmJournalDraft({ root });
+  await recordRuntimeObservation(root);
+  console.log(`Appended ${bytes} bytes to .noosphere/journal.md.`);
 }
 
 async function masterPromptFromCli(root) {
@@ -3710,6 +3757,13 @@ Commands:
   recall      Recall project memory by semantic query
   remember    Store a memory from arguments or stdin
   journal     Append a concise public work note
+  journal draft|confirm|discard
+              Draft a journal entry from the commits observed since the last
+              one, edit it, and append it after typing the confirmation the
+              draft's own bytes generate. Interactive only, like trust approve.
+  observe     Record the measured repository position now
+  hooks install|uninstall
+              Install or remove the post-commit hook that runs observe
   master-prompt
               Print or explicitly store the exact pinned project prompt
   trust approve <slot>
