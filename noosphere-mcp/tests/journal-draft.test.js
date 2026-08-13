@@ -194,6 +194,9 @@ describe('journal drafts', () => {
 
     assert.notEqual(failure, null, 'confirm must refuse a non-interactive caller');
     assert.match(failure.stderr, /requires an interactive terminal/);
+    // Refused before anything is printed, so a scripted caller does not get the
+    // whole draft echoed into its log ahead of the refusal.
+    assert.equal(failure.stdout, '');
     assert.equal(await journalText(root), before);
   });
 

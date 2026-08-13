@@ -83,6 +83,11 @@ export async function chatWithOllama({
   stream = true,
   onToken = () => {},
   fetchImpl = fetch,
+  // Ollama's structured-output field: 'json', or a JSON schema that constrains
+  // which keys the model may emit. Omitted for chat, where free prose is the
+  // point. Callers that need a shape should pass a schema rather than ask for
+  // one in the prompt and hope.
+  format,
   timeoutMs =
     Number(process.env.NOOSPHERE_OLLAMA_TIMEOUT_MS) ||
     DEFAULT_TIMEOUT_MS,
@@ -94,6 +99,7 @@ export async function chatWithOllama({
       model,
       messages,
       stream,
+      ...(format === undefined ? {} : { format }),
     }),
     signal: AbortSignal.timeout(timeoutMs),
   });

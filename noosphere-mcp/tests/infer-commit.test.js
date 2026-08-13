@@ -182,6 +182,40 @@ describe('inference from a commit', () => {
     assert.equal(user.content.length < 25_000, true, `prompt was ${user.content.length} characters`);
   });
 
+  it('constrains the answer with a schema rather than asking for one', async () => {
+    const root = await repository();
+    const { fetchImpl, requests } = model('{"current_task": "Building the parser", "next_action": null}');
+
+    await inferFromCommit(root, { model: 'test-model', fetchImpl });
+
+    // Asking in the prompt does not get a shape: a real 14B model answered a
+    // 29 KB commit with prose, and with `format: "json"` it returned valid JSON
+    // mirroring an object shape it had read inside the diff. The schema is what
+    // pins the keys.
+    const { format } = requests[0].body;
+    assert.deepEqual(Object.keys(format.properties).sort(), ['current_task', 'next_action']);
+    assert.deepEqual(format.properties.current_task.type, ['string', 'null']);
+  });
+
+  it('sends the diff a merge commit actually introduced', async () => {
+    const root = await repository();
+    await execFileAsync('git', ['checkout', '--quiet', '-b', 'side'], { cwd: root });
+    await fs.writeFile(path.join(root, 'lexer.js'), 'export const lex = () => [];\n');
+    await execFileAsync('git', ['add', 'lexer.js'], { cwd: root });
+    await execFileAsync('git', ['commit', '--quiet', '-m', 'feat: add the lexer'], { cwd: root });
+    await execFileAsync('git', ['checkout', '--quiet', '-'], { cwd: root });
+    await execFileAsync('git', ['merge', '--quiet', '--no-ff', '-m', 'Merge branch side', 'side'], { cwd: root });
+    const { fetchImpl, requests } = model('{"current_task": null, "next_action": null}');
+
+    await inferFromCommit(root, { model: 'test-model', fetchImpl });
+
+    // `git show` on a merge defaults to a combined diff, which is empty for a
+    // clean merge. Without --first-parent every PR merge reaches the model as a
+    // subject line and nothing else.
+    const [, user] = requests[0].body.messages;
+    assert.match(user.content, /export const lex/);
+  });
+
   it('requires a model rather than picking one', async () => {
     const root = await repository();
     await assert.rejects(inferFromCommit(root, {}), /A model is required/);

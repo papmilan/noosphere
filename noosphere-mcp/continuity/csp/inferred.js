@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 
 import { atomicOwnerOnlyWrite, readBoundedRegularFile } from '../secure-fs.js';
-import { readExactConfirmation } from '../internal/exact-confirmation.js';
+import { assertInteractiveStreams, readExactConfirmation } from '../internal/exact-confirmation.js';
 import { ensureRuntimeStateIgnored, withCspLock } from './storage.js';
 import { transitionState } from './transitions.js';
 import { CSP_STATUSES, validateState } from './validate.js';
@@ -194,6 +194,15 @@ export async function promoteInferredFields({
 // write a guess into this lane, but the transition into owner-authored state is
 // the owner's act. There is no --yes.
 async function ttyConfirm({ entries, rawHash, phrase, input, output }) {
+  // Before anything is printed, matching approval-service: a scripted caller
+  // gets one refusal rather than the proposal echoed into its log first.
+  assertInteractiveStreams({
+    input,
+    output,
+    code: 'promotion-requires-tty',
+    message:
+      'promoting inferred state requires an interactive terminal; run this yourself, in your own shell',
+  });
   output.write([
     '',
     'These inferred values would become tracked CSP state, authored by you:',
