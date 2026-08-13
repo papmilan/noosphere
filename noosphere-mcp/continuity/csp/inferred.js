@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 
-import { atomicOwnerOnlyWrite, readBoundedRegularFile } from '../secure-fs.js';
+import { atomicOwnerOnlyWrite, readBoundedRegularFile, removeRepositoryFile } from '../secure-fs.js';
 import { assertInteractiveStreams, readExactConfirmation } from '../internal/exact-confirmation.js';
 import { ensureRuntimeStateIgnored, withCspLock } from './storage.js';
 import { transitionState } from './transitions.js';
@@ -132,7 +132,13 @@ export async function clearInferredFields(root, fields = INFERRABLE_FIELDS) {
         removed.push(field);
       }
     }
-    if (removed.length > 0) await writeInferredFields(root, current);
+    // An empty lane leaves no file, the way `journal discard` leaves nothing
+    // behind — a lane that is empty should look empty on disk rather than leave
+    // a husk for the next person to wonder about. Unconditional rather than
+    // guarded on `removed`, so a file emptied by an older build is cleaned up
+    // the next time anything clears.
+    if (Object.keys(current).length === 0) await removeRepositoryFile(inferredStatePath(root), { root });
+    else if (removed.length > 0) await writeInferredFields(root, current);
     return removed;
   });
 }
