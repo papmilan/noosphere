@@ -1,7 +1,7 @@
 {
   "version": 1,
   "status": "in-progress",
-  "current_task": "Closure documentation pass done: SECURITY-FOLLOWUPS.md now records SEC-01/01b/03/05 all CLOSED and 'Remaining before public-ready' is replaced by a 'Public-readiness status' section with the two non-blocking defense-in-depth items",
-  "next_action": "Commit the closure-documentation pass and decide public release; post-release hardening backlog: DNS-rebinding resolve-and-pin, ACL-profiler workflow_dispatch input allowlisting",
+  "current_task": "Inferred-continuity arc complete: commit observations (#67), journal drafts (#68), the inferred CSP lane (#69), commit inference (#70), dogfooding fixes (#71, #72). CLI reinstalled and the post-commit observer hook is installed on this repository.",
+  "next_action": "Measure the spec's own criterion around 2026-08-27: is state.json accurate without anyone having run 'state set'? If it is stale again, the spec says revert rather than extend. Weak model yield (~28s, vague guesses on qwen2.5-coder:14b) means try a larger model before concluding item 1 does not earn its place.",
   "blocker": null
 }
