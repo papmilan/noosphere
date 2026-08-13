@@ -49,6 +49,10 @@ async function repository() {
   return root;
 }
 
+async function fileExists(file) {
+  return fs.access(file).then(() => true, () => false);
+}
+
 async function infer(root, field, value, basis = 'commit 8d1ba7a touched the parser') {
   return recordInferredField(root, field, value, { basis, now: '2026-08-13T00:00:00.000Z' });
 }
@@ -176,8 +180,24 @@ describe('inferred CSP state', () => {
 
     assert.deepEqual(await clearInferredFields(root, ['next_action']), ['next_action']);
     assert.deepEqual(Object.keys(await readInferredState(root)), ['current_task']);
+    assert.equal(await fileExists(inferredStatePath(root)), true, 'a remaining guess keeps the file');
+
     assert.deepEqual(await clearInferredFields(root), ['current_task']);
     assert.deepEqual(await readInferredState(root), {});
+    // An empty lane looks empty on disk, the way `journal discard` leaves
+    // nothing behind, rather than leaving a husk with no fields in it.
+    assert.equal(await fileExists(inferredStatePath(root)), false, 'the last guess takes the file with it');
+    // And clearing again is a no-op rather than a failure on the missing file.
+    assert.deepEqual(await clearInferredFields(root), []);
+
+    // A file emptied by an older build carries no fields but still exists;
+    // clearing cleans it up rather than requiring a hand-deletion.
+    await fs.writeFile(
+      inferredStatePath(root),
+      JSON.stringify({ schema: 'noosphere.inferred-state', version: 1, fields: {} }),
+    );
+    assert.deepEqual(await clearInferredFields(root), []);
+    assert.equal(await fileExists(inferredStatePath(root)), false, 'an inherited husk is removed too');
   });
 
   it('labels both lanes in the resume summary', async () => {
