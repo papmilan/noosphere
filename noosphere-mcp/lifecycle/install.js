@@ -340,14 +340,10 @@ async function relayerReadiness(envFile) {
         : { error: body?.memory?.error ?? `HTTP ${response.status}` }),
     };
   } catch (error) {
-    // Node reports a bare "fetch failed" and hides ECONNREFUSED in the cause.
-    // The cause is the part that tells a user the relayer simply is not up.
-    const cause = error.cause?.code ?? error.cause?.message;
-    return {
-      url,
-      ok: false,
-      error: cause ? `${error.message} (${cause})` : error.message,
-    };
+    // secureRelayerFetch now names the origin and unwraps Node's hidden cause
+    // for every caller, so the message is already the whole story. Appending
+    // the cause again here would print it twice.
+    return { url, ok: false, error: error.message };
   }
 }
 

@@ -132,6 +132,60 @@ describe('relayer authority — SEC-01 exploit is blocked end to end', () => {
     assert.deepEqual(received, [], 'attacker must receive no request at all');
   });
 
+  // Node answers every transport failure with the same bare `fetch failed` and
+  // hides the reason in `cause`. Twenty-one of those reached a manager log
+  // naming neither the relayer nor the reason.
+  it('names the origin and the hidden cause when the relayer is unreachable', async () => {
+    const server = http.createServer(() => {});
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const port = server.address().port;
+    server.close();
+    await new Promise((r) => server.on('close', r));
+
+    const env = { NOOSPHERE_HOME: await tempHome() };
+    const error = await secureRelayerFetch(`http://127.0.0.1:${port}/v1/actions`, {}, { env })
+      .then(() => null, (failure) => failure);
+
+    assert.notEqual(error, null, 'a closed port must reject');
+    assert.match(error.message, new RegExp(`relayer request to http://127\\.0\\.0\\.1:${port} failed`));
+    assert.match(error.message, /ECONNREFUSED/);
+    assert.doesNotMatch(error.message, /^fetch failed$/);
+    // The original error keeps its class and its cause, so anything already
+    // branching on either still works.
+    assert.ok(error instanceof TypeError);
+    assert.equal(error.cause?.code, 'ECONNREFUSED');
+  });
+
+  it('names the origin when the relayer is reachable but never answers', async () => {
+    const server = http.createServer(() => {});
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const port = server.address().port;
+
+    const env = { NOOSPHERE_HOME: await tempHome() };
+    const error = await secureRelayerFetch(
+      `http://127.0.0.1:${port}/v1/actions`,
+      { signal: AbortSignal.timeout(150) },
+      { env },
+    ).then(() => null, (failure) => failure);
+
+    server.close();
+    assert.notEqual(error, null, 'a hung request must reject');
+    assert.match(error.message, new RegExp(`relayer request to http://127\\.0\\.0\\.1:${port} failed`));
+    assert.match(error.message, /timeout/i);
+    // A DOMException's message is read-only, so this path is a wrapper that
+    // still carries the original.
+    assert.equal(error.cause?.name, 'TimeoutError');
+  });
+
+  it('does not relabel an authority refusal as unreachable', async () => {
+    const env = { NOOSPHERE_HOME: await tempHome() };
+    const error = await secureRelayerFetch('https://attacker.example.com/v1/actions', {}, { env })
+      .then(() => null, (failure) => failure);
+
+    assert.equal(error.code, 'unapproved-relayer-origin');
+    assert.doesNotMatch(error.message, /relayer request to/);
+  });
+
   it('rejects a redirect on the credentialed channel', async () => {
     const redirectTarget = [];
     const server = http.createServer((req, res) => {
@@ -148,7 +202,9 @@ describe('relayer authority — SEC-01 exploit is blocked end to end', () => {
     const env = { NOOSPHERE_HOME: await tempHome(), NOOSPHERE_API_TOKEN: 'audit-secret-token' };
     await assert.rejects(
       secureRelayerFetch(`http://127.0.0.1:${port}/v1/actions`, {}, { env }),
-      (error) => error instanceof TypeError || /redirect/i.test(String(error)),
+      // A refused redirect is a security refusal, not an unreachable relayer.
+      // The relabelling must keep saying redirect, and keep the TypeError.
+      (error) => error instanceof TypeError && /redirect/i.test(error.message),
     );
     server.close();
     assert.deepEqual(redirectTarget, [], 'must not follow redirect to a new origin');
