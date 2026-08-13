@@ -51,7 +51,30 @@ async function staleLock(lockPath, requireToken) {
 // owns the containing directory and its mode; this owns only the lock itself.
 // `onTimeout` builds the caller's own error so each subsystem keeps its
 // existing error code.
-export async function withOwnerLock(lockPath, { onTimeout, requireToken = false }, operation) {
+// POSIX answers an exclusive create against an existing lock with EEXIST.
+// Windows answers with EPERM, EACCES or EBUSY whenever another handle still
+// holds the file — including one already unlinked but pending delete, which is
+// exactly the state this module's own release leaves behind for a moment.
+//
+// Classifying those as fatal turned ordinary contention into a hard failure:
+// with twenty concurrent issuers on Windows CI, a loser surfaced a raw EPERM
+// instead of either acquiring the lock or timing out with the caller's own
+// error, so `acp-sync-metadata` counted one rejection too few and read as a
+// flaky test. csp/storage.js has classified them this way since the CSP lock
+// hit the same thing; this module was written without it.
+function isLockContention(error, platform) {
+  if (error.code === 'EEXIST') return true;
+  return platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(error.code);
+}
+
+export async function withOwnerLock(lockPath, {
+  onTimeout,
+  requireToken = false,
+  // Injectable so the Windows contention path is exercisable off Windows,
+  // matching csp/storage.js and NOOSPHERE_TEST_PLATFORM elsewhere.
+  platform = process.platform,
+  openImpl = open,
+}, operation) {
   const token = randomUUID();
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   let handle;
@@ -64,7 +87,7 @@ export async function withOwnerLock(lockPath, { onTimeout, requireToken = false 
     // created if it does not.
     let opened;
     try {
-      opened = await open(lockPath, 'wx', 0o600);
+      opened = await openImpl(lockPath, 'wx', 0o600);
       await opened.writeFile(JSON.stringify({ pid: process.pid, token, created_at: Date.now() }));
       await opened.sync();
       handle = opened;
@@ -73,7 +96,7 @@ export async function withOwnerLock(lockPath, { onTimeout, requireToken = false 
         await opened.close().catch(() => {});
         await rm(lockPath, { force: true }).catch(() => {});
       }
-      if (error.code !== 'EEXIST') throw error;
+      if (!isLockContention(error, platform)) throw error;
       if (Date.now() >= deadline) throw onTimeout();
       if (await staleLock(lockPath, requireToken)) await rm(lockPath, { force: true });
       else await new Promise((resolve) => setTimeout(resolve, Math.random() * LOCK_RETRY_CAP_MS));

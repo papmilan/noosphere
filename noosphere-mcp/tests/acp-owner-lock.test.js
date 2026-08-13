@@ -62,6 +62,44 @@ describe('ACP owner lock', () => {
     assert.equal(maxInside, 1);
   });
 
+  // Windows reports a held lock as EPERM/EACCES/EBUSY, not EEXIST. Surfacing
+  // those raw is what made acp-sync-metadata read as flaky: a concurrent issuer
+  // got a filesystem error instead of waiting its turn, so the suite counted
+  // one confirmation-limit rejection too few.
+  for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+    it(`treats a Windows ${code} as contention rather than a fault`, async () => {
+      const lockPath = path.join(await temp(), 'owner.lock');
+      let attempts = 0;
+      const openImpl = async (...args) => {
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error(`${code}: busy`), { code });
+        return open(...args);
+      };
+
+      const held = await withOwnerLock(
+        lockPath,
+        { onTimeout, platform: 'win32', openImpl },
+        async () => 'acquired',
+      );
+
+      assert.equal(held, 'acquired', 'the waiter must retry rather than surface the error');
+      assert.equal(attempts, 2);
+      assert.equal(existsSync(lockPath), false, 'the lock must be released');
+    });
+
+    it(`still surfaces ${code} as a fault away from Windows`, async () => {
+      const lockPath = path.join(await temp(), 'owner.lock');
+      const openImpl = async () => {
+        throw Object.assign(new Error(`${code}: denied`), { code });
+      };
+
+      await assert.rejects(
+        withOwnerLock(lockPath, { onTimeout, platform: 'linux', openImpl }, async () => 'unreachable'),
+        (error) => error.code === code,
+      );
+    });
+  }
+
   // A disk that fills between the exclusive create and the write leaves the
   // acquisition half-done. The descriptor must not escape with it, and neither
   // must the empty lock file: an abandoned lock is one nobody can clear until

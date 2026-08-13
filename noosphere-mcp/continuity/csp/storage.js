@@ -55,6 +55,12 @@ const LOCAL_RUNTIME_EXCLUDES = [
   // restore carry someone else's guesses into another project's read path, which
   // is the self-asserting-provenance failure SEC-05 exists to prevent.
   '.noosphere/inferred-state.json',
+  // Local telemetry and an unconfirmed draft. Both were gitignored only in the
+  // repository they were developed in, so installing the post-commit hook
+  // anywhere else left an untracked file in the developer's status output on
+  // the very first commit.
+  '.noosphere/commit-observations.json',
+  '.noosphere/pending-journal.md',
   '.noosphere/*.tmp',
   '.noosphere/*.lock',
 ];
