@@ -114,6 +114,13 @@ import {
   updateRuntimeState,
 } from './csp/storage.js';
 import { recordRuntimeObservation } from './csp/runtime.js';
+import {
+  clearInferredFields,
+  INFERRED_CLI_FIELDS,
+  promoteInferredFields,
+  readInferredState,
+  recordInferredField,
+} from './csp/inferred.js';
 import { transitionState } from './csp/transitions.js';
 import { renderResumeSummary } from './csp/summary.js';
 import { formatCspTransitionResult } from './csp/cli-output.js';
@@ -2044,6 +2051,11 @@ async function cspStateFromCli(root) {
     return;
   }
 
+  if (mode === 'infer' || mode === 'inferred' || mode === 'promote') {
+    await inferredStateFromCli(root, mode);
+    return;
+  }
+
   let transition;
   if (mode === 'set') {
     const cliField = process.argv[4];
@@ -2071,7 +2083,7 @@ async function cspStateFromCli(root) {
   } else if (mode === 'reopen' || mode === 'restore') {
     transition = { type: mode };
   } else {
-    throw new Error('Usage: noosphere state [show|set|next|reopen|restore] [--json]');
+    throw new Error('Usage: noosphere state [show|set|next|reopen|restore|infer|inferred|promote] [--json]');
   }
 
   const result = await transitionState(root, transition);
@@ -2079,6 +2091,77 @@ async function cspStateFromCli(root) {
   if (output.stdout) process.stdout.write(output.stdout);
   if (output.stderr) process.stderr.write(output.stderr);
   if (output.exitCode !== 0) process.exitCode = output.exitCode;
+}
+
+// Item 6 of docs/design/specs/2026-08-12-inferred-continuity.md. `infer` needs
+// no terminal, because writing a guess grants nothing; `promote` requires one,
+// because adopting it is an authority transition the owner makes.
+async function inferredStateFromCli(root, mode) {
+  if (mode === 'infer') {
+    const field = INFERRED_CLI_FIELDS[process.argv[4]];
+    const value = process.argv[5];
+    const basis = readFlag('--basis');
+    if (!field || value === undefined || !basis) {
+      throw new Error(
+        'Usage: noosphere state infer <status|current-task|next-action|blocker> <value> --basis <why>',
+      );
+    }
+    const entry = await recordInferredField(root, field, value, {
+      basis,
+      now: new Date().toISOString(),
+    });
+    console.log(`Recorded inferred ${field}: ${entry.value}`);
+    console.log('It is not canonical. Run `noosphere state promote` to adopt it.');
+    return;
+  }
+
+  if (mode === 'inferred') {
+    if (process.argv[4] === 'clear') {
+      const named = positionalArgument(5);
+      const requested = INFERRED_CLI_FIELDS[named];
+      if (named !== undefined && !requested) {
+        throw new Error(`${named} is not an inferable CSP v1 field`);
+      }
+      const removed = await clearInferredFields(root, requested ? [requested] : undefined);
+      console.log(removed.length > 0 ? `Cleared inferred ${removed.join(', ')}.` : 'No inferred values to clear.');
+      return;
+    }
+    const fields = await readInferredState(root);
+    if (process.argv.includes('--json')) {
+      process.stdout.write(`${JSON.stringify({ source: 'inferred', fields }, null, 2)}\n`);
+      return;
+    }
+    const entries = Object.entries(fields);
+    if (entries.length === 0) {
+      console.log('No inferred values recorded.');
+      return;
+    }
+    console.log('Inferred, NOT canonical. Nothing here is authoritative until promoted.');
+    for (const [field, entry] of entries) {
+      console.log(`  ${field}: ${entry.value}`);
+      console.log(`    basis:    ${entry.basis || '(none recorded)'}`);
+      console.log(`    observed: ${entry.observed_at || '(unknown)'}`);
+    }
+    return;
+  }
+
+  const requested = positionalArgument(4);
+  const field = INFERRED_CLI_FIELDS[requested];
+  if (requested !== undefined && requested !== 'all' && !field) {
+    throw new Error(`${requested} is not an inferable CSP v1 field`);
+  }
+  const result = await promoteInferredFields({
+    root,
+    fields: field ? [field] : undefined,
+  });
+  const output = formatCspTransitionResult(result, { json: process.argv.includes('--json') });
+  if (output.stdout) process.stdout.write(output.stdout);
+  if (output.stderr) process.stderr.write(output.stderr);
+  if (output.exitCode !== 0) {
+    process.exitCode = output.exitCode;
+    return;
+  }
+  console.log(`Promoted to owner-authored CSP: ${result.promoted.join(', ')}.`);
 }
 
 async function acpStateFromCli(root, modeIndex = 3) {
@@ -3250,6 +3333,15 @@ function readFlag(name) {
   return index >= 0 ? process.argv[index + 1] : null;
 }
 
+// An optional positional, absent when a flag sits in its slot. `--path` is
+// appended by every caller that cannot rely on the working directory, so
+// reading argv by index alone turns `state promote --path /repo` into a
+// promotion of the field named "--path".
+function positionalArgument(index) {
+  const value = process.argv[index];
+  return value === undefined || value.startsWith('--') ? undefined : value;
+}
+
 function normalizeRefreshMs(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed)
@@ -3791,6 +3883,14 @@ Commands:
   protocol    Print the universal agent protocol
   state       Print or transition canonical CSP project state:
               state [show|set|next|reopen|restore] [--json]
+  state infer <field> <value> --basis <why>
+              Record a guess in the inferred lane. It is never canonical and
+              needs no terminal — writing one grants nothing.
+  state inferred [clear [field]] [--json]
+              Show or drop inferred values.
+  state promote [field|all]
+              Adopt inferred values as owner-authored CSP after typing the
+              confirmation their exact values generate. Interactive only.
   acp state   Print the ACP continuity kernel (--json for the envelope,
               validate to verify it). Exact-state commands:
               acp state sync|push|pull|history|quarantine [--json]

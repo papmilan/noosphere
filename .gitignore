@@ -46,3 +46,4 @@ docs/motion-docs.db
 .noosphere/instructions.md
 .noosphere/commit-observations.json
 .noosphere/pending-journal.md
+.noosphere/inferred-state.json
