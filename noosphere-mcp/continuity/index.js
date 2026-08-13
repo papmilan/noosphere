@@ -674,6 +674,34 @@ export async function watchProject(root, options = {}) {
   );
   await refreshContext(root).catch(logBackgroundError);
 
+  // A watched project on removable or network storage disappears while the
+  // watcher is running, and every poll then fails for a reason that has nothing
+  // to do with the change it was looking for. Node reports a spawn whose cwd is
+  // gone as ENOENT on the command, so an unmounted disk reads as `spawn git
+  // ENOENT` — 42,485 lines of it in one manager log here, blaming a git that
+  // was installed and fine the whole time.
+  //
+  // Stop instead of retrying every two seconds forever. The manager already
+  // skips projects whose path is missing and restarts the ones that return, so
+  // stopping hands the problem to machinery that exists rather than adding a
+  // second backoff here.
+  let stopWatching = () => {};
+  let stopped = false;
+  const handleWatchError = async (error) => {
+    if (stopped) return;
+    if (await gitDirectoryUnreachable(root)) {
+      stopped = true;
+      console.warn(
+        `Noosphere continuity: ${config.project_id} is no longer reachable at ${root} `
+        + '(the disk was unmounted or the repository was removed); stopping this watcher. '
+        + 'It resumes automatically once the path is back.',
+      );
+      stopWatching();
+      return;
+    }
+    logBackgroundError(error);
+  };
+
   const pollTimer = setInterval(async () => {
     try {
       const fingerprint = await workspaceFingerprint(root);
@@ -730,7 +758,7 @@ export async function watchProject(root, options = {}) {
         }
       }
     } catch (error) {
-      logBackgroundError(error);
+      await handleWatchError(error);
     }
   }, Math.min(2_000, Math.max(500, Math.floor(debounceMs / 4))));
 
@@ -740,7 +768,7 @@ export async function watchProject(root, options = {}) {
     try {
       await refreshContext(root);
     } catch (error) {
-      logBackgroundError(error);
+      await handleWatchError(error);
     } finally {
       refreshRunning = false;
     }
@@ -752,9 +780,17 @@ export async function watchProject(root, options = {}) {
       clearInterval(refreshTimer);
       resolve();
     };
+    stopWatching = stop;
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
   });
+}
+
+// The git directory rather than the root: it covers an unmounted volume and a
+// repository that was deleted underneath the watcher, and it is one call either
+// way. A worktree's `.git` is a file, which access() answers the same.
+async function gitDirectoryUnreachable(root) {
+  return access(path.join(root, '.git')).then(() => false, () => true);
 }
 
 async function prepareAutomaticBaseline(root, config) {
