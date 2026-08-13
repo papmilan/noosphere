@@ -51,6 +51,10 @@ async function readLockJson(lockPath) {
 
 const LOCAL_RUNTIME_EXCLUDES = [
   '.noosphere/runtime-state.json',
+  // Inferred state is never shared. Committing it would let a clone, import or
+  // restore carry someone else's guesses into another project's read path, which
+  // is the self-asserting-provenance failure SEC-05 exists to prevent.
+  '.noosphere/inferred-state.json',
   '.noosphere/*.tmp',
   '.noosphere/*.lock',
 ];

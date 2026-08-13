@@ -2,6 +2,7 @@ import path from 'node:path';
 
 import { observeRepository as observeGitRepository } from '../acp/git-state.js';
 import { readBoundedRegularFile } from '../secure-fs.js';
+import { readInferredState } from './inferred.js';
 import { loadRuntimeState, loadState } from './storage.js';
 
 const MAX_JOURNAL_CHARACTERS = 2_000;
@@ -12,22 +13,26 @@ const BIDI_CONTROLS = /[\u202a-\u202e\u2066-\u2069]/gu;
 
 export async function renderResumeSummary(root, options = {}) {
   const observeRepository = options.observeRepository ?? observeGitRepository;
-  const [state, runtime, observed, journal] = await Promise.all([
+  const [state, runtime, observed, journal, inferred] = await Promise.all([
     loadState(root),
     loadRuntimeState(root),
     observeRepository(root),
     readBoundedRegularFile(path.join(root, '.noosphere', 'journal.md'), {
       maxBytes: MAX_JOURNAL_BYTES,
     }).then((bytes) => bytes?.toString('utf8') ?? '').catch(() => ''),
+    readInferredState(root).catch(() => ({})),
   ]);
   const lines = ['# CONTINUATION STATE (CSP v1)'];
   if (state === null) {
     lines.push('CSP state: missing');
   } else {
-    lines.push(`Status: ${state.status}`);
-    lines.push(`Current task: ${display(state.current_task)}`);
-    lines.push(`Next action: ${display(state.next_action)}`);
-    lines.push(`Blocker: ${display(state.blocker)}`);
+    // Everything under this heading came from an owner-run transition. The
+    // labels are the point: a reader that cannot tell owner-authored state from
+    // a guess ends up anchored by the guess.
+    lines.push(`Status: ${state.status} (owner)`);
+    lines.push(`Current task: ${display(state.current_task)} (owner)`);
+    lines.push(`Next action: ${display(state.next_action)} (owner)`);
+    lines.push(`Blocker: ${display(state.blocker)} (owner)`);
   }
   lines.push(`Git branch: ${display(observed.branch)}`);
   lines.push(`Git HEAD: ${display(observed.head)}`);
@@ -42,6 +47,16 @@ export async function renderResumeSummary(root, options = {}) {
     lines.push(`Runtime observed HEAD: ${display(metadata.observed_head)}`);
     lines.push(`Runtime observed at: ${display(metadata.observed_at)}`);
     lines.push(`Last task transition: ${display(metadata.last_transition_at)}`);
+  }
+  // Quoted like the journal excerpt below, and for the same reason: these are
+  // guesses nothing has confirmed. They are shown so the owner can promote or
+  // drop them, never so an agent can act on them. Promotion via
+  // `noosphere state promote` is the only path into the fields above.
+  const inferredLines = Object.entries(inferred).map(([field, entry]) =>
+    `> ${field}: ${safeLine(entry.value)} (inferred; basis: ${entry.basis ? safeLine(entry.basis) : 'none recorded'})`);
+  if (inferredLines.length > 0) {
+    lines.push('Inferred, NOT canonical (untrusted; promote to adopt, `noosphere state inferred clear` to drop):');
+    lines.push(...inferredLines);
   }
   const excerpt = quoteJournal(journal);
   if (excerpt) {
