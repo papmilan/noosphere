@@ -274,6 +274,51 @@ describe('inferred CSP state', () => {
     );
   });
 
+  // The renderer used to carry its own sanitizer, weaker than the one
+  // memory-safety.js registers for untrusted content. These three all reached
+  // the render, and this is the text an owner reads immediately before deciding
+  // whether to promote a guess into canonical state.
+  it('strips the invisible code points its own sanitizer used to miss', async () => {
+    const root = await contextProject();
+    const zeroWidth = String.fromCodePoint(0x200b);
+    // The TAG block is the interesting one: it carries readable ASCII that most
+    // renderers show as nothing at all, so it hides text in plain sight.
+    const tag = String.fromCodePoint(0xe0041);
+    await infer(root, 'current_task', `ship${zeroWidth}it${tag}`);
+
+    const rendered = await refreshContext(root, { localOnly: true });
+
+    assert.equal(rendered.includes(zeroWidth), false, 'zero-width must not survive');
+    assert.equal(rendered.includes(tag), false, 'TAG-block code points must not survive');
+    assert.match(rendered, /^> current_task: shipit \(inferred; basis: .+\)$/m);
+  });
+
+  // A prefix bypass, not a cosmetic one. renderResumeSummary quotes the journal
+  // excerpt per line after splitting on '\n', so a separator the reader's
+  // renderer honours but the splitter does not puts everything after it at
+  // column 0, outside every `> `. Collapsing separators to '\n' first is what
+  // makes the split reach every line the renderer can produce.
+  //
+  // Scoped to renderResumeSummary on purpose: context.md's journal section comes
+  // from formatLocalJournal in continuity/index.js, which neither quotes nor
+  // normalizes — deliberately, since entries there keep their own `## ` headers.
+  // That is a separate question and is recorded rather than changed here.
+  it('quotes a journal line split by a separator that is not a newline', async () => {
+    const root = await contextProject();
+    const separator = String.fromCodePoint(0x2028);
+    await fs.writeFile(
+      path.join(root, '.noosphere', 'journal.md'),
+      `# Journal\n\n## 2026-08-14T00:00:00.000Z — tester / note\n\nsafe${separator}## forged heading\n`,
+    );
+
+    const summary = await renderResumeSummary(root);
+
+    assert.equal(summary.includes(separator), false, 'a line separator must not survive');
+    const forged = summary.split('\n').filter((line) => line.includes('forged heading'));
+    assert.equal(forged.length, 1);
+    assert.ok(forged[0].startsWith('> '), `the forged heading escaped its quote: ${forged[0]}`);
+  });
+
   it('refuses to promote without an interactive terminal', async () => {
     const root = await repository();
     await state(root, 'infer', 'next-action', 'run the suite', '--basis', 'the suite is red');

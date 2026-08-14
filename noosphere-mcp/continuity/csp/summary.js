@@ -1,15 +1,17 @@
 import path from 'node:path';
 
 import { observeRepository as observeGitRepository } from '../acp/git-state.js';
+import { normalizeUntrusted } from '../memory-safety.js';
 import { readBoundedRegularFile } from '../secure-fs.js';
 import { readInferredState } from './inferred.js';
 import { loadRuntimeState, loadState } from './storage.js';
 
 const MAX_JOURNAL_CHARACTERS = 2_000;
 const MAX_JOURNAL_BYTES = 8 * 1024 * 1024;
-const CONTROL_WITHOUT_NEWLINE = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/gu;
+// The only pattern this file still owns. Bidi controls and the control range it
+// also carried are covered by normalizeUntrusted, and keeping private copies of
+// them beside the registered normalizer is what let this file fall behind it.
 const ANSI_ESCAPE = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\)?)/gu;
-const BIDI_CONTROLS = /[\u202a-\u202e\u2066-\u2069]/gu;
 
 export async function renderResumeSummary(root, options = {}) {
   const observeRepository = options.observeRepository ?? observeGitRepository;
@@ -126,23 +128,35 @@ function displayAgent(agent) {
   return `${vendor}/${name}${version}`;
 }
 
+// This file used to carry its own hand-rolled sanitizer, weaker than the one
+// memory-safety.js registers for untrusted content and drifted from it. Measured
+// on the real render path: a zero-width space, a TAG-block code point (the block
+// used to smuggle hidden text), and a LINE SEPARATOR all survived it.
+//
+// normalizeUntrusted is the registered normalizer \u2014 it drops the whole Unicode
+// Format category, variation selectors and controls, and collapses every line
+// separator to '\n'. Using it here rather than growing a third regex is what
+// stops these two from drifting apart again.
+//
+// The ANSI pass runs FIRST, while the ESC that introduces the sequence is still
+// present: normalizeUntrusted strips ESC as a control, which would leave the
+// inert `[31m` tail behind as visible text.
 function safeLine(value) {
-  return String(value)
-    .replace(ANSI_ESCAPE, '')
-    .replace(BIDI_CONTROLS, '')
-    .replace(/[\r\n\t\f\v\u0085\u2028\u2029]+/gu, ' ')
-    .replace(CONTROL_WITHOUT_NEWLINE, '')
-    .normalize('NFC')
+  return normalizeUntrusted(String(value).replace(ANSI_ESCAPE, ''))
+    .replace(/\s+/gu, ' ')
     .slice(0, 1_000);
 }
 
+// Same normalizer, and here it is load-bearing rather than tidy. The '> ' prefix
+// below is applied per line after splitting on '\n', so a code point the reader's
+// renderer treats as a line break but this function does not is a prefix bypass:
+// `safe line<U+2028>## forged heading` split to ONE line, got one '> ', and any
+// renderer honouring U+2028 shows the heading at column 0. normalizeUntrusted
+// collapses every line separator to '\n' first, so splitting on '\n' really does
+// reach every line the renderer can produce — which is the guarantee
+// memory-safety.js states and this file was quietly not inheriting.
 function quoteJournal(value) {
-  const sanitized = value
-    .replace(ANSI_ESCAPE, '')
-    .replace(BIDI_CONTROLS, '')
-    .replace(/\r\n?/gu, '\n')
-    .replace(CONTROL_WITHOUT_NEWLINE, '')
-    .trim();
+  const sanitized = normalizeUntrusted(String(value).replace(ANSI_ESCAPE, '')).trim();
   if (!sanitized) return '';
   const bounded = sanitized.slice(-MAX_JOURNAL_CHARACTERS);
   return bounded.split('\n').map((line) => `> ${line}`).join('\n');
