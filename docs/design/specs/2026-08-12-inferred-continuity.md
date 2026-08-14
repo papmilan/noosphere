@@ -6,7 +6,10 @@ is in the commit that diverged. Item 3 landed as a commit observation rather
 than an execution envelope (#67), item 4 as hash-bound journal drafts (#68),
 item 6 as a separate inferred lane rather than a field on tracked CSP (#69),
 and item 1 as a loopback-only local model whose output can only ever reach that
-lane. §5's success criterion has not been measured yet.
+lane. §5's success criterion was withdrawn on 2026-08-14 and replaced: as
+written it could not be satisfied by the design it measured, so it would have
+reported "revert" regardless of the outcome. The original text and the reasoning
+are kept in §5.1.
 
 ## 1. The problem, measured
 
@@ -190,14 +193,60 @@ Intent is items 1 and 4, and it is the harder half.
 
 ## 5. Success criterion
 
-Two weeks after items 1, 3, 4, and 6 ship: `state.json` is accurate and nobody
-ran `acp state set`. If it is stale again, the inferred lane is not reaching the
-canonical read path and the daemon was added for nothing — revert rather than
-extend.
+### 5.1 The criterion this section used to state, and why it was withdrawn
 
-For item 3 alone: every commit on an installed repository has a checkpoint,
-except those made while an agent held the lock, and no developer has removed the
-hook out of annoyance.
+> Two weeks after items 1, 3, 4, and 6 ship: `state.json` is accurate and nobody
+> ran `acp state set`. If it is stale again, the inferred lane is not reaching
+> the canonical read path and the daemon was added for nothing — revert rather
+> than extend.
+
+That criterion cannot be satisfied by the design it measures, so it cannot
+distinguish a working lane from a broken one.
+
+§8 settles that inference drafts and never asserts, and item 6 implements it:
+promotion is the only route from the inferred lane into `state.json`, and
+`promoteInferredFields` requires an interactive terminal and a typed phrase bound
+to the digest of the exact values. `state.json` therefore cannot become accurate
+without an owner command. It is `state promote` instead of `state set` — a
+different command, and a better one, but the "nobody ran a command" half of the
+criterion is unreachable by construction. On 2026-08-27 the measurement would
+have reported "stale → revert" no matter how good the inference was.
+
+The withdrawn criterion also assumed the lane was being written to. It was not:
+`infer` is a manual command by deliberate choice (`continuity/index.js`, "a hook
+that quietly starts inference on each commit is a cost the developer never opted
+into"), so on this repository `.noosphere/inferred-state.json` did not exist at
+all. A revert on that evidence would have removed a lane no one had exercised.
+
+Recorded rather than quietly replaced: a criterion that always returns the same
+verdict is worth remembering as a failure mode, not just correcting.
+
+### 5.2 The criterion that replaces it
+
+Two weeks after items 1, 3, 4, and 6 ship, and given a repository where `infer`
+actually runs — measure **drafting quality and reach**, which is what §8 says the
+lane is for:
+
+1. **Reach.** Does the owner encounter inferred values without going looking for
+   them? Every rendered surface an agent or owner reads on the documented path
+   must show the lane, labeled and quoted. This is now testable: item 6 shipped
+   the lane on `noosphere state` and `noosphere resume` only, while `CLAUDE.md`
+   sends agents to `noosphere context --local-only` and `.noosphere/state.json`.
+2. **Draft quality.** Of the guesses the owner reviews at a promotion prompt, are
+   more than half accepted unedited? A lane whose guesses are usually wrong costs
+   more attention than it saves, which is the §8 failure — "I must log" traded
+   for "I must audit".
+3. **Volume.** Does the lane produce fewer proposals than the owner will read?
+   The same bound §6 puts on journal drafts: an inbox nobody reads is the
+   original failure in new clothing.
+
+Revert if (1) is satisfied and (2) still fails: a lane that is seen, understood,
+and still not worth promoting has been given its chance. Do not revert on (1)
+alone — that measures the plumbing, not the idea.
+
+For item 3 alone, unchanged: every commit on an installed repository has a
+checkpoint, except those made while an agent held the lock, and no developer has
+removed the hook out of annoyance.
 
 ## 6. Deferred, with the constraints they must meet
 
