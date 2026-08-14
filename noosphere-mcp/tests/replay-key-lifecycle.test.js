@@ -103,6 +103,45 @@ test('concurrent pristine first use converges on one key and one catalog', async
   );
 });
 
+// The test above launches its peers in lockstep, so they all reach the pristine
+// check before any of them writes and the window never opens. Staggering the
+// starts spreads them across it: the loser used to be rejected with
+// `replay-key-missing-with-state` (or `replay-catalog-missing-with-state`)
+// rather than handed the winner's key, which is what turned PR #77 red on
+// Windows. Load-dependent, so it is repeated — one trial in 20 stayed green
+// even unfixed, five did not.
+test('a peer that loses an ordinary first-use race adopts the key, never fails', async () => {
+  assert.ok(keyModule, 'production replay key module must exist');
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  for (let trial = 0; trial < 5; trial += 1) {
+    const { home, env } = await environment();
+    const settled = await Promise.allSettled(
+      Array.from({ length: 48 }, async (_unused, index) => {
+        await sleep(index % 6);
+        return keyModule.ensureReplayKey({ env });
+      }),
+    );
+
+    assert.deepEqual(
+      settled
+        .filter(result => result.status === 'rejected')
+        .map(result => result.reason?.code ?? result.reason?.message),
+      [],
+      `trial ${trial}: losing the race must adopt the winner's key, not reject`,
+    );
+    assert.equal(
+      new Set(settled.map(result => result.value.toString('hex'))).size,
+      1,
+      `trial ${trial}: every peer must converge on one key`,
+    );
+    assert.deepEqual(
+      (await fs.readdir(paths(home).root)).sort(),
+      ['catalog.json', 'machine.key'],
+    );
+  }
+});
+
 test('missing key with surviving replay state fails closed without mutation', async () => {
   assert.ok(keyModule, 'production replay key module must exist');
   const { home, env } = await environment();

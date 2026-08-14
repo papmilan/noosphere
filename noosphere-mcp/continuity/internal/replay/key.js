@@ -27,6 +27,12 @@ import { parseReplayCatalog } from './schema.js';
 
 const KEY_FILE_BYTES = REPLAY_KEY_HEX_BYTES + 1;
 
+// The two entries this module creates itself. Named rather than spelled out at
+// each use because both pristine checks below turn on the distinction between
+// "state this function produces" and "state that survived from before it".
+const KEY_ENTRY = 'machine.key';
+const CATALOG_ENTRY = 'catalog.json';
+
 // The three ways "a concurrent writer replaced this file while I was reading
 // it" reaches us. During pristine first use every agent racing to create the
 // key and catalog produces exactly this, so refusing on it turns ordinary
@@ -74,11 +80,11 @@ export function replayRootPath(env = process.env) {
 }
 
 export function replayKeyPath(env = process.env) {
-  return path.join(replayRootPath(env), 'machine.key');
+  return path.join(replayRootPath(env), KEY_ENTRY);
 }
 
 function replayCatalogPath(env) {
-  return path.join(replayRootPath(env), 'catalog.json');
+  return path.join(replayRootPath(env), CATALOG_ENTRY);
 }
 
 export function replayKeyId(key) {
@@ -225,7 +231,7 @@ export async function loadReplayKey({
     key,
     secureFileOptions,
   });
-  const nonKeyEntries = entries.filter(entry => entry !== 'machine.key');
+  const nonKeyEntries = entries.filter(entry => entry !== KEY_ENTRY);
   if (catalog === null && nonKeyEntries.length > 0) {
     throw replayKeyError(
       'replay-catalog-missing-with-state',
@@ -248,7 +254,14 @@ async function ensureInitialCatalog({
   if (existing !== null) return;
   const root = replayRootPath(env);
   const entries = await fs.readdir(root);
-  if (entries.some(entry => entry !== 'machine.key')) {
+  // A catalog here is not state this would disown — it is the very file about
+  // to be written, put there by a peer since the read above found none. The
+  // exclusive write below already detects that and re-reads the peer's copy.
+  // Counting it as surviving state instead rejected the loser of an ordinary
+  // first-use race: 12 `replay-catalog-missing-with-state` rejections across 40
+  // staggered 24-peer trials. What this guard is actually for — replay state
+  // that outlived its catalog — is untouched.
+  if (entries.some(entry => entry !== KEY_ENTRY && entry !== CATALOG_ENTRY)) {
     throw replayKeyError(
       'replay-catalog-missing-with-state',
       'refusing to initialize a catalog over surviving replay state',
@@ -278,19 +291,25 @@ async function ensureInitialCatalog({
   }
 }
 
+// Take up a key that already exists, catalog included. Returns null when there
+// is none — which is a "create it, then", not a failure.
+async function adoptExistingReplayKey({ env, secureFileOptions }) {
+  const existing = await loadReplayKey({ env, secureFileOptions });
+  if (existing === null) return null;
+  await ensureInitialCatalog({
+    env,
+    key: existing,
+    secureFileOptions,
+  });
+  return existing;
+}
+
 export async function ensureReplayKey({
   env = process.env,
   secureFileOptions = {},
 } = {}) {
-  const existing = await loadReplayKey({ env, secureFileOptions });
-  if (existing !== null) {
-    await ensureInitialCatalog({
-      env,
-      key: existing,
-      secureFileOptions,
-    });
-    return existing;
-  }
+  const adopted = await adoptExistingReplayKey({ env, secureFileOptions });
+  if (adopted !== null) return adopted;
 
   await ensureRealDirectoryPath(homeDir(env));
   await inspectOwnerOnlyDestination(
@@ -311,6 +330,18 @@ export async function ensureReplayKey({
     }),
   );
   const entries = await fs.readdir(replayRootPath(env));
+  // A key that appeared since the load above is a peer winning ordinary
+  // first-use concurrency, not a root with state to refuse. Judging it as the
+  // latter handed the loser `replay-key-missing-with-state` instead of the
+  // winner's key — 57 rejections across 40 staggered 24-peer trials, and the
+  // reason CI went red on PR #77. Adopt it, exactly as the exclusive write
+  // below already does for the narrower window it can still lose.
+  if (entries.includes(KEY_ENTRY)) {
+    const winner = await adoptExistingReplayKey({ env, secureFileOptions });
+    if (winner !== null) return winner;
+  }
+  // Only state that survives WITHOUT a key is the corruption this guards: a
+  // fresh key here would orphan every record sealed under the old one.
   if (entries.length !== 0) {
     throw replayKeyError(
       'replay-key-missing-with-state',
