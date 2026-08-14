@@ -1873,6 +1873,45 @@ async function hooksFromCli(root) {
   // install time, so the hook survives the repository being moved or renamed.
   const HOOK_LINE = 'noosphere observe --quiet --source git-hook '
     + '--path "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || true';
+
+  await assertGitRepository(root);
+  const sub = process.argv[3];
+  if (sub !== 'install' && sub !== 'uninstall') {
+    throw new Error('Usage: noosphere hooks <install|uninstall>');
+  }
+
+  // Opt-in, and never the default: inference spends a local model run on every
+  // commit. §4.5's consent argument covers the hook existing at all; this is the
+  // same argument one level down, for the hook doing something expensive.
+  const wantsInference = process.argv.includes('--infer');
+  const inferenceModel = readFlag('--model');
+  if (wantsInference && !inferenceModel) {
+    throw new Error(
+      '--infer requires --model <name>: the hook cannot pick one for you, and the'
+      + ' choice matters more than its size.\n'
+      + 'Measured on 2026-08-14 over 4 commits and 3 local models: a CODER model is'
+      + ' the wrong tool here — qwen2.5-coder:14b was the largest, the slowest, the\n'
+      + 'least stable, and answered one commit "Code Review" on one run and'
+      + ' "Analyzing code changes in storage.js" on the next. Prefer a general\n'
+      + 'instruct model; gemma3:4b gave the best summaries at a third the size.',
+    );
+  }
+  if (!wantsInference && inferenceModel) {
+    throw new Error('--model only means something with --infer.');
+  }
+  // Backgrounded, and that is the whole point of this being a separate line.
+  // git waits for the hook, and inference measured 23-60s per commit on this
+  // machine — in the foreground that is a terminal that hangs after every single
+  // commit, which is precisely how §4.4 says a hook earns deletion. stdin is
+  // closed and both output streams discarded so nothing is left holding git's
+  // pipes open, which is what would make it wait despite the `&`.
+  //
+  // Best-effort past that: closing the terminal before it finishes takes the
+  // inference with it, and a commit made while another one still holds the CSP
+  // lock simply gets no guess. Both are a missing suggestion in an untrusted
+  // lane, which is the cheapest failure this feature has.
+  const INFER_LINE = `noosphere infer --quiet --model ${inferenceModel} `
+    + '--path "$(git rev-parse --show-toplevel)" </dev/null >/dev/null 2>&1 &';
   const POST_COMMIT_HOOK = `#!/bin/sh
 ${HOOK_MARKER}
 # Records the measured repository position after each commit.
@@ -1880,13 +1919,13 @@ ${HOOK_MARKER}
 # Failures are deliberately silent: git ignores this hook's exit status, and
 # telemetry must never be able to fail a developer's commit.
 ${HOOK_LINE}
-`;
-
-  await assertGitRepository(root);
-  const sub = process.argv[3];
-  if (sub !== 'install' && sub !== 'uninstall') {
-    throw new Error('Usage: noosphere hooks <install|uninstall>');
-  }
+${wantsInference ? `
+# Asks a local model what the commit looks like and records the answer in the
+# inferred lane, which is untrusted and cannot reach .noosphere/state.json
+# without \`noosphere state promote\`. Detached on purpose: it takes tens of
+# seconds, and git waits for this script.
+${INFER_LINE}
+` : ''}`;
   const directory = await hooksDirectory(root);
   const hook = path.join(directory, 'post-commit');
   // Bounded and reparse-checked rather than a bare read: `.git/hooks` is a
@@ -1918,17 +1957,25 @@ ${HOOK_LINE}
         console.log(`Already installed at ${hook}.`);
         return;
       }
+      // Naming the direction, because the quiet case is installing WITHOUT
+      // --infer over a hook that had it: that removes inference, and a body
+      // printed without comment reads as "nothing changed" to someone who was
+      // only re-running install to repair the path.
+      const had = existing.includes('noosphere infer ');
       await atomicWrite(hook, POST_COMMIT_HOOK);
       if (process.platform !== 'win32') await chmod(hook, 0o755);
       console.log(`Updated ${hook} to the current hook:\n`);
+      if (had && !wantsInference) console.log('Commit inference was REMOVED; re-add it with --infer --model <name>.\n');
+      if (!had && wantsInference) console.log(`Commit inference added, using ${inferenceModel}.\n`);
       console.log(POST_COMMIT_HOOK);
       return;
     }
     // Clobbering a developer's own hook earns permanent distrust, so print the
-    // one line they need and let them place it themselves.
+    // lines they need and let them place them themselves.
     throw new Error(
       `Refusing to overwrite the existing post-commit hook at ${hook}.\n` +
-      `Add this line to it instead:\n\n  ${HOOK_LINE}\n`,
+      `Add ${wantsInference ? 'these lines' : 'this line'} to it instead:\n\n  ${HOOK_LINE}\n` +
+      (wantsInference ? `  ${INFER_LINE}\n` : ''),
     );
   }
 
@@ -3972,7 +4019,10 @@ Commands:
               answer as an inferred guess (--commit <rev>, --model <name>).
               Loopback-only: it reads your diffs.
   hooks install|uninstall
-              Install or remove the post-commit hook that runs observe
+              Install or remove the post-commit hook that runs observe.
+              --infer --model <name> also records a guess per commit, detached
+              so it cannot delay a commit. Not a coder model: see --infer's
+              own error text for what was measured.
   master-prompt
               Print or explicitly store the exact pinned project prompt
   trust approve <slot>

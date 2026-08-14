@@ -22,8 +22,8 @@ const temporary = [];
 // sets INIT_CWD, so under `npm test` a cwd-only invocation would operate on the
 // checkout instead of this fixture — installing a hook into the real repository
 // and reporting success. NOOSPHERE_HOME is redirected for the same reason.
-async function hooks(root, sub) {
-  return execFileAsync(process.execPath, [CLI, 'hooks', sub, '--path', root], {
+async function hooks(root, sub, ...args) {
+  return execFileAsync(process.execPath, [CLI, 'hooks', sub, ...args, '--path', root], {
     cwd: root,
     env: { ...process.env, NOOSPHERE_HOME: path.join(root, 'home') },
   });
@@ -172,6 +172,86 @@ describe('commit observations', () => {
 
     assert.match(result.stdout, /Updated/);
     assert.match(await fs.readFile(hook, 'utf8'), /--path "\$\(git rev-parse --show-toplevel\)"/);
+  });
+
+  it('will not install inference without being told which model', async () => {
+    const root = await repository();
+
+    const noModel = await hooks(root, 'install', '--infer').then(() => null, error => error);
+    assert.notEqual(noModel, null, '--infer must not pick a model on its own');
+    assert.match(noModel.stderr, /--infer requires --model/);
+    // The measurement is in the error because the choice is not arbitrary: the
+    // largest model tested was the worst, and a coder model is the wrong tool.
+    assert.match(noModel.stderr, /CODER model is the wrong tool/);
+
+    const noInfer = await hooks(root, 'install', '--model', 'gemma3:4b')
+      .then(() => null, error => error);
+    assert.notEqual(noInfer, null, '--model alone must not read as a request to infer');
+    assert.match(noInfer.stderr, /--model only means something with --infer/);
+
+    assert.equal(
+      await fs.stat(path.join(root, '.git', 'hooks', 'post-commit')).catch(() => null),
+      null,
+      'a refused install must leave no hook behind',
+    );
+  });
+
+  // The claim under test is the shell idiom, not the model: `... </dev/null
+  // >/dev/null 2>&1 &`. git waits for the hook, and inference measured 23-60s
+  // per commit, so getting this wrong hangs every commit — which is exactly how
+  // §4.4 says a hook earns deletion. Substituting a sleep for the model keeps
+  // the installed redirect-and-background tail intact and lets this run
+  // anywhere, with no Ollama and no model download in CI.
+  it('installs an inference line that cannot delay a commit', async () => {
+    const root = await repository();
+    await hooks(root, 'install', '--infer', '--model', 'gemma3:4b');
+    const hook = path.join(root, '.git', 'hooks', 'post-commit');
+    const installed = await fs.readFile(hook, 'utf8');
+
+    assert.match(installed, /noosphere infer --quiet --model gemma3:4b/);
+    assert.match(installed, /--path "\$\(git rev-parse --show-toplevel\)"/);
+    // Observe stays in the foreground: the drift check and journal drafts read
+    // what it writes, so it has to be finished before the commit returns.
+    assert.ok(
+      installed.indexOf('noosphere observe') < installed.indexOf('noosphere infer'),
+      'observe must run before inference is spawned',
+    );
+
+    const marker = path.join(root, 'inference-finished');
+    await fs.writeFile(
+      hook,
+      // Only the COMMAND is substituted; the redirect-and-background tail the
+      // CLI installed is kept verbatim, because that tail is the thing under
+      // test. Replacing the whole line would supply the `&` from here and pass
+      // whatever the CLI wrote — which it did, until dropping the `&` from the
+      // installed line failed to turn this red.
+      installed.replace(
+        /^noosphere infer .*?(?= <\/dev\/null)/m,
+        `sh -c 'sleep 3; : > "${marker}"'`,
+      ),
+      { mode: 0o755 },
+    );
+
+    await fs.writeFile(path.join(root, 'file.txt'), 'two\n');
+    const startedAt = Date.now();
+    await execFileAsync('git', ['commit', '--quiet', '-am', 'second'], {
+      cwd: root,
+      env: { ...process.env, NOOSPHERE_HOME: path.join(root, 'home') },
+    });
+    const elapsed = Date.now() - startedAt;
+
+    assert.ok(elapsed < 2_000, `commit waited ${elapsed}ms on a backgrounded 3s job`);
+    // And it really is still running rather than killed with the hook: a
+    // detachment that silently drops the work would pass the timing assertion
+    // above on its own.
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      if (await fs.stat(marker).then(() => true, () => false)) break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    assert.ok(
+      await fs.stat(marker).then(() => true, () => false),
+      'the backgrounded job must survive the hook exiting',
+    );
   });
 
   it('refuses to overwrite or remove a hook it did not write', async () => {
