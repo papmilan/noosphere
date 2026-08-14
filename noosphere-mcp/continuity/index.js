@@ -64,7 +64,7 @@ import {
 } from './acp/sync.js';
 import { mutateSyncMetadata, readSyncMetadata, withUploadReservationLock } from './acp/sync-metadata.js';
 import { approveOrigin, secureRelayerFetch } from './relayer-authority.js';
-import { quoteUntrustedMemory, sanitizeMemoryText } from './memory-safety.js';
+import { normalizeUntrusted, quoteUntrustedMemory, sanitizeMemoryText } from './memory-safety.js';
 import { renderSlotBlock } from './render.js';
 import {
   appendRepositoryFile,
@@ -3674,9 +3674,26 @@ async function removeLegacyProjectFiles(root) {
 // The bounds live with the other module constants: this runs during the
 // entry-point await, where a const declared here would still be in its TDZ.
 async function formatLocalJournal(root) {
-  const journal = await readRepositoryText(
+  // journal.md is untrusted human prose — CLAUDE.md says so, and any agent that
+  // can run `noosphere journal` appends to it. This section used to reach
+  // context.md, and therefore a terminal and the next agent's context, exactly
+  // as written: no normalization at all. PR #87 closed the same gap in
+  // csp/summary.js and left this one recorded rather than riding along.
+  //
+  // Normalized BEFORE the entry split rather than per entry, because the split
+  // itself depends on '\n': normalizeUntrusted collapses CR, CRLF, U+0085,
+  // U+2028 and U+2029 to '\n' first, so a journal written with CRLF or carrying
+  // a LINE SEPARATOR is divided on the same boundaries a reader sees.
+  //
+  // Not quoted, unlike the excerpt in renderResumeSummary. Entries here keep
+  // their own `## <timestamp> — <agent> / <type>` headers, which is what makes
+  // the section readable as a list; prefixing every line would destroy that.
+  // Stripping the control characters is the part that matters — an ESC that
+  // reaches a console is the threat, and a leftover `[31m` is inert text, the
+  // same trade acp/journal-draft.js already makes for commit subjects.
+  const journal = normalizeUntrusted(await readRepositoryText(
     path.join(root, '.noosphere', 'journal.md'),
-  );
+  ));
   const firstEntry = journal.indexOf('\n## ');
   const entries =
     firstEntry >= 0 ? journal.slice(firstEntry + 1).trim() : '';
