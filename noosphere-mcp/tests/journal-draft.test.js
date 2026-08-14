@@ -213,6 +213,25 @@ describe('journal drafts', () => {
     assert.doesNotMatch(stdout, /pending-journal\.md/);
   });
 
+  it('refuses to overwrite an edited draft, and replaces it only on request', async () => {
+    const root = await repository();
+    await commit(root, 'first');
+    await journal(root, 'draft');
+    const edited = `${await readJournalDraft(root)}\nWas chasing the lock timeout.\n`;
+    await fs.writeFile(pendingJournalPath(root), edited);
+    await commit(root, 'second');
+
+    // The prose is the only copy — the pending file is gitignored runtime state.
+    const failure = await journal(root, 'draft').then(() => null, error => error);
+    assert.notEqual(failure, null, 'a second draft must not overwrite the first');
+    assert.match(failure.stderr, /A pending journal draft already exists/);
+    assert.match(await readJournalDraft(root), /Was chasing the lock timeout\./);
+
+    const replaced = await journal(root, 'draft', '--replace');
+    assert.match(replaced.stdout, /Wrote /);
+    assert.doesNotMatch(await readJournalDraft(root), /Was chasing the lock timeout\./);
+  });
+
   it('discards a pending draft on request', async () => {
     const root = await repository();
     await commit(root, 'first');
