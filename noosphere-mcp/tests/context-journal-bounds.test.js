@@ -85,6 +85,43 @@ describe('context.md journal bounds', () => {
     assert.match(section, /after-4\b/);
   });
 
+  // journal.md is untrusted prose: any agent that can run `noosphere journal`
+  // appends to it, and this section lands in context.md, a terminal, and the
+  // next agent's context. It used to be written out exactly as stored.
+  it('strips control and invisible code points out of an entry body', async () => {
+    const escape = String.fromCodePoint(0x1b);
+    const zeroWidth = String.fromCodePoint(0x200b);
+    const tag = String.fromCodePoint(0xe0041);
+    const root = await projectWithJournal([
+      `plain body`,
+      `payload ${escape}[2J and ${zeroWidth}invisible ${tag}text`,
+    ]);
+
+    const rendered = await render(root);
+
+    assert.equal(rendered.includes(escape), false, 'a terminal escape must not reach the console');
+    assert.equal(rendered.includes(zeroWidth), false, 'zero-width must not survive');
+    assert.equal(rendered.includes(tag), false, 'TAG-block code points must not survive');
+    // The words themselves stay: this neutralizes, it does not censor.
+    assert.match(journalSection(rendered), /invisible/);
+    assert.match(journalSection(rendered), /plain body/);
+  });
+
+  // The entry split keys on '\n', so a separator the writer used and the
+  // splitter did not recognize would merge two entries into one. Normalizing
+  // first makes the boundaries the same ones a reader sees.
+  it('splits entries written with CRLF the same as entries written with LF', async () => {
+    const root = await projectWithJournal(['first body', 'second body']);
+    const file = path.join(root, '.noosphere', 'journal.md');
+    await fs.writeFile(file, (await fs.readFile(file, 'utf8')).replace(/\n/gu, '\r\n'));
+
+    const section = journalSection(await render(root));
+
+    assert.match(section, /first body/);
+    assert.match(section, /second body/);
+    assert.equal(section.includes('\r'), false, 'carriage returns must not survive');
+  });
+
   it('does not treat a heading inside an entry body as a new entry', async () => {
     const bodies = Array.from({ length: 40 }, (_, index) => `body-${index}`);
     // A quoted markdown heading is ordinary prose, not an entry boundary.
