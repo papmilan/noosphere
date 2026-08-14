@@ -1,7 +1,7 @@
 {
   "version": 1,
   "status": "in-progress",
-  "current_task": "Inferred-continuity arc complete: commit observations (#67), journal drafts (#68), the inferred CSP lane (#69), commit inference (#70), dogfooding fixes (#71, #72). CLI reinstalled and the post-commit observer hook is installed on this repository.",
-  "next_action": "Measure the spec's own criterion around 2026-08-27: is state.json accurate without anyone having run 'state set'? If it is stale again, the spec says revert rather than extend. Weak model yield (~28s, vague guesses on qwen2.5-coder:14b) means try a larger model before concluding item 1 does not earn its place.",
+  "current_task": "Session 2026-08-14: five PRs merged to main (8f77ccf). #78 journal draft no longer overwrites owner prose; #79 replay-key first-use race (two sites: ensureReplayKey and ensureInitialCatalog); #80 stale-lock reclaim targets the judged lock, not the path (owner-lock.js, with csp/storage.js's duplicate deleted rather than double-patched); #81 withdrew spec §5's unsatisfiable success criterion; #82 put the inferred lane on context.md. CLI reinstalled and all three repo hooks repaired to the --path form.",
+  "next_action": "Give the inferred lane a writer, or the new §5.2 criterion measures an empty set: #82 made it reachable but nothing writes to it (infer is manual by design). Try a model larger than qwen2.5-coder:14b first — yield was ~28s of vague guesses. Two recorded defects remain open: replaceWithRetry's 500ms Windows budget vs its own 1200ms race test, and safeLine letting zero-width code points through where normalizeUntrusted strips them.",
   "blocker": null
 }
