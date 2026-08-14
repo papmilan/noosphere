@@ -51,6 +51,11 @@ function model(answer) {
 describe('inference from a commit', () => {
   it('records a suggestion in the inferred lane and nowhere else', async () => {
     const root = await repository();
+    // The model still volunteers a next_action — they do, whatever the schema
+    // asks for — and it is dropped. Measured over 4 real commits and 3 local
+    // models: a next action is either null or a restatement of what the commit
+    // already did, because it is not in the diff to begin with. §7 rejected
+    // item 5 on that same ground.
     const { fetchImpl, requests } = model(
       '{"current_task": "Building the parser", "next_action": "Add tests for parse()"}',
     );
@@ -60,7 +65,7 @@ describe('inference from a commit', () => {
     assert.equal(requests.length, 1);
     const fields = await readInferredState(root);
     assert.equal(fields.current_task.value, 'Building the parser');
-    assert.equal(fields.next_action.value, 'Add tests for parse()');
+    assert.deepEqual(Object.keys(fields), ['current_task'], 'a model may not propose a next action');
     assert.equal(fields.current_task.source, 'inferred');
     assert.match(fields.current_task.basis, /^inferred from commit [0-9a-f]{12} by model test-model$/);
     assert.equal(fields.current_task.basis.includes(result.commit.slice(0, 12)), true);
@@ -87,7 +92,7 @@ describe('inference from a commit', () => {
     assert.match(injected[0], /^> /);
   });
 
-  it('drops every field the model invents beyond the two it may propose', async () => {
+  it('drops every field the model invents beyond the one it may propose', async () => {
     const root = await repository();
     const { fetchImpl } = model(JSON.stringify({
       current_task: 'Building the parser',
@@ -259,8 +264,11 @@ describe('inference from a commit', () => {
     // mirroring an object shape it had read inside the diff. The schema is what
     // pins the keys.
     const { format } = requests[0].body;
-    assert.deepEqual(Object.keys(format.properties).sort(), ['current_task', 'next_action']);
+    assert.deepEqual(Object.keys(format.properties).sort(), ['current_task']);
     assert.deepEqual(format.properties.current_task.type, ['string', 'null']);
+    // Not asked for either, so a model that answers it is spending its own
+    // tokens rather than being invited to guess.
+    assert.doesNotMatch(requests[0].body.messages[0].content, /next_action/);
   });
 
   it('sends the diff a merge commit actually introduced', async () => {
@@ -287,16 +295,19 @@ describe('inference from a commit', () => {
     await assert.rejects(inferFromCommit(root, {}), /A model is required/);
   });
 
-  it('parses only strings for the two allowed fields', () => {
-    assert.deepEqual(parseInferenceOutput('{"current_task": 42, "next_action": ["a"]}'), {});
+  it('parses only strings for the one field a model may propose', () => {
+    assert.deepEqual(parseInferenceOutput('{"current_task": 42}'), {});
     assert.deepEqual(parseInferenceOutput('not json at all'), {});
     // Forgiving about the wrapper a model puts around the object, strict about
     // what comes out of it: the fields are reduced and validated either way.
     assert.deepEqual(parseInferenceOutput('[{"current_task": "x"}]'), { current_task: 'x' });
     assert.deepEqual(
-      parseInferenceOutput('{"next_action": "  Run the suite  "}'),
-      { next_action: 'Run the suite' },
+      parseInferenceOutput('{"current_task": "  Building the parser  "}'),
+      { current_task: 'Building the parser' },
     );
+    // A next action is not reachable through the parser however it is offered,
+    // so the narrowing cannot be undone by a model that ignores the schema.
+    assert.deepEqual(parseInferenceOutput('{"next_action": "Run the suite"}'), {});
   });
 
   it('builds a prompt with no unquoted repository content', () => {
