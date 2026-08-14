@@ -2052,9 +2052,10 @@ async function journalDraftFromCli(root, sub) {
       console.log('No observed commits are missing from the journal; nothing to draft.');
       return;
     }
-    // Overwrites any earlier draft: one pending draft at a time is what keeps
-    // this from becoming an inbox nobody reads.
-    await writeJournalDraft(root, draft.text);
+    // One pending draft at a time is what keeps this from becoming an inbox
+    // nobody reads, but replacing it is the owner's call — the draft is where
+    // their prose lives. Same `--replace` as master-prompt.
+    await writeJournalDraft(root, draft.text, { replace: process.argv.includes('--replace') });
     console.log(draft.text);
     console.log(`Wrote ${pending} (${draft.commits} commit${draft.commits === 1 ? '' : 's'}${draft.elided > 0 ? `, ${draft.elided} older not listed` : ''}).`);
     console.log('Edit it to say what you were doing, then run `noosphere journal confirm`.');
@@ -3961,6 +3962,7 @@ Commands:
               Draft a journal entry from the commits observed since the last
               one, edit it, and append it after typing the confirmation the
               draft's own bytes generate. Interactive only, like trust approve.
+              Drafting refuses to overwrite a pending draft unless --replace.
   observe     Record the measured repository position now
   infer       Ask a local Ollama model what a commit looks like and record the
               answer as an inferred guess (--commit <rev>, --model <name>).

@@ -28,7 +28,8 @@ const PENDING = 'pending-journal.md';
 
 // One pending draft, ever. A per-commit draft queue would become another inbox
 // nobody reads, which is the failure this design exists to fix rather than
-// re-dress. Drafting again supersedes the old draft; that is the pruning.
+// re-dress. Superseding the old draft is still the pruning — it just has to be
+// asked for, because the draft is the file the owner writes their prose into.
 const MAX_DRAFT_COMMITS = 20;
 const MAX_SUBJECT_CHARS = 200;
 const MAX_BRANCH_CHARS = 100;
@@ -71,7 +72,26 @@ export async function readJournalDraft(root) {
   return text.trim() ? text : null;
 }
 
-export async function writeJournalDraft(root, text) {
+export async function writeJournalDraft(root, text, { replace = false } = {}) {
+  // "Edit it to say what you were doing" is the entire feature, so the pending
+  // file is the one place the owner's own prose lives before it is journalled —
+  // and it is runtime state, so it is gitignored and there is no copy anywhere.
+  // A second draft used to overwrite it silently, which lost writing that
+  // nothing could recover. Refusing costs one `discard` when the old draft was
+  // untouched; overwriting costs the only copy when it was not.
+  //
+  // Read-then-write, not an exclusive create: two concurrent drafters both hold
+  // machine-generated text, since prose can only be typed into a draft that
+  // already finished being written. The race cannot destroy what this guards.
+  if (!replace && (await readJournalDraft(root)) !== null) {
+    const error = new Error(
+      'A pending journal draft already exists. Confirm it with `noosphere journal confirm`, '
+      + 'drop it with `noosphere journal discard`, or pass --replace to overwrite it — '
+      + 'anything you wrote into it is lost.',
+    );
+    error.code = 'journal-draft-exists';
+    throw error;
+  }
   // Same reason as the observations file: a draft is unconfirmed local work,
   // and a project that never added a .gitignore line for it must not find one
   // untracked the first time it drafts.
