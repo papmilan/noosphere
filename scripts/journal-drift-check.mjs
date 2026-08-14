@@ -19,6 +19,18 @@ import path from 'node:path';
 // hook that fires on every commit is a hook that gets deleted, taking the whole
 // guard with it. Tune with NOOSPHERE_JOURNAL_DRIFT_THRESHOLD.
 const THRESHOLD = Number(process.env.NOOSPHERE_JOURNAL_DRIFT_THRESHOLD ?? 3);
+
+// The session guard below keys on `session_id`, which is a field this script
+// does not own and cannot observe between runs. It was added after the hook
+// re-fired every turn, and it STILL re-fired — the marker held a real session
+// id and the reminder came anyway, so the assumption behind that guard is
+// wrong in some way the script cannot see from inside.
+//
+// So the cooldown is the backstop that does not depend on being right about the
+// harness: whatever `session_id` means, a wall clock is a wall clock. Belt and
+// braces on purpose, because the failure mode here is not a missed reminder —
+// it is a reminder on every single turn, which is how this hook gets deleted.
+const COOLDOWN_MS = Number(process.env.NOOSPHERE_JOURNAL_DRIFT_COOLDOWN_MS ?? 45 * 60 * 1000);
 const SHORT_HEAD = 12;
 const FULL_HEAD = /^[0-9a-f]{40}$/;
 
@@ -56,7 +68,10 @@ function main() {
   // hook wiring itself; .noosphere/ is another tool's namespace, not ours.
   const marker = path.join(root, '.claude', 'journal-drift-state.json');
   const session = typeof payload.session_id === 'string' ? payload.session_id : null;
-  if (session !== null && readJson(marker)?.last_session_id === session) return 0;
+  const previous = readJson(marker) ?? {};
+  if (session !== null && previous.last_session_id === session) return 0;
+  const firedAt = Date.parse(previous.last_fired_at ?? '');
+  if (Number.isFinite(firedAt) && Date.now() - firedAt < COOLDOWN_MS) return 0;
   const observations = readJson(path.join(root, '.noosphere', 'commit-observations.json'));
   if (observations === null) return 0;
 
@@ -82,16 +97,25 @@ function main() {
   });
   if (unjournalled.length < THRESHOLD) return 0;
 
-  // Recorded before the message goes out, so a session is marked as told even
-  // if the agent ignores what follows. Best-effort: an unwritable marker costs
-  // a repeat reminder, never a failed turn.
-  if (session !== null) {
-    try {
-      mkdirSync(path.dirname(marker), { recursive: true });
-      writeFileSync(marker, `${JSON.stringify({ last_session_id: session }, null, 2)}\n`);
-    } catch {
-      // Ignored on purpose. See above.
-    }
+  // Recorded before the message goes out, so a session counts as told even if
+  // the agent ignores what follows. Written unconditionally now, not only when
+  // a session id exists — the timestamp is what the cooldown reads, and gating
+  // the write on `session` is what left the cooldown with nothing to consult.
+  //
+  // `fires` is kept so this stays diagnosable from the outside: if the reminder
+  // appears more often than the cooldown allows, that number says so plainly
+  // instead of leaving the next person to reason about harness internals the
+  // way this script twice got wrong.
+  try {
+    mkdirSync(path.dirname(marker), { recursive: true });
+    writeFileSync(marker, `${JSON.stringify({
+      last_session_id: session,
+      last_fired_at: new Date().toISOString(),
+      last_unjournalled: unjournalled.length,
+      fires: Number.isInteger(previous.fires) ? previous.fires + 1 : 1,
+    }, null, 2)}\n`);
+  } catch {
+    // Best-effort. An unwritable marker costs a repeat reminder, never a turn.
   }
 
   const draft = path.join(root, '.noosphere', 'pending-journal.md');
