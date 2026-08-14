@@ -16,6 +16,7 @@ import {
   readInferredState,
   recordInferredField,
 } from '../continuity/csp/inferred.js';
+import { refreshContext } from '../continuity/index.js';
 import { loadState } from '../continuity/csp/storage.js';
 import { renderResumeSummary } from '../continuity/csp/summary.js';
 import { transitionState } from '../continuity/csp/transitions.js';
@@ -55,6 +56,16 @@ async function fileExists(file) {
 
 async function infer(root, field, value, basis = 'commit 8d1ba7a touched the parser') {
   return recordInferredField(root, field, value, { basis, now: '2026-08-13T00:00:00.000Z' });
+}
+
+// refreshContext loads project config; the bare fixture above has none.
+async function contextProject() {
+  const root = await repository();
+  await fs.writeFile(
+    path.join(root, '.noosphere', 'config.json'),
+    JSON.stringify({ project_id: 'inferred-context', privacy: {} }),
+  );
+  return root;
 }
 
 describe('inferred CSP state', () => {
@@ -211,6 +222,56 @@ describe('inferred CSP state', () => {
     assert.match(summary, /Inferred, NOT canonical/);
     // Quoted, like the journal excerpt: a reader must not mistake it for state.
     assert.match(summary, /^> next_action: run the suite \(inferred; basis: .+\)$/m);
+  });
+
+  // CLAUDE.md sends agents to `noosphere context --local-only` and
+  // `.noosphere/state.json`. The lane rendered only in `noosphere state` and
+  // `noosphere resume`, so it was invisible to every reader that follows the
+  // documented protocol — and the spec's §5 criterion cannot ask whether
+  // inference reaches the read path while it does not reach it at all.
+  it('reaches the documented read path, quoted and labeled', async () => {
+    const root = await contextProject();
+    await infer(root, 'next_action', 'run the suite');
+
+    const rendered = await refreshContext(root, { localOnly: true });
+
+    assert.match(rendered, /## Inferred state \(untrusted guesses, NOT canonical\)/);
+    assert.match(rendered, /^> next_action: run the suite \(inferred; basis: .+\)$/m);
+    assert.match(rendered, /only when the owner runs `noosphere state promote`/);
+    // Below the slots that can render as authoritative, with the other
+    // untrusted data, so ordering alone never suggests authority.
+    assert.ok(
+      rendered.indexOf('## Inferred state') > rendered.indexOf('## Pinned master prompt'),
+      'the inferred lane must render below anything that can be authoritative',
+    );
+  });
+
+  it('says so plainly when the lane is empty', async () => {
+    const rendered = await refreshContext(await contextProject(), { localOnly: true });
+
+    assert.match(rendered, /## Inferred state \(untrusted guesses, NOT canonical\)/);
+    assert.match(rendered, /No inferred values recorded\./);
+  });
+
+  it('neutralizes a hostile guess instead of letting it forge structure', async () => {
+    const root = await contextProject();
+    // CSP validation already refuses control characters, so a newline — and with
+    // it a `## ` at column 0 — cannot reach the render at all. A bidi override
+    // can: it is an ordinary code point to that check, and only the renderer
+    // stops it reversing the text an owner reads before promoting.
+    const override = String.fromCodePoint(0x202e);
+    await infer(root, 'current_task', `ship ${override}daeh eht`);
+
+    const rendered = await refreshContext(root, { localOnly: true });
+
+    assert.equal(rendered.includes(override), false, 'bidi overrides must not survive');
+    assert.match(rendered, /^> current_task: ship daeh eht \(inferred; basis: .+\)$/m);
+    const headings = rendered.split('\n').filter((line) => line.startsWith('## '));
+    assert.equal(
+      headings.filter((line) => line.includes('daeh')).length,
+      0,
+      'a guess must not reach column 0',
+    );
   });
 
   it('refuses to promote without an interactive terminal', async () => {

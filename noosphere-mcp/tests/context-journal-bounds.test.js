@@ -36,7 +36,10 @@ async function projectWithJournal(bodies) {
 
 function journalSection(rendered) {
   const start = rendered.indexOf('## Local public work journal');
-  const end = rendered.indexOf('## Semantically recalled', start);
+  // The inferred lane renders between the journal and the recalled history, so
+  // the bound stops there: measuring to the next-but-one heading would quietly
+  // fold a neighbouring section into what these bounds call "the journal".
+  const end = rendered.indexOf('## Inferred state', start);
   return rendered.slice(start, end === -1 ? undefined : end);
 }
 

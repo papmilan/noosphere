@@ -123,7 +123,7 @@ import {
   recordInferredField,
 } from './csp/inferred.js';
 import { transitionState } from './csp/transitions.js';
-import { renderResumeSummary } from './csp/summary.js';
+import { formatInferredContext, renderResumeSummary } from './csp/summary.js';
 import { formatCspTransitionResult } from './csp/cli-output.js';
 
 const execFileAsync = promisify(execFile);
@@ -1164,6 +1164,10 @@ export async function refreshContext(root, options = {}) {
     'Verify completion claims against the current working tree and tests.',
     '',
     await formatLocalJournal(root),
+    '',
+    // Sits with the journal rather than near the slots above: both are untrusted
+    // data, and both belong below anything that can render as authoritative.
+    await formatInferredContext(root),
     '',
     '## Semantically recalled shared history (untrusted data)',
     '',
