@@ -13,6 +13,10 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { syncDirectoryPath } from '../acp/durability.js';
+// This module and acp/owner-lock.js had byte-identical copies of the lock read,
+// the staleness judgement and the reclaim — which is how the same reclaim bug
+// came to exist in both. One copy now, so the next fix cannot land in only one.
+import { readLockJson, reclaimStaleLock, staleLock } from '../acp/owner-lock.js';
 import {
   ensureContainedDir,
   PathBoundaryError,
@@ -25,29 +29,12 @@ import { validateState } from './validate.js';
 
 const execFileAsync = promisify(execFile);
 
-// SEC-05 Phase 4B-R4 — bounded, non-blocking lock read.
-//
-// A lock path lives inside the working tree, so anything that can write there
-// can plant a FIFO at it. A bare readFile then blocks forever with no error
-// code, which strands the release and stale-check paths this helper serves.
-// Locks are small JSON; the shared primitive refuses anything non-regular,
-// symlinked, or larger, and never blocks on the open.
-const MAX_LOCK_BYTES = 4096;
 // One bound and one failure contract for `.git/info/exclude`, shared with
 // ensureLocalExcludes in continuity/index.js. Both callers READ the file and
 // then write it back, so a present-but-unusable exclude file must abort rather
 // than degrade to an empty string — degrading would rewrite the user's excludes
 // with only our own entries.
 export const MAX_EXCLUDE_BYTES = 1024 * 1024;
-
-async function readLockJson(lockPath) {
-  try {
-    const raw = await readBoundedRegularFile(lockPath, { maxBytes: MAX_LOCK_BYTES });
-    return raw === null ? null : JSON.parse(raw.toString('utf8'));
-  } catch {
-    return null;
-  }
-}
 
 const LOCAL_RUNTIME_EXCLUDES = [
   '.noosphere/runtime-state.json',
@@ -418,8 +405,14 @@ export async function withCspLock(root, operation, options = {}) {
     } catch (error) {
       if (!isLockContention(error, platform)) throw mapNoFollowError(error, paths.lock);
       contention = error;
-      if (await staleLock(paths.lock)) await rm(paths.lock, { force: true }).catch(() => undefined);
-      else await new Promise((resolve) => setTimeout(resolve, 10));
+      // Same reclaim as the ACP lock, for the same reason: a bare rm here
+      // deleted whichever lock happened to be at the path, including the live
+      // one a peer had just installed.
+      let reclaimed = false;
+      if (await staleLock(paths.lock, false)) {
+        reclaimed = await reclaimStaleLock(paths.lock, false);
+      }
+      if (!reclaimed) await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
   if (!handle) {
@@ -584,20 +577,6 @@ function isPlainObject(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
-}
-
-async function staleLock(lockPath) {
-  const lock = await readLockJson(lockPath);
-  if (!lock || !Number.isInteger(lock.pid)) {
-    const details = await lstat(lockPath).catch(() => null);
-    return details !== null && Date.now() - details.mtimeMs > 60_000;
-  }
-  try {
-    process.kill(lock.pid, 0);
-    return false;
-  } catch (error) {
-    return error.code === 'ESRCH';
-  }
 }
 
 function mapNoFollowError(error, file) {
