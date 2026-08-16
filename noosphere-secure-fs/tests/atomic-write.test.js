@@ -109,7 +109,19 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
 
     const after = await fsp.stat(file);
     assert.equal(await fsp.readFile(file, 'utf8'), 'second\n');
-    assert.notEqual(after.ino, before.ino, 'a truncate-in-place write would keep the inode');
+    // POSIX only. The inode is a sound witness for "renamed, not truncated"
+    // where st_ino is a stable identity; on Windows it is an NTFS file index,
+    // which carries no such guarantee across a replace — this assertion passed
+    // and failed on consecutive runs of identical code before it was gated.
+    //
+    // Nothing is lost by scoping it. That the win32 path replaces by rename is
+    // proven directly rather than inferred, by the injected-rename tests in
+    // 'the Windows replace retry' below, and the property this whole file
+    // exists for — no reader ever sees an empty or partial file — is asserted
+    // on every platform by the race at the top of this suite.
+    if (process.platform !== 'win32') {
+      assert.notEqual(after.ino, before.ino, 'a truncate-in-place write would keep the inode');
+    }
     // No temp file survives the write.
     assert.deepEqual((await fsp.readdir(dir)).sort(), ['context.md']);
   });
