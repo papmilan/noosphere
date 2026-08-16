@@ -37,6 +37,27 @@ npm --prefix noosphere-mcp run install:user
 The installer adds the `noosphere` command, per-user background services,
 and shell activation hooks for macOS, Linux, and Windows.
 
+### Installing from npm
+
+The clone above is the supported path for the full product. Installing from
+the registry is also supported, with one limit worth knowing before you start.
+
+```sh
+npm install noosphere-continuity noosphere-relayer
+```
+
+`noosphere-relayer` is declared as an *optional* peer dependency, so npm will
+not install it for you — name it explicitly, as above. Without it, project
+continuity still works: `init`, `status`, `state`, `context`, `journal`,
+`protocol`, `acp`, `replay`, `trust`, `adapters`, `hooks`, and `watch` all run
+against local project files. What needs the relayer is memory and machinery:
+`remember`, `recall`, and `checkpoint` need a relayer *process* to be running,
+and `setup`, `credentials`, `install`, and `doctor` need the relayer *package*
+to be present. Each of those tells you which it is when it cannot find one.
+
+Both packages version independently and `noosphere-continuity` pins the relayer
+exactly, so upgrade them together.
+
 ## Main capabilities
 
 - **CSP project continuity:** preserves durable context, pinned intent,
