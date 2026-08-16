@@ -12,8 +12,58 @@ Dates are npm publish dates. The format follows
 
 ## noosphere-continuity
 
-### Unreleased
+### 2.5.0 — 2026-08-16
 
+- **Inferred state lane.** CSP state now carries provenance, and a lane that
+  guesses cannot escape: a local model may infer `current_task` from a commit
+  into an untrusted lane that is never canonical, rendered on the documented
+  read path and adoptable only by an explicit owner `state promote`. Inference
+  runs from a detached post-commit hook so it cannot delay a commit, and no
+  repository content leaves the machine past the loop that generates it. A
+  commit is not asked for a `next_action` it does not contain, and an empty
+  lane leaves no file behind.
+- **Journal drafts from observed commits.** A post-commit hook records measured
+  commit positions and drafts a journal entry from them, leaving the reasoning
+  to be written in before an owner confirms. A pending draft is never
+  overwritten, since it may hold prose that exists nowhere else. The hook is
+  written through the safe filesystem primitive and pinned to its own
+  repository rather than whatever repository happens to be active.
+- **Installing from npm is supported for project continuity.** Every command
+  that does not need the memory relayer now works from a registry install:
+  previously the CLI resolved the relayer at module scope and died before
+  reading argv, and the lifecycle commands died the same way for a second
+  reason of their own. When the relayer genuinely is missing, the error names
+  the command that installs it in the layout you are actually in rather than
+  telling a registry user to clone a repository. `uninstall` and `doctor` no
+  longer require the relayer at all. See the README for which commands need the
+  relayer package and which need it running.
+- **ACP and CSP locking.** Lock waits are bounded by wall clock, so a slow
+  filesystem stops the wait instead of silently changing the timeout with the
+  retry count. A failed lock write no longer leaks its descriptor or the lock
+  itself, a refused lock unwinds the locks beneath it, a stale lock reclaim
+  takes the lock that was judged rather than whatever is present at reclaim
+  time, and a Windows `EPERM` on the lock file is treated as contention rather
+  than a fault. CSP state persists without hard links and recovers where they
+  are unavailable.
+- **Replay.** A peer that loses the first-use race adopts the key instead of
+  failing, and a peer that replaces the key or misses the catalog is no longer
+  refused outright.
+- **Watcher.** A watcher whose repository goes away stops and says so instead of
+  retrying forever; a subdirectory is no longer mistaken for a vanished disk.
+  The watcher no longer takes `.git/index.lock`, backs off when it fails at
+  startup, and keeps local telemetry out of Git in every project rather than
+  only the one it was configured in.
+- **`doctor`.** Health is decided from the relayer's `/ready` response rather
+  than file presence alone, uploads that are not landing now fail the check,
+  and a manager running older code than is installed is reported.
+- **Lifecycle and services.** Service logs are capped, Windows services are
+  given a working directory, a reinstall no longer copies a runtime directory
+  onto itself, and the CLI wrapper name is resolved from one place. macOS
+  keychain credential storage works.
+- **Context and diagnostics.** The journal section of `context.md` is bounded,
+  journal prose is normalized before it reaches `context.md` through the
+  registered normalizer rather than a weaker private copy, and a failing
+  relayer says which relayer failed and why instead of `fetch failed`.
 - **SEC-05 Phase 5 replay ledger — closes SEC-05.** Added owner-local,
   authenticated replay observations with content-based identity, monotonic
   counts, crash-recoverable journals, deterministic 4,096-record/90-day
@@ -93,7 +143,7 @@ Dates are npm publish dates. The format follows
   symlinked/reparse state directories and path components are rejected on POSIX.
   This was the POSIX portion; Windows junction/reparse containment and the
   owner-only SID ACL boundary that fully close SEC-03 landed later in PR #24 (see
-  the Unreleased entry above). SEC-03 was not fully closed as of this 2.3.1 patch.
+  the 2.5.0 entry above). SEC-03 was not fully closed as of this 2.3.1 patch.
 - **SEC-05:** recalled semantic memory is treated as untrusted quoted data —
   control characters, terminal escapes, and system-role/markup impersonation
   are sanitized, and recalled text is never injected into adapter instructions
@@ -169,7 +219,7 @@ Dates are npm publish dates. The format follows
 
 ## noosphere-relayer
 
-### Unreleased
+### 2.1.4 — 2026-08-16
 
 **Dependency patch.** No source changes.
 
