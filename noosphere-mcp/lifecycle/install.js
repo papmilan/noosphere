@@ -18,8 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { noosphereHome } from './registry.js';
-import { resolveRelayerPath } from './relayer-source.js';
-import { CredentialStore } from './credentials.js';
+import { RelayerSourceError, resolveRelayerPath } from './relayer-source.js';
 import { formatServiceInstallError } from './service-errors.js';
 import { isStale, readManagerMarker, sourceStamp } from './service-state.js';
 import {
@@ -36,7 +35,15 @@ const execFileAsync = promisify(execFile);
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const sourceMcp = path.resolve(directory, '..');
 const sourceRoot = path.resolve(sourceMcp, '..');
-const sourceRelayer = resolveRelayerPath();
+// Resolved on demand, not at module scope. `doctor` and `uninstall` never need
+// the relayer source, but a module-scope resolution threw before the entry
+// point below ran, so every command in this file died with an uncaught stack
+// instead of the guidance the error carries.
+let cachedRelayerSource;
+function relayerSource() {
+  cachedRelayerSource ??= resolveRelayerPath();
+  return cachedRelayerSource;
+}
 const secureFsRuntimeEntries = [
   'package.json',
   'index.js',
@@ -116,12 +123,20 @@ const platformOpts = {
 // Entry point
 // ---------------------------------------------------------------------------
 
-if (action === 'uninstall') {
-  await uninstall();
-} else if (action === 'doctor') {
-  await doctor();
-} else {
-  await install();
+try {
+  if (action === 'uninstall') {
+    await uninstall();
+  } else if (action === 'doctor') {
+    await doctor();
+  } else {
+    await install();
+  }
+} catch (error) {
+  // Only the missing relayer is handled here. Everything else keeps its stack,
+  // which is what an installer fault needs.
+  if (!(error instanceof RelayerSourceError)) throw error;
+  console.error(error.message);
+  process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +144,7 @@ if (action === 'uninstall') {
 // ---------------------------------------------------------------------------
 
 async function install() {
+  const sourceRelayer = relayerSource();
   await mkdir(appRoot, { recursive: true, mode: 0o700 });
   await mkdir(binDirectory, { recursive: true, mode: 0o700 });
   await mkdir(logDirectory, { recursive: true, mode: 0o700 });
@@ -817,6 +833,11 @@ async function installClaudeHook() {
 // ---------------------------------------------------------------------------
 
 async function configuredCredentials(file) {
+  // Imported on demand for the same reason relayerSource() is resolved on
+  // demand: ./credentials.js re-exports the relayer's own module, so loading it
+  // at module scope resolves the relayer before the entry point runs. Only the
+  // install path needs it.
+  const { CredentialStore } = await import('./credentials.js');
   if (new CredentialStore('default').status().present) return true;
   const contents = await readFile(file, 'utf8').catch(() => '');
   return (

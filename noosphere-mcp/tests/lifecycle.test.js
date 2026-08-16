@@ -1029,9 +1029,9 @@ describe('Shell integration — block injection idempotency', () => {
 // the copy really is relayer-less, so `--help` succeeding means the graph is
 // lazy rather than that the test quietly found a relayer after all.
 describe('CLI startup without a sibling relayer', () => {
-  async function runIsolated(pkg, args) {
+  async function runIsolated(pkg, args, env = {}) {
     const child = spawn(process.execPath, [path.join(pkg, 'continuity', 'index.js'), ...args], {
-      env: { ...process.env },
+      env: { ...process.env, ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const stdout = [];
@@ -1067,6 +1067,91 @@ describe('CLI startup without a sibling relayer', () => {
       const setup = await runIsolated(pkg, ['setup']);
       assert.notEqual(setup.code, 0, 'setup genuinely needs the relayer in this layout');
       assert.match(setup.stderr, /Could not locate the noosphere-relayer package/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // The lazy graph #89 built stopped at the CLI. lifecycle/install.js still
+  // resolved the relayer at module scope — directly, and again through
+  // ./credentials.js, which re-exports the relayer's own module under a
+  // top-level await. doctor, install and uninstall are spawned as that file, so
+  // all three died before their entry point with an uncaught stack: the
+  // guidance was printed under `throw new Error(` and a caret, not as advice.
+  // uninstall and doctor never needed the relayer at all.
+  //
+  // Both layouts are asserted because the advice differs by layout and each is
+  // useless in the other: a registry user cannot act on "clone the repo", and a
+  // clone user has no peer dependency to install.
+  async function relayerLessCopy(root, relativePackage) {
+    const pkg = path.join(root, relativePackage);
+    await mkdir(pkg, { recursive: true });
+    for (const dir of ['continuity', 'lifecycle']) {
+      await cp(path.join(packageRoot, dir), path.join(pkg, dir), { recursive: true });
+    }
+    await cp(path.join(packageRoot, 'package.json'), path.join(pkg, 'package.json'));
+    await symlink(path.join(packageRoot, 'node_modules'), path.join(pkg, 'node_modules'));
+    return pkg;
+  }
+
+  function assertNoRawStack(result, command) {
+    assert.doesNotMatch(
+      result.stderr,
+      /^\s*\^\s*$/m,
+      `${command} must not print a raw stack trace: ${result.stderr}`,
+    );
+    assert.doesNotMatch(
+      result.stderr,
+      /^\s*throw new /m,
+      `${command} must not print a raw stack trace: ${result.stderr}`,
+    );
+  }
+
+  it('guides instead of crashing when lifecycle commands cannot find the relayer', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'noosphere-no-relayer-lifecycle-'));
+
+    try {
+      // A registry install lands at <prefix>/node_modules/noosphere-continuity,
+      // which is what makes the npm branch of the guidance reachable.
+      const registryPkg = await relayerLessCopy(root, path.join('node_modules', 'noosphere-continuity'));
+      const fakeHome = path.join(root, 'home');
+      const home = path.join(fakeHome, '.noosphere');
+      await mkdir(home, { recursive: true });
+      const env = baseEnv(fakeHome, home);
+
+      for (const command of ['doctor', 'install']) {
+        const result = await runIsolated(registryPkg, [command], env);
+        assertNoRawStack(result, command);
+        assert.notEqual(result.code, 0, `${command} genuinely needs the relayer`);
+        assert.match(result.stderr, /Could not locate the noosphere-relayer package/);
+        assert.match(
+          result.stderr,
+          /npm install noosphere-relayer@/,
+          `${command} must tell a registry user the command that actually fixes it`,
+        );
+        assert.doesNotMatch(
+          result.stderr,
+          /git clone/,
+          `${command} must not send a registry user to a clone they are not in`,
+        );
+      }
+
+      // uninstall never touches the relayer source, so the missing peer must
+      // not stop a registry user from removing what they installed.
+      const uninstall = await runIsolated(registryPkg, ['uninstall'], env);
+      assertNoRawStack(uninstall, 'uninstall');
+      assert.equal(uninstall.code, 0, `uninstall must not require the relayer: ${uninstall.stderr}`);
+
+      // Same failure, a clone layout, and the advice has to flip.
+      const clonePkg = await relayerLessCopy(root, 'pkg');
+      const doctor = await runIsolated(clonePkg, ['doctor'], env);
+      assertNoRawStack(doctor, 'doctor');
+      assert.match(doctor.stderr, /git clone https:\/\/github\.com\/papmilan\/noosphere\.git/);
+      assert.doesNotMatch(
+        doctor.stderr,
+        /npm install noosphere-relayer@/,
+        'a clone user has no peer dependency to install',
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }
