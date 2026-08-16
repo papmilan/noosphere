@@ -169,6 +169,18 @@ Dates are npm publish dates. The format follows
 
 ## noosphere-relayer
 
+### Unreleased
+
+**Dependency patch.** No source changes.
+
+- Updated `body-parser` (2.2.2 → 2.3.0) for GHSA-v422-hmwv-36x6, where an
+  invalid `limit` value silently disabled body size enforcement, and `valibot`
+  (1.4.1 → 1.4.2) for GHSA-5qjj-4xww-7phc. Both arrive transitively, through
+  `express` and `@mysten/sui` respectively, and both sat below the
+  `--audit-level=high` gate CI enforces, so neither was failing a build.
+- `noosphere-continuity` pins this package as an exact optional peer
+  dependency, so its `peerDependencies` entry moves to 2.1.4 in step.
+
 ### 2.1.3 — 2026-07-18
 
 - Made durability synchronization portable across supported platforms by
