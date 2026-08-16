@@ -1186,19 +1186,28 @@ export async function removeRepositoryDirectoryIfEmpty(directory, options = {}) 
 // relative to the contention; exhausting it means something is holding the file
 // open indefinitely, and that must surface as an error rather than as a silent
 // downgrade.
+// The budget is wall-clock, not a retry count. `50 attempts * 10 ms` reads like
+// 500 ms but is not: each attempt also pays for however long the failing
+// `MoveFileEx` itself took, so the real ceiling drifted with the filesystem and
+// the machine — and 500 ms was under the 1200 ms window atomic-write.test.js
+// races a reader against this path for, so a slow enough runner could exhaust
+// the budget inside a test written to prove the replace survives contention.
+// A deadline says what is actually meant: keep trying while a reader could
+// plausibly still be letting go, then fail honestly.
 const REPLACE_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
-const REPLACE_ATTEMPTS = 50;
+const REPLACE_BUDGET_MS = 5_000;
 const REPLACE_BACKOFF_MS = 10;
 
 async function replaceWithRetry(renameImpl, from, to, options = {}) {
   const platform = options.platform ?? process.platform;
-  for (let attempt = 1; ; attempt += 1) {
+  const deadline = Date.now() + (options.replaceBudgetMs ?? REPLACE_BUDGET_MS);
+  for (;;) {
     try {
       await renameImpl(from, to);
       return;
     } catch (error) {
       if (platform !== 'win32'
-        || attempt >= REPLACE_ATTEMPTS
+        || Date.now() >= deadline
         || !REPLACE_RETRY_CODES.has(error.code)) throw error;
       await new Promise((resolve) => setTimeout(resolve, REPLACE_BACKOFF_MS));
     }

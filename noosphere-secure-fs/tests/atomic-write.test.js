@@ -236,15 +236,21 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
       assert.equal(await fsp.readFile(file, 'utf8'), 'body\n');
     });
 
-    it('gives up rather than falling back to a truncating write', async () => {
+    // The budget is spent here rather than waited out: `replaceBudgetMs` is the
+    // same seam as `rename` and `platform`, so the give-up path is provable in
+    // milliseconds instead of costing the suite the real 5 s ceiling.
+    it('gives up on a wall-clock deadline rather than falling back to a truncating write', async () => {
       const dir = await fresh();
       const file = path.join(dir, 'exclude');
       await fsp.writeFile(file, 'original\n', 'utf8');
       let attempts = 0;
+      const budget = 120;
+      const started = Date.now();
       await assert.rejects(
         atomicRepositoryWrite(file, 'replacement\n', {
           platform: 'win32',
           copyWindowsAcl: async () => {},
+          replaceBudgetMs: budget,
           rename: async () => {
             attempts += 1;
             throw Object.assign(new Error('EBUSY: resource busy or locked, rename'), { code: 'EBUSY' });
@@ -253,6 +259,14 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
         (error) => ['EBUSY', 'EPERM'].includes(error.code),
       );
       assert.ok(attempts > 1, 'the replace must have been retried');
+      // A retry *count* would return here in whatever time N attempts happened
+      // to take. Holding the elapsed time against the budget is what keeps the
+      // ceiling a duration, so it cannot silently drop back under the 1200 ms
+      // window the contention race below runs for.
+      assert.ok(
+        Date.now() - started >= budget,
+        `the deadline must bound the retries, gave up after ${Date.now() - started}ms of ${budget}ms`,
+      );
       // A silent fallback to fs.writeFile here would reintroduce the empty-file
       // window exactly when a reader is known to be holding the target.
       assert.equal(await fsp.readFile(file, 'utf8'), 'original\n');

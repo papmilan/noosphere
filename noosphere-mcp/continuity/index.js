@@ -24,7 +24,12 @@ import {
   forgetProject,
 } from '../lifecycle/registry.js';
 import { writeHint } from '../lifecycle/ide-bridge.js';
-import { runSetupWizard, runCredentialsCommand } from './credentials-cli.js';
+// Loaded on demand, not at module scope. credentials-cli.js resolves the
+// sibling noosphere-relayer source and imports it with a top-level await, so a
+// static import here made every command — `--help` included — fail outright
+// wherever the relayer is not a sibling directory (an install straight from the
+// npm registry, most obviously). Only `setup` and `credentials` need it.
+const credentialsCli = () => import('./credentials-cli.js');
 import { runOllamaSession } from './ollama.js';
 import { workspaceFingerprintHex as workspaceFingerprint, observeRepository, classifyCompatibility } from './acp/git-state.js';
 import { recordCommitObservation } from './acp/commit-observations.js';
@@ -334,10 +339,10 @@ try {
       await execFromCli(projectDir);
       break;
     case 'setup':
-      await runSetupWizard();
+      await (await credentialsCli()).runSetupWizard();
       break;
     case 'credentials':
-      await runCredentialsCommand(process.argv[3]);
+      await (await credentialsCli()).runCredentialsCommand(process.argv[3]);
       break;
     case 'run-relayer':
       await runForegroundService('relayer');

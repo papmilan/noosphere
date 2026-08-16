@@ -3,10 +3,12 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import {
   access,
+  cp,
   mkdtemp,
   mkdir,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import os from 'node:os';
@@ -1009,6 +1011,64 @@ describe('Shell integration — block injection idempotency', () => {
       assert.equal(matches.length, 1, 'Block must appear exactly once after two installs');
     } finally {
       await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+});
+
+// The CLI used to reach the relayer through a *static* import: index.js imported
+// credentials-cli.js at module scope, which resolves the sibling relayer source
+// and imports it with a top-level await. Every command therefore required the
+// relayer to exist — `noosphere --help` on an install straight from the npm
+// registry died with a raw stack trace before argv was ever read.
+//
+// Reproducing that needs a layout where resolveRelayerPath() genuinely fails,
+// which the repository itself can never be: its candidate list finds
+// ../noosphere-relayer from the source tree no matter what the environment says.
+// So the package is copied somewhere with no relayer beside it (~1.2 MB, ~0.1 s)
+// and driven there. The `setup` assertion is what keeps this honest — it proves
+// the copy really is relayer-less, so `--help` succeeding means the graph is
+// lazy rather than that the test quietly found a relayer after all.
+describe('CLI startup without a sibling relayer', () => {
+  async function runIsolated(pkg, args) {
+    const child = spawn(process.execPath, [path.join(pkg, 'continuity', 'index.js'), ...args], {
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const stdout = [];
+    const stderr = [];
+    child.stdout.on('data', (chunk) => stdout.push(chunk));
+    child.stderr.on('data', (chunk) => stderr.push(chunk));
+    const code = await new Promise((resolve) => child.once('close', resolve));
+    return {
+      code,
+      stdout: Buffer.concat(stdout).toString(),
+      stderr: Buffer.concat(stderr).toString(),
+    };
+  }
+
+  it('prints help instead of demanding the relayer, which only setup and credentials need', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'noosphere-no-relayer-'));
+    const pkg = path.join(root, 'pkg');
+
+    try {
+      await mkdir(pkg, { recursive: true });
+      for (const dir of ['continuity', 'lifecycle']) {
+        await cp(path.join(packageRoot, dir), path.join(pkg, dir), { recursive: true });
+      }
+      await cp(path.join(packageRoot, 'package.json'), path.join(pkg, 'package.json'));
+      // Bare specifiers such as @noosphere/acp-protocol still have to resolve;
+      // only noosphere-relayer is meant to be missing, and it is not in here.
+      await symlink(path.join(packageRoot, 'node_modules'), path.join(pkg, 'node_modules'));
+
+      const help = await runIsolated(pkg, ['--help']);
+      assert.equal(help.code, 0, `--help must not require the relayer: ${help.stderr}`);
+      assert.match(help.stdout, /Noosphere continuity/);
+
+      const setup = await runIsolated(pkg, ['setup']);
+      assert.notEqual(setup.code, 0, 'setup genuinely needs the relayer in this layout');
+      assert.match(setup.stderr, /Could not locate the noosphere-relayer package/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });
