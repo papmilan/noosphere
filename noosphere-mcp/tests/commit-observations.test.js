@@ -158,6 +158,55 @@ describe('commit observations', () => {
     assert.equal(observed[0].head, head);
   });
 
+  // The gap this closes was measured on the noosphere repository itself: the two
+  // most recent commits on `main` were a squash and a merge created on GitHub,
+  // and neither had an observation, because a commit made on a forge and pulled
+  // down runs no post-commit hook here. Asserted by actually pulling rather than
+  // by reading the hook body, for the reason the INIT_CWD test above records —
+  // a text assertion never lets git run the thing.
+  it('records a commit that arrived by pull rather than being made here', async () => {
+    const upstream = await repository();
+    const local = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'noosphere-pull-')));
+    temporary.push(local);
+    await execFileAsync('git', ['clone', '--quiet', upstream, local]);
+    await git(local, ['config', 'user.email', 'test@example.com']);
+    await git(local, ['config', 'user.name', 'test']);
+    await fs.mkdir(path.join(local, '.noosphere'), { recursive: true });
+    await hooks(local, 'install');
+
+    // Same substitution as the INIT_CWD test: bare `noosphere` is not on PATH
+    // here, so only the command is replaced and every installed argument stays.
+    const hook = path.join(local, '.git', 'hooks', 'post-merge');
+    const installed = await fs.readFile(hook, 'utf8');
+    await fs.writeFile(
+      hook,
+      installed.replace(/^noosphere /m, `"${process.execPath}" "${CLI}" `),
+      { mode: 0o755 },
+    );
+
+    // Stands in for the squash or merge commit a forge writes: a commit this
+    // machine never made, reaching the working tree only through a pull.
+    await fs.writeFile(path.join(upstream, 'file.txt'), 'from the forge\n');
+    await git(upstream, ['commit', '--quiet', '-am', 'landed upstream']);
+    const head = (await git(upstream, ['rev-parse', 'HEAD'])).stdout.trim();
+
+    await execFileAsync('git', ['pull', '--quiet'], {
+      cwd: local,
+      env: { ...process.env, NOOSPHERE_HOME: path.join(local, 'home') },
+    });
+
+    assert.equal(
+      (await git(local, ['rev-parse', 'HEAD'])).stdout.trim(),
+      head,
+      'the pull must have brought the upstream commit down',
+    );
+    const observed = await readCommitObservations(local);
+    assert.ok(
+      observed.some((entry) => entry.head === head),
+      `pulled commit ${head.slice(0, 12)} left no observation: ${JSON.stringify(observed)}`,
+    );
+  });
+
   it('repairs a hook it wrote before the project path was pinned', async () => {
     const root = await repository();
     await hooks(root, 'install');
