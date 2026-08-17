@@ -12,7 +12,7 @@ Dates are npm publish dates. The format follows
 
 ## noosphere-continuity
 
-### 2.5.0 — 2026-08-16
+### 2.5.0 — 2026-08-17
 
 - **Inferred state lane.** CSP state now carries provenance, and a lane that
   guesses cannot escape: a local model may infer `current_task` from a commit
@@ -219,7 +219,7 @@ Dates are npm publish dates. The format follows
 
 ## noosphere-relayer
 
-### 2.1.4 — 2026-08-16
+### 2.1.4 — 2026-08-17
 
 **Dependency patch.** No source changes.
 
