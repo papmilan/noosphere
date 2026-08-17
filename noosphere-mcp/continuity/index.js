@@ -1931,69 +1931,117 @@ ${wantsInference ? `
 # seconds, and git waits for this script.
 ${INFER_LINE}
 ` : ''}`;
+  // post-commit only ever sees commits made HERE. On a pull-request workflow the
+  // commits that actually land on the default branch are squashes and merges the
+  // forge creates, which arrive by `git pull` and run no post-commit hook at all
+  // — so the trail misses precisely the commits that matter. Measured on this
+  // repository on 2026-08-17: of the five most recent commits on `main`, the two
+  // created on GitHub (a squash and a merge) had no observation, and the one the
+  // trail did hold was the pre-squash branch commit, a head that no longer
+  // exists on any branch. The drift check then counts an orphan forever, because
+  // no journal entry will ever cite that sha.
+  //
+  // No inference line here, on purpose. The head after a pull is somebody else's
+  // commit; spending a local model run to guess at an intent that was never this
+  // machine's is the wrong trade, and `--infer` is scoped to commits you made.
+  const POST_MERGE_HOOK = `#!/bin/sh
+${HOOK_MARKER}
+# Records the measured repository position after a pull brings commits in.
+# Installed by \`noosphere hooks install\`; remove with \`noosphere hooks uninstall\`.
+# Failures are deliberately silent, for the same reason as in post-commit.
+${HOOK_LINE}
+`;
+  const MANAGED = [
+    { name: 'post-commit', body: POST_COMMIT_HOOK },
+    { name: 'post-merge', body: POST_MERGE_HOOK },
+  ];
+
   const directory = await hooksDirectory(root);
-  const hook = path.join(directory, 'post-commit');
-  // Bounded and reparse-checked rather than a bare read: `.git/hooks` is a
-  // classic place to plant a symlink, and a hook that is one is refused by the
-  // write below rather than followed.
-  const raw = await readBoundedRegularFile(hook, { maxBytes: 64 * 1024 }).catch(() => null);
-  const existing = raw === null ? null : raw.toString('utf8');
+  // Every managed hook is read before any of them is written. A run that
+  // installed post-commit and then refused post-merge would leave the repository
+  // half configured with no single command that finishes the job — and refusal
+  // is not the rare case, because a repository that already has one of these
+  // files usually put its own script there.
+  const planned = await Promise.all(MANAGED.map(async (managed) => {
+    const file = path.join(directory, managed.name);
+    // Bounded and reparse-checked rather than a bare read: `.git/hooks` is a
+    // classic place to plant a symlink, and a hook that is one is refused by the
+    // write below rather than followed.
+    const raw = await readBoundedRegularFile(file, { maxBytes: 64 * 1024 }).catch(() => null);
+    return { ...managed, file, existing: raw === null ? null : raw.toString('utf8') };
+  }));
+  const foreign = planned.filter(
+    (hook) => hook.existing !== null && !hook.existing.includes(HOOK_MARKER),
+  );
+  const names = (hooks) => hooks.map((hook) => hook.file).join(' and ');
 
   if (sub === 'uninstall') {
-    if (existing === null) {
-      console.log('No post-commit hook installed.');
+    if (foreign.length > 0) {
+      throw new Error(`Refusing to remove ${names(foreign)}: not installed by Noosphere.`);
+    }
+    const ours = planned.filter((hook) => hook.existing !== null);
+    if (ours.length === 0) {
+      console.log('No Noosphere hooks installed.');
       return;
     }
-    if (!existing.includes(HOOK_MARKER)) {
-      throw new Error(`Refusing to remove ${hook}: it was not installed by Noosphere.`);
+    for (const hook of ours) {
+      await rm(hook.file, { force: true });
+      console.log(`Removed ${hook.file}.`);
     }
-    await rm(hook, { force: true });
-    console.log(`Removed ${hook}.`);
     return;
   }
 
-  if (existing !== null) {
-    if (existing.includes(HOOK_MARKER)) {
-      // Ours, but possibly an older body. A hook installed before `--path` was
-      // added keeps recording into whatever INIT_CWD names, forever, and a
-      // developer has no reason to suspect the file needs replacing — so
-      // reinstalling repairs it rather than reporting success and leaving it.
-      if (existing === POST_COMMIT_HOOK) {
-        console.log(`Already installed at ${hook}.`);
-        return;
-      }
-      // Naming the direction, because the quiet case is installing WITHOUT
-      // --infer over a hook that had it: that removes inference, and a body
-      // printed without comment reads as "nothing changed" to someone who was
-      // only re-running install to repair the path.
-      const had = existing.includes('noosphere infer ');
-      await atomicWrite(hook, POST_COMMIT_HOOK);
-      if (process.platform !== 'win32') await chmod(hook, 0o755);
-      console.log(`Updated ${hook} to the current hook:\n`);
-      if (had && !wantsInference) console.log('Commit inference was REMOVED; re-add it with --infer --model <name>.\n');
-      if (!had && wantsInference) console.log(`Commit inference added, using ${inferenceModel}.\n`);
-      console.log(POST_COMMIT_HOOK);
-      return;
-    }
+  if (foreign.length > 0) {
     // Clobbering a developer's own hook earns permanent distrust, so print the
-    // lines they need and let them place them themselves.
+    // lines they need and let them place them themselves. Named rather than
+    // appended for them, because appending is not always right: a hook whose
+    // body is `exec something` never reaches a line placed after it, and a hook
+    // that silently observes nothing is worse than one that was never installed.
     throw new Error(
-      `Refusing to overwrite the existing post-commit hook at ${hook}.\n` +
-      `Add ${wantsInference ? 'these lines' : 'this line'} to it instead:\n\n  ${HOOK_LINE}\n` +
+      `Refusing to overwrite the existing ${foreign.length > 1 ? 'hooks' : 'hook'} at ${names(foreign)}.\n` +
+      `Add ${wantsInference ? 'these lines' : 'this line'} to ${foreign.length > 1 ? 'each of them' : 'it'} instead, ` +
+      'above any `exec`, which never returns:\n\n' +
+      `  ${HOOK_LINE}\n` +
       (wantsInference ? `  ${INFER_LINE}\n` : ''),
     );
   }
 
   await mkdir(directory, { recursive: true });
-  // atomicWrite, not writeFile: it refuses a reparse point at the destination,
-  // which is the guarantee that matters when the destination lives in .git.
-  // It also carries an existing file's mode forward but leaves a NEW file at
-  // the umask default, so the executable bit has to be set explicitly or git
-  // silently never runs the hook.
-  await atomicWrite(hook, POST_COMMIT_HOOK);
-  if (process.platform !== 'win32') await chmod(hook, 0o755);
-  console.log(`Installed ${hook}:\n`);
-  console.log(POST_COMMIT_HOOK);
+  // Ours by marker, but possibly an older body. A hook installed before `--path`
+  // was added keeps recording into whatever INIT_CWD names, forever, and a
+  // developer has no reason to suspect the file needs replacing — so
+  // reinstalling repairs it rather than reporting success and leaving it. The
+  // same pass installs post-merge into a repository that predates it.
+  const written = [];
+  for (const hook of planned) {
+    if (hook.existing === hook.body) continue;
+    // atomicWrite, not writeFile: it refuses a reparse point at the destination,
+    // which is the guarantee that matters when the destination lives in .git.
+    // It also carries an existing file's mode forward but leaves a NEW file at
+    // the umask default, so the executable bit has to be set explicitly or git
+    // silently never runs the hook.
+    await atomicWrite(hook.file, hook.body);
+    if (process.platform !== 'win32') await chmod(hook.file, 0o755);
+    written.push(hook);
+  }
+
+  if (written.length === 0) {
+    console.log(`Already installed at ${names(planned)}.`);
+    return;
+  }
+
+  for (const hook of written) {
+    const repair = hook.existing !== null;
+    // Naming the direction, because the quiet case is installing WITHOUT
+    // --infer over a hook that had it: that removes inference, and a body
+    // printed without comment reads as "nothing changed" to someone who was
+    // only re-running install to repair the path.
+    const had = repair && hook.existing.includes('noosphere infer ');
+    console.log(`${repair ? `Updated ${hook.file} to the current hook` : `Installed ${hook.file}`}:\n`);
+    if (had && !wantsInference) console.log('Commit inference was REMOVED; re-add it with --infer --model <name>.\n');
+    if (!had && wantsInference && repair) console.log(`Commit inference added, using ${inferenceModel}.\n`);
+    console.log(hook.body);
+  }
 }
 
 // Records the measured repository position. Unlike `exec checkpoint` this
@@ -4041,10 +4089,12 @@ Commands:
               answer as an inferred guess (--commit <rev>, --model <name>).
               Loopback-only: it reads your diffs.
   hooks install|uninstall
-              Install or remove the post-commit hook that runs observe.
-              --infer --model <name> also records a guess per commit, detached
-              so it cannot delay a commit. Not a coder model: see --infer's
-              own error text for what was measured.
+              Install or remove the post-commit and post-merge hooks that run
+              observe. post-merge is what records the squashes and merges a
+              forge creates, which arrive by pull and run no post-commit hook.
+              --infer --model <name> also records a guess per commit you make,
+              detached so it cannot delay a commit. Not a coder model: see
+              --infer's own error text for what was measured.
   master-prompt
               Print or explicitly store the exact pinned project prompt
   trust approve <slot>
