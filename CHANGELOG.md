@@ -12,6 +12,26 @@ Dates are npm publish dates. The format follows
 
 ## noosphere-continuity
 
+### 2.5.1 — 2026-08-18
+
+- **Commits that arrive by pull are observed too.** `noosphere hooks install`
+  now installs a `post-merge` hook alongside `post-commit`. Only `post-commit`
+  existed before, and it runs solely for commits made on your own machine — so
+  on a pull-request workflow the squashes and merges the forge creates, which
+  are the commits that actually land on the default branch, left no trace at
+  all. Worse, the trail kept the pre-squash branch commit instead: a head that
+  no longer exists on any branch, which the journal drift check would have
+  counted as unjournalled forever, because no entry cites a discarded sha.
+  Inference is not added to the new hook, since the head after a pull is
+  somebody else's commit. Existing installations should re-run
+  `noosphere hooks install` to pick it up; reinstalling is idempotent and
+  repairs an older `post-commit` body in the same pass.
+- **Installing hooks is all-or-nothing.** Both hooks are read before either is
+  written, so a repository whose `post-merge` is already spoken for is refused
+  as a whole rather than left half configured. The refusal now also says to
+  place the line above any `exec`, which never returns — appending below one
+  installs a hook that silently observes nothing.
+
 ### 2.5.0 — 2026-08-17
 
 - **Inferred state lane.** CSP state now carries provenance, and a lane that
