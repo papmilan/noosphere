@@ -52,6 +52,8 @@ container almost always means a config error — read the first log line.
 | All `/mcp` requests 401 | Token invalid/expired, wrong issuer or audience, or `jwks_uri` unreachable | Verify `NOOSPHERE_AUDIENCE`/`NOOSPHERE_OIDC_ISSUERS` match the IdP; confirm the server can reach each `jwks_uri`. Errors are deliberately opaque (no detail leaked to clients). |
 | `/mcp` returns 403 `forbidden-origin` | Browser `Origin` not in `NOOSPHERE_ALLOWED_ORIGINS` | Add the origin. |
 | `/mcp` returns 403 `session-owner-mismatch` | A token for a different owner reused an existing `Mcp-Session-Id` | Client bug; sessions are owner-bound. |
+| `/mcp` returns 404 `unknown-session` for a formerly valid ID | The process restarted, affinity routed to another replica, or the session exceeded `NOOSPHERE_MCP_SESSION_TTL_MS` | Reconnect and initialize a new MCP session. Confirm session affinity for multi-replica deployments. |
+| New `/mcp` initialization returns 503 `session-capacity` | `NOOSPHERE_MAX_MCP_SESSIONS` live sessions are occupied | Clients should retry after the advertised `Retry-After`; reduce the TTL, raise the bounded cap within host memory limits, or add an affinity-aware replica. |
 | `/mcp` returns 413 | Body over `NOOSPHERE_MAX_BODY_BYTES` | Raise the limit (≤64 MiB) or reduce payload size. |
 | Port bind failure (`EADDRINUSE`) | `NOOSPHERE_PORT` already in use | Change the port or free it. |
 | OIDC verification intermittently fails | JWKS endpoint flapping / key rotation | Confirm IdP key rotation and network egress to the JWKS host. |
@@ -109,7 +111,10 @@ project data — store dumps encrypted and access-controlled.**
 Take backups on a schedule and before every upgrade. Owner-scoped export/delete
 jobs also exist in the repository layer for per-owner data-subject requests
 (GDPR-style export/delete) — those are application operations, not a substitute
-for full backups.
+for full backups. An export aggregates the project and its child collections in
+one SQL statement, giving a single MVCC snapshot. A retention purge locks and
+rechecks the current marker before deleting, so a stale candidate list cannot
+override an extension made concurrently.
 
 ## Migration safety
 
@@ -136,6 +141,8 @@ by `node migrate.js`:
    / `systemctl restart`). Durable data survives a restart; in-flight MCP sessions
    do not (they are process-local — see the multi-replica note in
    [`DEPLOYMENT.md`](DEPLOYMENT.md#1-docker-compose-recommended-reference)).
+   Keep `NOOSPHERE_CURSOR_SECRET` unchanged across the rollout so outstanding
+   pagination cursors remain valid on old and new replicas.
 5. Confirm `/readyz` is 200 and watch logs for the `listening` line.
 
 ## Rollback guidance
@@ -153,6 +160,6 @@ recorded version — restoring the dump returns it to a known state.
 ## Repository integrity expectations
 
 Checkpoint-head and owner-isolation invariants are enforced in the Project
-Memory service and repository (unchanged by this operational work). Operators
-must not hand-edit rows in the control-plane database; do all writes through the
-MCP tools so those invariants hold.
+Memory service and repository. Operators must not hand-edit rows in the
+control-plane database; use the MCP tools or the defined owner-scoped repository
+jobs so those invariants hold.

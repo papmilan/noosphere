@@ -160,6 +160,10 @@ key registered.
 
 ## Architecture
 
+For a package-by-package map of the complete monorepo, both memory surfaces,
+platform lifecycle, configuration, security boundaries, operations, and every
+test entry point, read the [Noosphere project guide](docs/PROJECT_GUIDE.md).
+
 ```mermaid
 flowchart TD
     tools["AI tools<br/>Codex · Claude Code · Cursor · Gemini · IDE · scripts"]
@@ -567,7 +571,19 @@ noosphere-relayer/         npm: noosphere-relayer
 
 noosphere-acp-protocol/    Shared ACP package: envelopes, schemas, validation
 
+noosphere-secure-fs/       Shared contained-path and owner-only persistence layer
+
+noosphere-remote-mcp/      Project Memory contracts and service core
+noosphere-remote-mcp-postgres/
+                           PostgreSQL repository, OIDC verifier, migrations
+noosphere-remote-mcp-server/
+                           Streamable HTTP MCP server
+noosphere-local-mcp/       Durable single-user STDIO MCP server
+noosphere-remote-mcp-acceptance/
+                           Cross-transport SDK acceptance suite
+
 docs/
+  PROJECT_GUIDE.md         Complete monorepo and verification map
   ACP.md                   Agent handoff protocol reference
   PRIVACY.md               Data handling and retention
   DEPLOYMENT.md            Public deployment and recovery
@@ -581,7 +597,19 @@ docs/
 npm --prefix noosphere-relayer install && npm --prefix noosphere-relayer run check
 npm --prefix noosphere-mcp install     && npm --prefix noosphere-mcp run check
 npm --prefix noosphere-acp-protocol test
+npm --prefix noosphere-secure-fs run check
+npm --prefix noosphere-remote-mcp test
+npm --prefix noosphere-remote-mcp-server test
+npm --prefix noosphere-local-mcp test
+npm --prefix noosphere-remote-mcp-acceptance test
+npm --prefix noosphere-remote-mcp-postgres run test:nodb
+node scripts/docker-build.mjs remote-mcp
+node scripts/docker-build.mjs relayer
 ```
+
+The PostgreSQL-backed suite additionally needs the disposable Compose database;
+the complete commands and sibling-package dependency notes are in the
+[project guide](docs/PROJECT_GUIDE.md#development-and-verification).
 
 Live Walrus verification is intentionally separate:
 `npm --prefix noosphere-relayer run test:live`.
@@ -655,9 +683,22 @@ queued writes survive restarts.
   `NOOSPHERE_RELAYER_URL` (or `relayer_url` in `.noosphere/config.json`)
   at the same address.
 - **Windows: scheduled task creation blocked** — the installer degrades
-  gracefully when `schtasks /Create` is blocked; per-user services still
-  work. Credential encryption under PowerShell 5.1 requires
+  gracefully when `schtasks /Create` is blocked; run `noosphere run-relayer`
+  and `noosphere run-manager` in foreground terminals instead. Credential
+  encryption under PowerShell 5.1 requires
   `noosphere-continuity` ≥ 2.1.6 and `noosphere-relayer` ≥ 2.0.4.
+- **Windows: PowerShell windows appear while changing directories** — visible
+  helper windows are not expected. Re-run
+  `npm --prefix noosphere-mcp run install:user`, restart open shells, and run
+  `noosphere doctor`. Current installs use hidden scheduled-task and ACL
+  helpers, asynchronous activation, and one idempotent location hook per
+  PowerShell process. Service diagnostics are under
+  `~/.noosphere/logs/`.
+- **Claude ends without a useful journal summary** — re-run
+  `npm --prefix noosphere-mcp run install:user` to refresh and deduplicate the
+  `SessionEnd` hook. Current installs read the tail of long transcripts, write
+  locally before upload, and report an invalid configuration or unwritable
+  journal as a visible hook error.
 - Anything else: `noosphere doctor`, then open an issue with its output.
 
 ## License

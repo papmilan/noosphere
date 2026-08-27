@@ -6,6 +6,8 @@
 // as the Project State envelope: untrusted input in, ordered deterministic
 // errors or a deep-frozen state out.
 
+import { findJsonValueErrors, findNormalizedKeyCollisions } from './wire.js';
+
 export const EXECUTION_PROTOCOL = 'acp.execution-state/1';
 
 const FORBIDDEN_KEY = /(?:chain[ _-]?of[ _-]?thought|hidden[ _-]?reasoning|token[ _-]?trace|internal[ _-]?deliberation|private[ _-]?reasoning|system[ _-]?prompt)/i;
@@ -42,6 +44,10 @@ const RESULTS = ['pass', 'fail', 'error'];
 const SIGNATURE_STATUSES = ['unsigned', 'local-unverified', 'signed'];
 
 export function createExecutionState(envelope, { clock, policy = executionPolicy } = {}) {
+  const jsonErrors = findJsonValueErrors(envelope);
+  if (jsonErrors.length) return { ok: false, errors: orderErrors(jsonErrors) };
+  const normalizationErrors = findNormalizedKeyCollisions(envelope);
+  if (normalizationErrors.length) return { ok: false, errors: orderErrors(normalizationErrors) };
   const normalized = normalizeEnvelope(envelope);
   const effectivePolicy = { ...executionPolicy, ...policy };
   const errors = validateEnvelope(normalized, effectivePolicy, clock);
@@ -265,10 +271,14 @@ function validateIntegrity(value, errors, limits) {
 function validateGraph(envelope, errors) {
   if (!Array.isArray(envelope.steps) || !isObject(envelope.cursor)) return;
   const ids = new Set();
+  const byId = new Map();
+  const indexedSteps = [];
   envelope.steps.forEach((step, index) => {
     if (!isObject(step) || typeof step.id !== 'string') return;
     if (ids.has(step.id)) error(errors, `$.steps[${index}].id`, 'duplicate-id', `step id ${step.id} appears more than once`);
     ids.add(step.id);
+    if (!byId.has(step.id)) byId.set(step.id, { step, index });
+    indexedSteps.push({ step, index });
   });
   envelope.steps.forEach((step, index) => {
     if (!isObject(step) || step.parent_step_id == null) return;
@@ -277,6 +287,37 @@ function validateGraph(envelope, errors) {
   });
   if (typeof envelope.cursor.step_id === 'string' && !ids.has(envelope.cursor.step_id)) {
     error(errors, '$.cursor.step_id', 'dangling-step', 'cursor.step_id does not name a step');
+  }
+
+  const currentSteps = indexedSteps.filter(({ step }) => step.status === 'current');
+  if (currentSteps.length !== 1) {
+    error(errors, '$.steps', 'invalid-current-count', 'execution state must contain exactly one current step');
+  } else if (typeof envelope.cursor.step_id === 'string' && currentSteps[0].step.id !== envelope.cursor.step_id) {
+    error(errors, '$.cursor.step_id', 'cursor-current-mismatch', 'cursor.step_id must name the current step');
+  }
+
+  const graphShapeValid = indexedSteps.length === envelope.steps.length
+    && ids.size === envelope.steps.length
+    && indexedSteps.every(({ step }) => step.parent_step_id === null
+      || (typeof step.parent_step_id === 'string' && ids.has(step.parent_step_id) && step.parent_step_id !== step.id));
+  if (!graphShapeValid) return;
+
+  const roots = indexedSteps.filter(({ step }) => step.parent_step_id === null);
+  if (roots.length !== 1) {
+    error(errors, '$.steps', 'invalid-root-count', 'execution tree must contain exactly one root step');
+  }
+  for (const { step: start } of indexedSteps) {
+    const ancestors = new Set();
+    let current = byId.get(start.id);
+    while (current?.step.parent_step_id !== null) {
+      ancestors.add(current.step.id);
+      const parent = byId.get(current.step.parent_step_id);
+      if (ancestors.has(parent.step.id)) {
+        error(errors, `$.steps[${current.index}].parent_step_id`, 'step-cycle', 'parent_step_id relationships must not contain a cycle');
+        break;
+      }
+      current = parent;
+    }
   }
 }
 
@@ -326,14 +367,27 @@ function buildRuntime(envelope, clock) {
 }
 
 function normalizeEnvelope(value) {
-  if (typeof value === 'string') return value.replace(/\r\n?/g, '\n').normalize('NFC');
-  if (Array.isArray(value)) return value.map(normalizeEnvelope);
-  if (!isObject(value)) return value;
-  const target = {};
-  for (const key of Object.keys(value).sort()) {
-    target[key.normalize('NFC')] = normalizeEnvelope(value[key]);
+  const root = normalizedValue(value);
+  if (!root.container) return root.value;
+  const pending = [{ source: value, target: root.value }];
+  while (pending.length) {
+    const { source, target } = pending.pop();
+    const entries = Array.isArray(source)
+      ? source.map((child, index) => [index, child])
+      : Object.keys(source).sort().map((key) => [key.normalize('NFC'), source[key]]);
+    for (const [key, child] of entries) {
+      const normalized = normalizedValue(child);
+      Object.defineProperty(target, key, { value: normalized.value, enumerable: true, configurable: true, writable: true });
+      if (normalized.container) pending.push({ source: child, target: normalized.value });
+    }
   }
-  return target;
+  return root.value;
+}
+
+function normalizedValue(value) {
+  if (Array.isArray(value)) return { value: [], container: true };
+  if (isObject(value)) return { value: {}, container: true };
+  return { value: typeof value === 'string' ? value.replace(/\r\n?/g, '\n').normalize('NFC') : value, container: false };
 }
 
 function prose(value, path, errors, limits) {
@@ -350,7 +404,9 @@ function timestamp(value, path, errors) {
 }
 
 function validTimestamp(value) {
-  return typeof value === 'string' && TIMESTAMP.test(value) && !Number.isNaN(Date.parse(value));
+  if (typeof value !== 'string' || !TIMESTAMP.test(value)) return false;
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
 }
 
 function enumValue(value, path, allowed, errors) {
@@ -380,7 +436,7 @@ function orderErrors(errors) {
   return errors
     .sort((left, right) => compare(left.path, right.path) || compare(left.code, right.code))
     .filter((item) => {
-      const key = `${item.path} ${item.code}`;
+      const key = `${item.path}\u0000${item.code}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;

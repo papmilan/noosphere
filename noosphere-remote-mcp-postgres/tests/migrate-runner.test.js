@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
 import { describe, it } from 'node:test';
 
-import { orderMigrations } from '../migrate.js';
+import * as migrationRunner from '../migrate.js';
+
+const { orderMigrations } = migrationRunner;
 
 describe('migration runner ordering (no DB)', () => {
   it('orders by numeric version, not lexicographically', () => {
@@ -29,5 +32,12 @@ describe('migration runner ordering (no DB)', () => {
 
   it('accepts an empty set', () => {
     assert.deepEqual(orderMigrations([]), []);
+  });
+
+  it('recognizes direct execution when the script path contains spaces', () => {
+    const script = '/tmp/noosphere migration test/migrate.js';
+    assert.equal('isDirectRun' in migrationRunner, true);
+    assert.equal(migrationRunner.isDirectRun(pathToFileURL(script).href, script), true);
+    assert.equal(migrationRunner.isDirectRun(pathToFileURL('/tmp/other.js').href, script), false);
   });
 });

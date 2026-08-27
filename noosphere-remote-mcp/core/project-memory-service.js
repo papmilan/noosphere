@@ -45,8 +45,18 @@ function invalidArgument() {
   return createMcpError(MCP_ERROR_CODES.INVALID_ARGUMENT);
 }
 
-function assertInput(input) {
+function assertInput(input, { allowed, required = [] } = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw invalidArgument();
+  const prototype = Object.getPrototypeOf(input);
+  if (prototype !== Object.prototype && prototype !== null) throw invalidArgument();
+  if (allowed) {
+    for (const key of Object.keys(input)) {
+      if (!allowed.includes(key)) throw invalidArgument();
+    }
+  }
+  for (const key of required) {
+    if (!(key in input)) throw invalidArgument();
+  }
   return input;
 }
 
@@ -58,6 +68,14 @@ function assertText(value, maximum) {
 function assertId(value) {
   if (typeof value !== 'string' || !/^[a-z][a-z0-9_]{2,127}$/.test(value)) throw invalidArgument();
   return value;
+}
+
+function assertPageInput(input, maximum = PROJECT_MEMORY_LIMITS.pageSizeMaximum) {
+  if (input.cursor !== undefined && input.cursor !== null) assertText(input.cursor, 512);
+  if (input.limit !== undefined
+    && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > maximum)) {
+    throw invalidArgument();
+  }
 }
 
 function normalize(value) {
@@ -88,6 +106,47 @@ function compareByKeyDescIdAsc(a, b) {
   return 0;
 }
 
+function inspectConsistentResumeState(project, sessions, checkpoints) {
+  if (!project || !Array.isArray(sessions) || !Array.isArray(checkpoints)) return null;
+
+  const sessionsById = new Map();
+  for (const session of sessions) {
+    if (!session || session.project_id !== project.id || sessionsById.has(session.id)) return null;
+    sessionsById.set(session.id, session);
+  }
+
+  const checkpointsById = new Map();
+  for (const checkpoint of checkpoints) {
+    if (!checkpoint || checkpoint.project_id !== project.id || checkpointsById.has(checkpoint.id)) return null;
+    checkpointsById.set(checkpoint.id, checkpoint);
+  }
+
+  const ordered = [...checkpoints].sort((left, right) => left.revision - right.revision);
+  const latestBySession = new Map();
+  for (let index = 0; index < ordered.length; index += 1) {
+    const checkpoint = ordered[index];
+    const expectedPredecessor = index === 0 ? null : ordered[index - 1].id;
+    if (checkpoint.revision !== index + 1 || checkpoint.previous_checkpoint_id !== expectedPredecessor) return null;
+    if (checkpoint.session_id !== null) {
+      if (!sessionsById.has(checkpoint.session_id)) return null;
+      latestBySession.set(checkpoint.session_id, checkpoint);
+    }
+  }
+
+  const headCheckpoint = ordered.at(-1) ?? null;
+  if (project.latest_checkpoint_id !== (headCheckpoint?.id ?? null)) return null;
+  for (const session of sessions) {
+    if (session.latest_checkpoint_id !== (latestBySession.get(session.id)?.id ?? null)) return null;
+  }
+
+  return {
+    headCheckpoint,
+    linkedSession: headCheckpoint?.session_id === null
+      ? null
+      : sessionsById.get(headCheckpoint?.session_id) ?? null,
+  };
+}
+
 export class ProjectMemoryService {
   #repository;
   #now;
@@ -99,8 +158,9 @@ export class ProjectMemoryService {
     this.#repository = repository;
     this.#now = typeof now === 'function' ? now : () => new Date().toISOString();
     this.#nextId = typeof nextId === 'function' ? nextId : (prefix) => `${prefix}_${randomBytes(12).toString('hex')}`;
-    // ponytail: per-instance cursor secret is correct for the single-process
-    // in-memory core; a shared secret arrives with the transport/deploy PR.
+    // Embedded/test callers may use a per-instance secret. Production transport
+    // configuration supplies one stable owner-controlled secret across restarts
+    // and replicas so an outstanding cursor remains portable.
     this.#cursorSecret = cursorSecret ?? randomBytes(32);
   }
 
@@ -145,7 +205,10 @@ export class ProjectMemoryService {
   }
 
   async createProject({ ownerScope, input } = {}) {
-    assertInput(input);
+    assertInput(input, {
+      allowed: ['name', 'description', 'category', 'aliases'],
+      required: ['name'],
+    });
     const name = assertText(input.name, PROJECT_MEMORY_LIMITS.projectNameChars);
     const now = this.#now();
     const project = {
@@ -156,7 +219,7 @@ export class ProjectMemoryService {
       description: input.description ?? null,
       category: input.category ?? null,
       status: 'active',
-      aliases: Array.isArray(input.aliases) ? [...input.aliases] : [],
+      aliases: input.aliases === undefined ? [] : input.aliases,
       created_at: now,
       updated_at: now,
       last_activity_at: now,
@@ -170,12 +233,16 @@ export class ProjectMemoryService {
   }
 
   async getProject({ ownerScope, input } = {}) {
-    assertInput(input);
+    assertInput(input, { allowed: ['project_id'], required: ['project_id'] });
     return this.#getProjectOrThrow(ownerScope, assertId(input.project_id));
   }
 
   async listProjects({ ownerScope, input } = {}) {
-    const request = input ?? {};
+    const request = input === undefined
+      ? {}
+      : assertInput(input, { allowed: ['cursor', 'limit', 'include_archived'] });
+    assertPageInput(request);
+    if (request.include_archived !== undefined && typeof request.include_archived !== 'boolean') throw invalidArgument();
     const includeArchived = request.include_archived === true;
     let projects;
     try {
@@ -197,7 +264,9 @@ export class ProjectMemoryService {
   }
 
   async findProjects({ ownerScope, input } = {}) {
-    assertInput(input);
+    assertInput(input, { allowed: ['query', 'limit'], required: ['query'] });
+    if (input.limit !== undefined
+      && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 20)) throw invalidArgument();
     const rawQuery = assertText(input.query, PROJECT_MEMORY_LIMITS.projectNameChars);
     const query = normalize(rawQuery);
     let projects;
@@ -233,10 +302,14 @@ export class ProjectMemoryService {
   }
 
   async updateProject({ ownerScope, input } = {}) {
-    assertInput(input);
+    assertInput(input, {
+      allowed: ['project_id', 'name', 'description', 'category', 'aliases'],
+      required: ['project_id'],
+    });
     const projectId = assertId(input.project_id);
     const current = await this.#getProjectOrThrow(ownerScope, projectId);
-    const next = { ...current, updated_at: this.#now() };
+    const now = this.#now();
+    const next = { ...current, updated_at: now, last_activity_at: now };
     if (input.name !== undefined) {
       next.name = assertText(input.name, PROJECT_MEMORY_LIMITS.projectNameChars);
       next.normalized_name = normalize(next.name);
@@ -248,26 +321,37 @@ export class ProjectMemoryService {
       next.aliases = [...input.aliases];
     }
     try {
-      return await this.#repository.replaceProject({ ownerScope, projectId, project: next });
+      return await this.#repository.replaceProject({
+        ownerScope,
+        projectId,
+        project: next,
+        expectedProject: current,
+      });
     } catch (error) {
       throw mapRepositoryError(error);
     }
   }
 
   async archiveProject({ ownerScope, input } = {}) {
-    assertInput(input);
+    assertInput(input, { allowed: ['project_id'], required: ['project_id'] });
     const projectId = assertId(input.project_id);
     const current = await this.#getProjectOrThrow(ownerScope, projectId);
-    const next = { ...current, status: 'archived', updated_at: this.#now() };
+    const now = this.#now();
+    const next = { ...current, status: 'archived', updated_at: now, last_activity_at: now };
     try {
-      return await this.#repository.replaceProject({ ownerScope, projectId, project: next });
+      return await this.#repository.replaceProject({
+        ownerScope,
+        projectId,
+        project: next,
+        expectedProject: current,
+      });
     } catch (error) {
       throw mapRepositoryError(error);
     }
   }
 
   async deleteProject({ ownerScope, input } = {}) {
-    assertInput(input);
+    assertInput(input, { allowed: ['project_id'], required: ['project_id'] });
     const projectId = assertId(input.project_id);
     // Missing or cross-owner records collapse to the same public not-found.
     await this.#getProjectOrThrow(ownerScope, projectId);
@@ -280,7 +364,10 @@ export class ProjectMemoryService {
   }
 
   async createSession({ ownerScope, input } = {}) {
-    assertInput(input);
+    assertInput(input, {
+      allowed: ['project_id', 'source_client', 'source_model', 'source_conversation_reference', 'metadata'],
+      required: ['project_id', 'source_client'],
+    });
     const now = this.#now();
     const session = {
       id: this.#id('ses'),
@@ -290,20 +377,23 @@ export class ProjectMemoryService {
       source_model: input.source_model ?? null,
       status: 'active',
       source_conversation_reference: input.source_conversation_reference ?? null,
-      metadata: input.metadata ?? { entries: [] },
+      metadata: input.metadata === undefined ? { entries: [] } : input.metadata,
       created_at: now,
       updated_at: now,
       latest_checkpoint_id: null,
     };
     try {
-      return await this.#repository.createSession({ ownerScope, session });
+      return await this.#repository.createSession({ ownerScope, session, projectActivityAt: now });
     } catch (error) {
       throw mapRepositoryError(error);
     }
   }
 
   async getSession({ ownerScope, input } = {}) {
-    assertInput(input);
+    assertInput(input, {
+      allowed: ['project_id', 'session_id'],
+      required: ['project_id', 'session_id'],
+    });
     const session = await this.#repository.getSession({
       ownerScope,
       projectId: assertId(input.project_id),
@@ -314,7 +404,11 @@ export class ProjectMemoryService {
   }
 
   async listProjectSessions({ ownerScope, input } = {}) {
-    assertInput(input);
+    assertInput(input, {
+      allowed: ['project_id', 'cursor', 'limit'],
+      required: ['project_id'],
+    });
+    assertPageInput(input);
     const projectId = assertId(input.project_id);
     await this.#getProjectOrThrow(ownerScope, projectId);
     const sessions = await this.#repository.listSessions({ ownerScope, projectId });
@@ -331,10 +425,14 @@ export class ProjectMemoryService {
   }
 
   async transitionSession({ ownerScope, input } = {}) {
-    assertInput(input);
+    assertInput(input, {
+      allowed: ['project_id', 'session_id', 'status'],
+      required: ['project_id', 'session_id', 'status'],
+    });
     const projectId = assertId(input.project_id);
     const sessionId = assertId(input.session_id);
     const status = input.status;
+    if (!SESSION_STATUSES.has(status)) throw invalidArgument();
     const current = await this.#repository.getSession({ ownerScope, projectId, sessionId });
     if (!current) throw createMcpError(MCP_ERROR_CODES.NOT_FOUND);
     // Same-state requests are idempotent no-ops: no timestamp change, no write.
@@ -343,7 +441,14 @@ export class ProjectMemoryService {
     if (!allowed || !allowed.has(status)) throw createMcpError(MCP_ERROR_CODES.CONFLICT);
     const next = { ...current, status, updated_at: this.#now() };
     try {
-      return await this.#repository.replaceSession({ ownerScope, projectId, sessionId, session: next });
+      return await this.#repository.replaceSession({
+        ownerScope,
+        projectId,
+        sessionId,
+        session: next,
+        expectedSession: current,
+        projectActivityAt: next.updated_at,
+      });
     } catch (error) {
       throw mapRepositoryError(error);
     }
@@ -357,9 +462,13 @@ export class ProjectMemoryService {
     } catch {
       throw invalidArgument();
     }
-    const checkpoint = request.checkpoint;
     const project = await this.#getProjectOrThrow(ownerScope, request.project_id);
     const now = this.#now();
+    // The durable checkpoint timestamp is a server-owned commit boundary. A
+    // client clock may be delayed, skewed, or malicious; using it for freshness
+    // made an immediate save look stale and allowed far-future values to mask
+    // later unsaved activity.
+    const checkpoint = { ...request.checkpoint, created_at: now };
     const nextProject = { ...project, updated_at: now, last_activity_at: now, latest_checkpoint_id: checkpoint.id };
     let nextSession;
     if (checkpoint.session_id !== null) {
@@ -367,7 +476,13 @@ export class ProjectMemoryService {
       if (!session) throw createMcpError(MCP_ERROR_CODES.NOT_FOUND);
       nextSession = { ...session, updated_at: now, latest_checkpoint_id: checkpoint.id };
     }
-    const idempotency = { key: request.idempotency_key, requestHash: requestHash(request) };
+    // `created_at` is explicitly ignored and replaced by the server commit
+    // time. It must therefore not make an otherwise identical retry conflict.
+    const { created_at: _ignoredClientTimestamp, ...checkpointForHash } = request.checkpoint;
+    const idempotency = {
+      key: request.idempotency_key,
+      requestHash: requestHash({ ...request, checkpoint: checkpointForHash }),
+    };
     try {
       return await this.#repository.saveCheckpoint({ ownerScope, checkpoint, project: nextProject, session: nextSession, idempotency });
     } catch (error) {
@@ -376,7 +491,7 @@ export class ProjectMemoryService {
   }
 
   async getLatestCheckpoint({ ownerScope, input } = {}) {
-    assertInput(input);
+    assertInput(input, { allowed: ['project_id'], required: ['project_id'] });
     const project = await this.#getProjectOrThrow(ownerScope, assertId(input.project_id));
     const checkpoint = project.latest_checkpoint_id
       ? await this.#repository.getCheckpoint({ ownerScope, projectId: project.id, checkpointId: project.latest_checkpoint_id })
@@ -385,7 +500,10 @@ export class ProjectMemoryService {
   }
 
   async getCheckpoint({ ownerScope, input } = {}) {
-    assertInput(input);
+    assertInput(input, {
+      allowed: ['project_id', 'checkpoint_id'],
+      required: ['project_id', 'checkpoint_id'],
+    });
     const checkpoint = await this.#repository.getCheckpoint({
       ownerScope,
       projectId: assertId(input.project_id),
@@ -396,7 +514,11 @@ export class ProjectMemoryService {
   }
 
   async listCheckpoints({ ownerScope, input } = {}) {
-    assertInput(input);
+    assertInput(input, {
+      allowed: ['project_id', 'cursor', 'limit'],
+      required: ['project_id'],
+    });
+    assertPageInput(input);
     const projectId = assertId(input.project_id);
     await this.#getProjectOrThrow(ownerScope, projectId);
     const checkpoints = await this.#repository.listCheckpoints({ ownerScope, projectId });
@@ -413,7 +535,7 @@ export class ProjectMemoryService {
   }
 
   async resumeProject({ ownerScope, input } = {}) {
-    assertInput(input);
+    assertInput(input, { allowed: ['project_id'], required: ['project_id'] });
     const projectId = assertId(input.project_id);
     let state;
     try {
@@ -422,7 +544,6 @@ export class ProjectMemoryService {
       throw mapRepositoryError(error);
     }
     const { project, sessions, checkpoints } = state;
-    const byId = new Map(checkpoints.map((checkpoint) => [checkpoint.id, checkpoint]));
     const inconsistent = () => ({
       project,
       latest_checkpoint: null,
@@ -431,33 +552,25 @@ export class ProjectMemoryService {
       content_trust: CONTENT_TRUST,
     });
 
-    const head = project.latest_checkpoint_id;
-    const maxRevision = checkpoints.reduce((max, checkpoint) => Math.max(max, checkpoint.revision), 0);
-    const headCheckpoint = head === null ? null : byId.get(head);
-    if (head === null ? checkpoints.length > 0 : !headCheckpoint || headCheckpoint.revision !== maxRevision) {
-      return inconsistent();
-    }
-    for (const session of sessions) {
-      if (session.latest_checkpoint_id !== null && !byId.has(session.latest_checkpoint_id)) return inconsistent();
-    }
-    const linkedSession = headCheckpoint && headCheckpoint.session_id !== null
-      ? sessions.find((session) => session.id === headCheckpoint.session_id)
-      : null;
-    if (headCheckpoint && headCheckpoint.session_id !== null && (!linkedSession || linkedSession.latest_checkpoint_id !== head)) {
-      return inconsistent();
-    }
+    const consistent = inspectConsistentResumeState(project, sessions, checkpoints);
+    if (!consistent) return inconsistent();
+    const { headCheckpoint, linkedSession } = consistent;
 
-    const latestSessionActivityAt = sessions.reduce((max, session) => (session.updated_at > max ? session.updated_at : max), '');
+    const latestSession = sessions.reduce((latest, session) => {
+      if (!latest || session.updated_at > latest.updated_at) return session;
+      if (session.updated_at === latest.updated_at && session.id > latest.id) return session;
+      return latest;
+    }, null);
     const { freshness, warnings } = assessResumeFreshness({
       latestCheckpointAt: headCheckpoint ? headCheckpoint.created_at : null,
-      latestSessionActivityAt: latestSessionActivityAt || null,
-      sessionStatus: linkedSession ? linkedSession.status : null,
+      latestSessionActivityAt: latestSession?.updated_at ?? null,
+      sessionStatus: latestSession?.status ?? linkedSession?.status ?? null,
     });
     return { project, latest_checkpoint: headCheckpoint ?? null, freshness, warnings, content_trust: CONTENT_TRUST };
   }
 
   async getProjectSummary({ ownerScope, input } = {}) {
-    assertInput(input);
+    assertInput(input, { allowed: ['project_id'], required: ['project_id'] });
     const projectId = assertId(input.project_id);
     let state;
     try {
@@ -490,3 +603,4 @@ const TRANSITIONS = Object.freeze({
   completed: new Set(['archived']),
   archived: new Set(),
 });
+const SESSION_STATUSES = new Set(Object.keys(TRANSITIONS));

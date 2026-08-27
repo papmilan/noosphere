@@ -410,3 +410,51 @@ describe('project-associated idempotency receipts', () => {
     );
   });
 });
+
+describe('repository snapshot restore boundary', () => {
+  async function committedRepository() {
+    const repository = new InMemoryProjectMemoryRepository();
+    const project = validProject();
+    const session = validSession();
+    const checkpoint = validCheckpoint();
+    await repository.createProject({ ownerScope: ownerA, project });
+    await repository.createSession({ ownerScope: ownerA, session });
+    await repository.saveCheckpoint({
+      ownerScope: ownerA,
+      checkpoint,
+      project: projectedProject(project, checkpoint),
+      session: projectedSession(session, checkpoint),
+      idempotency: idempotency('snapshot-save', 'snapshot-hash'),
+    });
+    return { repository, project, session, checkpoint };
+  }
+
+  it('round-trips a complete committed snapshot into a fresh repository', async () => {
+    const { repository, project, session, checkpoint } = await committedRepository();
+    const restored = new InMemoryProjectMemoryRepository();
+    restored.restore(repository.snapshot());
+
+    assert.equal((await restored.getProject({ ownerScope: ownerA, projectId: project.id })).latest_checkpoint_id, checkpoint.id);
+    assert.equal((await restored.getSession({ ownerScope: ownerA, projectId: project.id, sessionId: session.id })).latest_checkpoint_id, checkpoint.id);
+    assert.equal((await restored.getCheckpoint({ ownerScope: ownerA, projectId: project.id, checkpointId: checkpoint.id })).revision, 1);
+  });
+
+  it('rejects valid records stored under substituted tuple keys without changing live state', async () => {
+    const { repository, project } = await committedRepository();
+    const corrupt = repository.snapshot();
+    corrupt.projects[ownerA].prj_substitute = corrupt.projects[ownerA][project.id];
+    delete corrupt.projects[ownerA][project.id];
+
+    assert.throws(() => repository.restore(corrupt), /invalid-snapshot/);
+    assert.equal((await repository.getProject({ ownerScope: ownerA, projectId: project.id })).id, project.id);
+  });
+
+  it('rejects individually valid records whose durable checkpoint heads disagree', async () => {
+    const { repository, project } = await committedRepository();
+    const corrupt = repository.snapshot();
+    corrupt.projects[ownerA][project.id].latest_checkpoint_id = null;
+
+    assert.throws(() => repository.restore(corrupt), /invalid-snapshot/);
+    assert.throws(() => repository.restore({ ...repository.snapshot(), unexpected: {} }), /invalid-snapshot/);
+  });
+});

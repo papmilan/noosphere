@@ -1,11 +1,9 @@
 # Remote Project Memory — Architecture overview
 
 An operator-facing map of the Remote MCP deployment: the packages, the request
-path, the trust boundaries, and where state lives. The service core, tool
-schemas, and MCP request/response behavior are unchanged from PR1–PR5/PR7; this
-PR (PR6) adds the production entrypoint (`src/main.js`), readiness/shutdown
-wiring, and deployment/packaging assets — production composition, not new
-protocol or business logic.
+path, the trust boundaries, and where state lives. The production entrypoint
+(`src/main.js`) composes the shared service core, PostgreSQL repository, OIDC
+verifier, readiness checks, and Streamable HTTP transport.
 
 ## Package layout
 
@@ -22,7 +20,7 @@ noosphere-remote-mcp-server     Deployable HTTP server
   src/mcp-core.js               Shared tool builder (buildProjectMemoryMcpServer)
   src/config.js  src/logging.js Config validation, redacting structured logs
   src/main.js                   Production entrypoint (env -> compose -> listen)
-noosphere-local-mcp             Local STDIO transport (single-user, in-memory)
+noosphere-local-mcp             Local STDIO transport (single-user, file-backed)
 ```
 
 The service core and tool surface are **shared** by both transports; only the
@@ -64,13 +62,23 @@ before the auth gate and never touch tool logic.
 ## State & durability
 
 - **Server:** durable data is entirely in PostgreSQL, but open MCP sessions are
-  **process-local, in-memory** state (no shared session store). They are drained
-  on shutdown; losing them costs a reconnect, not data. Because sessions are
-  process-local, multi-replica deployments need `Mcp-Session-Id` affinity — see
-  the multi-replica note in [`DEPLOYMENT.md`](DEPLOYMENT.md#1-docker-compose-recommended-reference).
+  **process-local, in-memory** state (no shared session store). Shutdown stops
+  accepting connections immediately, closes transports concurrently, and
+  bounds the HTTP drain to five seconds before force-closing remaining
+  connections. Losing a session costs a reconnect, not durable data. Because
+  sessions are process-local, multi-replica deployments need
+  `Mcp-Session-Id` affinity — see the multi-replica note in
+  [`DEPLOYMENT.md`](DEPLOYMENT.md#1-docker-compose-recommended-reference).
 - **PostgreSQL:** the single durable store. Schema is versioned through the
   `schema_migrations` table and forward-only migrations.
-- **Local STDIO:** in-memory, ephemeral, single-user (PR7).
+- **Local STDIO:** owner-local, single-user persistence at
+  `~/.noosphere/local-mcp/project-memory.json`. The executable opens a
+  `FileProjectMemoryRepository`; the server factory retains an injectable
+  in-memory default for tests and embedded callers. Writes are owner-only and
+  atomic. A cross-process mutation lock plus reload-under-lock prevents two MCP
+  hosts sharing the file from losing one another's committed changes. A later
+  writer can reclaim a lock only after verifying that its recorded owner
+  process is dead; unsafe or unverifiable lock state fails closed.
 
 ## Failure & recovery posture
 

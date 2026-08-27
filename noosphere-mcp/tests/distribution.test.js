@@ -83,7 +83,18 @@ describe('published package distribution', () => {
       await access(path.join(packedRelayer, 'durability.js'));
       await access(path.join(packedRelayer, 'vendor', 'acp-protocol', 'schema.json'));
       const dockerfile = await readFile(path.join(relayerRoot, 'Dockerfile'), 'utf8');
-      assert.match(dockerfile, /COPY --chown=node:node vendor\/acp-protocol \.\/vendor\/acp-protocol/);
+      assert.match(
+        dockerfile,
+        /COPY --chown=node:node noosphere-secure-fs\/package\.json noosphere-secure-fs\/index\.js noosphere-secure-fs\/windows-owner-only\.ps1 \/noosphere-secure-fs\//,
+      );
+      assert.match(
+        dockerfile,
+        /COPY --chown=node:node noosphere-relayer\/vendor\/acp-protocol \.\/vendor\/acp-protocol/,
+      );
+      assert.match(
+        dockerfile,
+        /COPY --chown=node:node noosphere-relayer\/credentials\.js[^\n]*noosphere-relayer\/relayer-fetch-guard\.js[^\n]*noosphere-relayer\/relayer-origins\.js[^\n]*noosphere-relayer\/secure-fs\.js/,
+      );
       const protocolManifest = JSON.parse(await readFile(path.join(protocolRoot, 'package.json'), 'utf8'));
       for (const source of [...protocolManifest.files, 'package.json']) {
         assert.equal(
@@ -201,7 +212,7 @@ describe('published package distribution', () => {
       assert.equal(await isPathInside(installedMcp, acpProtocol), true);
       await execFileAsync(process.execPath, [
         '--input-type=module', '-e',
-        "await import('./continuity/secure-fs.js'); await import('@noosphere/secure-fs');",
+        "await import('./continuity/secure-fs.js'); const secure = await import('@noosphere/secure-fs'); if (typeof secure.readBoundedRegularFileTail !== 'function') process.exit(2);",
       ], { cwd: installedMcp, maxBuffer: 2_000_000 });
       const helperResult = JSON.parse((await execFileAsync(process.execPath, [
         '--input-type=module', '-e', installedHelperProbe(),

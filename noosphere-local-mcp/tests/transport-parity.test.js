@@ -34,7 +34,7 @@ const errCode = (result) => (result && result.isError ? result.structuredContent
 // transport underneath it. Returns a normalized outcome for parity comparison:
 // init/capabilities, tool discovery + schemas, project create/resolve, session,
 // two chained checkpoint writes, listing/retrieval, resume, idempotent replay,
-// conflicting-key reuse, ambiguity/exact search, cursor pagination, invalid
+// conflicting idempotency reuse, ambiguity/exact search, cursor pagination, invalid
 // arguments, trust labels, warning/freshness.
 async function runWorkflow(session) {
   const { client } = session;
@@ -132,7 +132,7 @@ describe('Transport parity: Local STDIO client vs Remote HTTP client', () => {
     const httpOutcome = await runWorkflow(http);
 
     // Sanity: each transport actually exercised the full surface and semantics.
-    assert.equal(stdioOutcome.toolCount, 15);
+    assert.equal(stdioOutcome.toolCount, 16);
     assert.equal(stdioOutcome.save1Dedup, false);
     assert.equal(stdioOutcome.replayDedup, true);
     assert.equal(stdioOutcome.conflictCode, 'idempotency-conflict');
@@ -152,7 +152,7 @@ describe('Transport parity: Local STDIO client vs Remote HTTP client', () => {
   it('advertises identical tool names and input schemas on both transports', async () => {
     const stdioTools = (await stdio.client.listTools()).tools.sort((a, b) => a.name.localeCompare(b.name));
     const httpTools = (await http.client.listTools()).tools.sort((a, b) => a.name.localeCompare(b.name));
-    assert.equal(stdioTools.length, 15);
+    assert.equal(stdioTools.length, 16);
     assert.deepEqual(stdioTools.map((t) => t.name), httpTools.map((t) => t.name));
     assert.deepEqual(stdioTools.map((t) => t.inputSchema), httpTools.map((t) => t.inputSchema));
   });

@@ -7,6 +7,7 @@ import {
   mkdir,
   readFile,
   rename,
+  rm,
   writeFile,
 } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -30,7 +31,7 @@ const legacySessionCommand = `bash "${path.join(hookDir, 'post-session.sh')}"`;
 const sessionEntry = {
   type: 'command',
   command: sessionCommand,
-  timeout: 145,
+  timeout: 60,
   statusMessage: 'Storing session in Noosphere...',
 };
 const promptEntry = {
@@ -60,31 +61,47 @@ async function main() {
     }
   }
 
+  if (settings === null || Array.isArray(settings) || typeof settings !== 'object') {
+    throw new Error('Claude settings must contain a JSON object.');
+  }
+  if (settings.hooks !== undefined && (
+    settings.hooks === null ||
+    Array.isArray(settings.hooks) ||
+    typeof settings.hooks !== 'object'
+  )) {
+    throw new Error('settings.hooks must be an object; the existing settings file was not changed.');
+  }
+
   const backupPath = `${settingsPath}.noosphere-backup-${timestamp()}`;
   if (existsSync(settingsPath)) {
     await copyFile(settingsPath, backupPath);
   }
 
-  settings.hooks = settings.hooks || {};
+  settings.hooks ||= {};
   settings.hooks.UserPromptSubmit = upsertHookList(
     settings.hooks.UserPromptSubmit,
-    promptCommand,
     promptEntry,
+    (candidate) => candidate === promptCommand || candidate.includes(`"${promptHookPath}"`),
   );
   settings.hooks.SessionEnd = upsertHookList(
     settings.hooks.SessionEnd,
-    sessionCommand,
     sessionEntry,
-    [legacySessionCommand],
+    (candidate) => candidate === sessionCommand ||
+      candidate === legacySessionCommand ||
+      candidate.includes(`"${sessionHookPath}"`),
   );
 
   const temporaryPath = `${settingsPath}.${randomUUID()}.tmp`;
-  await writeFile(
-    temporaryPath,
-    `${JSON.stringify(settings, null, 2)}\n`,
-    { mode: 0o600 },
-  );
-  await rename(temporaryPath, settingsPath);
+  try {
+    await writeFile(
+      temporaryPath,
+      `${JSON.stringify(settings, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    await rename(temporaryPath, settingsPath);
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
   await chmod(settingsPath, 0o600);
 
   process.stdout.write(`Installed Noosphere hook: ${sessionHookPath}\n`);
@@ -108,25 +125,37 @@ async function writeHookLauncher(destination, source) {
   );
 }
 
-function upsertHookList(existing, command, entry, retiredCommands = []) {
-  const list = Array.isArray(existing) ? existing : [];
-  const retired = new Set(retiredCommands);
+function upsertHookList(existing, entry, isManagedCommand) {
+  if (existing !== undefined && !Array.isArray(existing)) {
+    throw new Error('a Claude hook event must be an array; the existing settings file was not changed.');
+  }
+  const list = existing || [];
+  const updated = [];
+  let installed = false;
 
   for (const group of list) {
-    const hooks = Array.isArray(group?.hooks) ? group.hooks : [];
-    for (const hook of hooks) {
-      if (hook?.command === command || retired.has(hook?.command)) {
-        hook.type = entry.type;
-        hook.command = entry.command;
-        hook.timeout = entry.timeout;
-        hook.statusMessage = entry.statusMessage;
-        return list;
+    if (!group || typeof group !== 'object' || !Array.isArray(group.hooks)) {
+      updated.push(group);
+      continue;
+    }
+    const hooks = [];
+    for (const hook of group.hooks) {
+      const command = typeof hook?.command === 'string' ? hook.command : '';
+      if (!isManagedCommand(command)) {
+        hooks.push(hook);
+        continue;
+      }
+      if (!installed) {
+        hooks.push({ ...hook, ...entry });
+        installed = true;
       }
     }
+    if (hooks.length > 0) updated.push({ ...group, hooks });
   }
 
-  list.push({ hooks: [{ ...entry }] });
-  return list;
+  if (!installed) updated.push({ hooks: [{ ...entry }] });
+
+  return updated;
 }
 
 function timestamp() {

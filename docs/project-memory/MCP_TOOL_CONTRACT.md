@@ -1,7 +1,7 @@
 # Project Memory MCP Tool Contract
 
-This is a contract for a future remote Streamable HTTP MCP server. PR 1 ships no
-endpoint. All inputs are deterministic JSON objects; authenticated identity is
+This contract is implemented by the Remote Streamable HTTP and Local STDIO MCP
+servers. All inputs are deterministic JSON objects; authenticated identity is
 derived by the server and is never a tool argument.
 
 ## Common rules
@@ -21,8 +21,8 @@ derived by the server and is never a tool argument.
   different request hash returns `idempotency-conflict`; a committed matching
   request replays its successful result. A failed transaction stores no receipt
   and may be retried. Concurrent retries must be serialized atomically by a
-  production repository. Receipt retention/TTL is deployment configuration and
-  is explicitly deferred beyond PR 1.
+  production repository. There is no time-based public receipt-TTL operation;
+  project-associated receipts remain until that project is deleted or purged.
 - An unauthenticated, forbidden, or missing result does not disclose private
   names or existence details.
 
@@ -37,6 +37,7 @@ derived by the server and is never a tool argument.
 | `create_session` | project_id, source_client | closed session |
 | `get_session` | project_id, session_id | one session |
 | `list_project_sessions` | project_id, cursor | bounded session page |
+| `transition_session` | project_id, session_id, status | transitioned session |
 | `save_checkpoint` | project_id, checkpoint, idempotency_key | closed checkpoint, deduplication |
 | `get_latest_checkpoint` | project_id | latest checkpoint or null |
 | `get_checkpoint` | project_id, checkpoint_id | exact checkpoint |

@@ -37,18 +37,17 @@ verifier. It proves, at the protocol level:
 The SDK client is a faithful protocol stand-in; it is **not** the ChatGPT or
 Claude application. Real client-app behavior is validated manually below.
 
-## Out of scope for PR5 acceptance
+## Deliberately outside this acceptance suite
 
 - **Deletion.** `delete_project` is **not** part of the current public MCP tool
-  surface (the surface is the 15 tools listed above). Delete and post-delete
-  transport acceptance is therefore **N/A** in PR5 — there is no public tool to
-  exercise. Exposing deletion is a separate server-surface follow-up, and its
-  acceptance coverage would land with that surface, not here.
+  surface (the surface is the 16 tools listed above). Delete and post-delete
+  transport acceptance is therefore not applicable: there is no public tool to
+  exercise. Owner-scoped deletion remains an operator/repository operation.
 - **PostgreSQL-backed acceptance.** This suite runs the server against an
-  in-memory repository for CI determinism. A PostgreSQL-backed acceptance
-  variant remains an explicitly deferred follow-up; it is **not** claimed to be
-  covered here. (The PostgreSQL repository has its own parity/DB suites in
-  `noosphere-remote-mcp-postgres`.)
+  in-memory repository for deterministic transport testing; it does not claim
+  PostgreSQL coverage. The PostgreSQL repository has separate parity,
+  concurrency, migration, export, deletion, and retention suites in
+  `noosphere-remote-mcp-postgres`.
 
 ## Manual client-validation matrix
 
@@ -67,7 +66,7 @@ until validated.
 1. Discover protected-resource metadata at `/.well-known/oauth-protected-resource`.
 2. Complete the client's OAuth flow against the configured IdP; obtain a bearer
    token with the required scopes.
-3. `initialize` + `tools/list` returns the 15 Project Memory tools.
+3. `initialize` + `tools/list` returns the 16 Project Memory tools.
 4. Run the Bicycle Repair and Architecture Phase 1→2 flows end to end.
 5. Confirm cross-user denial with a second identity.
 6. Confirm the client sends `Origin`/`Accept` acceptably and honors the

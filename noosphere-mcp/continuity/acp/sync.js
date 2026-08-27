@@ -47,14 +47,14 @@ export async function discoverRemoteState(root, projectId, deps, options = {}) {
     const bytes = Buffer.from(response.bytes);
     try {
       if (bytes.length > ACP_LIMITS.snapshotBytes) throw syncError('snapshot-too-large');
-      const text = bytes.toString('utf8');
-      const decoded = decodeEnvelope(text, { clock: clockIso(clock) });
+      const decoded = decodeEnvelope(bytes, { clock: clockIso(clock) });
       if (!decoded.ok) throw syncError('remote-invalid', decoded.errors);
-      if (decoded.state.envelope.snapshot_id !== snapshotId || canonicalize(decoded.state.envelope) !== text) {
+      const canonical = canonicalize(decoded.state.envelope);
+      if (decoded.state.envelope.snapshot_id !== snapshotId || !bytes.equals(Buffer.from(canonical, 'utf8'))) {
         throw syncError('remote-invalid');
       }
       validatedById.set(snapshotId, decoded.state);
-      canonicalById.set(snapshotId, text);
+      canonicalById.set(snapshotId, canonical);
     } catch (error) {
       await (deps.quarantineBytes ?? quarantineBytes)(root, snapshotId, bytes).catch(() => undefined);
       throw error;

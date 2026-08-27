@@ -24,6 +24,7 @@ import {
   readBoundedRegularFile,
   removeRepositoryDirectoryIfEmpty,
   removeRepositoryFile,
+  tryAcquireOwnerProcessGuard,
 } from '../index.js';
 
 const temporary = [];
@@ -401,6 +402,209 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
     const written = (await fsp.readFile(file, 'utf8')).trimEnd().split('\n').sort();
     assert.deepEqual(written, lines.map((line) => line.trim()).sort());
     assert.deepEqual((await fsp.readdir(path.dirname(file))).sort(), ['journal.md']);
+  });
+
+  it('serializes idempotent appends so one logical entry is written once', async () => {
+    const root = await fresh();
+    const file = path.join(root, '.noosphere', 'journal.md');
+    const marker = '<!-- noosphere:session:session-42 -->';
+    const entry = `${marker}\nfinished once\n`;
+    const results = await Promise.all(Array.from({ length: 16 }, () =>
+      appendRepositoryFile(file, entry, {
+        root,
+        maxBytes: 4096,
+        skipIfContains: marker,
+        lockAttempts: 5000,
+        lockBackoffMs: 2,
+      })));
+
+    assert.equal(results.filter((result) => result.appended === true).length, 1);
+    assert.equal(results.filter((result) => result.appended === false).length, 15);
+    assert.equal(await fsp.readFile(file, 'utf8'), entry);
+  });
+
+  it('reclaims an append lock whose writer process is dead', async () => {
+    const root = await fresh();
+    const file = path.join(root, '.noosphere', 'journal.md');
+    const lock = `${file}.append.lock`;
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(lock, JSON.stringify({
+      pid: 2_147_483_647,
+      token: '00000000-0000-4000-8000-000000000002',
+      created_at: Date.now(),
+    }));
+
+    const result = await appendRepositoryFile(file, 'recovered\n', {
+      root,
+      maxBytes: 1024,
+      lockAttempts: 5,
+      lockBackoffMs: 1,
+    });
+
+    assert.equal(result.appended, true);
+    assert.equal(await fsp.readFile(file, 'utf8'), 'recovered\n');
+    await assert.rejects(fsp.access(lock));
+  });
+
+  it('never reclaims an append lock owned by a live writer', async () => {
+    const root = await fresh();
+    const file = path.join(root, 'journal.md');
+    const lock = `${file}.append.lock`;
+    const contents = JSON.stringify({
+      pid: process.pid,
+      token: '00000000-0000-4000-8000-000000000003',
+      created_at: Date.now(),
+    });
+    await fsp.writeFile(lock, contents);
+
+    await assert.rejects(
+      appendRepositoryFile(file, 'must-not-land\n', {
+        root,
+        maxBytes: 1024,
+        lockAttempts: 3,
+        lockBackoffMs: 1,
+      }),
+      (error) => error.code === 'state-append-busy',
+    );
+    assert.equal(await fsp.readFile(lock, 'utf8'), contents);
+    await assert.rejects(fsp.access(file));
+  });
+
+  it('never reclaims malformed append-lock metadata merely because it is old', async () => {
+    const root = await fresh();
+    const file = path.join(root, 'journal.md');
+    const lock = `${file}.append.lock`;
+    await fsp.writeFile(lock, '{malformed');
+    await fsp.utimes(lock, new Date(0), new Date(0));
+
+    await assert.rejects(
+      appendRepositoryFile(file, 'must-not-land\n', {
+        root,
+        maxBytes: 1024,
+        lockAttempts: 2,
+        lockBackoffMs: 0,
+      }),
+      (error) => error.code === 'state-append-busy',
+    );
+    assert.equal(await fsp.readFile(lock, 'utf8'), '{malformed');
+    await assert.rejects(fsp.access(file));
+  });
+
+  it('recovers a process guard left by a killed append-lock reclaimer', async () => {
+    const root = await fresh();
+    const file = path.join(root, 'journal.md');
+    const lock = `${file}.append.lock`;
+    const guard = `${lock}.reclaim`;
+    await fsp.writeFile(lock, JSON.stringify({
+      pid: 2_147_483_647,
+      token: '00000000-0000-4000-8000-000000000004',
+      created_at: Date.now(),
+    }));
+    await fsp.mkdir(guard);
+    await fsp.writeFile(
+      path.join(guard, 'owner-2147483647-00000000-0000-4000-8000-000000000005'),
+      '',
+    );
+
+    const result = await appendRepositoryFile(file, 'recovered-twice\n', {
+      root,
+      maxBytes: 1024,
+      lockAttempts: 5,
+      lockBackoffMs: 0,
+    });
+
+    assert.equal(result.appended, true);
+    assert.equal(await fsp.readFile(file, 'utf8'), 'recovered-twice\n');
+    await assert.rejects(fsp.access(lock));
+    await assert.rejects(fsp.access(guard));
+  });
+
+  it('serializes every waiter while one of them reclaims a dead append lock', async () => {
+    const root = await fresh();
+    const file = path.join(root, 'journal.md');
+    const lock = `${file}.append.lock`;
+    await fsp.writeFile(lock, JSON.stringify({
+      pid: 2_147_483_647,
+      token: '00000000-0000-4000-8000-000000000008',
+      created_at: Date.now(),
+    }));
+    const lines = Array.from({ length: 24 }, (_, index) => `reclaim-${index}\n`);
+
+    await Promise.all(lines.map((line) => appendRepositoryFile(file, line, {
+      root,
+      maxBytes: 4096,
+      lockAttempts: 5000,
+      lockBackoffMs: 1,
+    })));
+
+    const written = (await fsp.readFile(file, 'utf8')).trimEnd().split('\n').sort();
+    assert.deepEqual(written, lines.map((line) => line.trim()).sort());
+    await assert.rejects(fsp.access(lock));
+    await assert.rejects(fsp.access(`${lock}.reclaim`));
+  });
+
+  it('does not reclaim a process guard owned by a live reclaimer', async () => {
+    const root = await fresh();
+    const file = path.join(root, 'journal.md');
+    const lock = `${file}.append.lock`;
+    const guard = `${lock}.reclaim`;
+    await fsp.writeFile(lock, JSON.stringify({
+      pid: 2_147_483_647,
+      token: '00000000-0000-4000-8000-000000000009',
+      created_at: Date.now(),
+    }));
+    await fsp.mkdir(guard);
+    const marker = `owner-${process.pid}-00000000-0000-4000-8000-00000000000a`;
+    await fsp.writeFile(path.join(guard, marker), '');
+
+    await assert.rejects(
+      appendRepositoryFile(file, 'must-not-land\n', {
+        root,
+        maxBytes: 1024,
+        lockAttempts: 3,
+        lockBackoffMs: 0,
+      }),
+      (error) => error.code === 'state-append-busy',
+    );
+    assert.equal((await fsp.readdir(guard)).join(''), marker);
+    await assert.rejects(fsp.access(file));
+  });
+
+  it('recognizes and cleans the exact AppleDouble companion of a process-guard marker', async () => {
+    const root = await fresh();
+    const guard = path.join(root, 'journal.md.append.lock.reclaim');
+    const liveMarker = `owner-${process.pid}-00000000-0000-4000-8000-00000000000b`;
+    await fsp.mkdir(guard);
+    await fsp.writeFile(path.join(guard, liveMarker), '');
+    await fsp.writeFile(path.join(guard, `._${liveMarker}`), 'appledouble');
+
+    assert.equal(await tryAcquireOwnerProcessGuard(guard, { root }), null);
+    assert.deepEqual((await fsp.readdir(guard)).sort(), [`._${liveMarker}`, liveMarker].sort());
+
+    await fsp.rm(guard, { recursive: true });
+    const deadMarker = 'owner-2147483647-00000000-0000-4000-8000-00000000000c';
+    await fsp.mkdir(guard);
+    await fsp.writeFile(path.join(guard, deadMarker), '');
+    await fsp.writeFile(path.join(guard, `._${deadMarker}`), 'appledouble');
+
+    const acquired = await tryAcquireOwnerProcessGuard(guard, { root });
+    assert.ok(acquired);
+    await acquired.release();
+    await assert.rejects(fsp.access(guard));
+  });
+
+  it('still rejects unrelated or malformed process-guard companions', async () => {
+    const root = await fresh();
+    const guard = path.join(root, 'journal.md.append.lock.reclaim');
+    const marker = `owner-${process.pid}-00000000-0000-4000-8000-00000000000d`;
+    await fsp.mkdir(guard);
+    await fsp.writeFile(path.join(guard, marker), '');
+    await fsp.writeFile(path.join(guard, '._different-marker'), 'appledouble');
+
+    await assert.rejects(
+      tryAcquireOwnerProcessGuard(guard, { root }),
+      (error) => error.code === 'state-process-guard-unsafe',
+    );
   });
 
   it('serializes the size check so concurrent appends cannot exceed the bound', async () => {

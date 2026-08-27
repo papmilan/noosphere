@@ -33,6 +33,36 @@ describe('Project Memory core primitives', () => {
     assert.notEqual(requestHash({ aliases: ['bike', 'repair'] }), requestHash({ aliases: ['repair', 'bike'] }));
   });
 
+  it('rejects sparse arrays instead of hashing them like a different JSON value', () => {
+    const sparse = [];
+    sparse.length = 1;
+
+    assert.throws(() => canonicalJson(sparse), /invalid-canonical-json/);
+    assert.throws(() => requestHash({ values: sparse }), /invalid-canonical-json/);
+  });
+
+  it('rejects cycles but permits the same acyclic value to appear twice', () => {
+    const cycle = {};
+    cycle.self = cycle;
+    const shared = { answer: 42 };
+
+    assert.throws(() => canonicalJson(cycle), /invalid-canonical-json/);
+    assert.equal(
+      canonicalJson({ left: shared, right: shared }),
+      '{"left":{"answer":42},"right":{"answer":42}}',
+    );
+  });
+
+  it('canonicalizes very deep JSON without overflowing the JavaScript stack', () => {
+    let value = null;
+    for (let index = 0; index < 20_000; index += 1) value = { child: value };
+
+    const encoded = canonicalJson(value);
+
+    assert.equal(encoded.startsWith('{"child":{"child":'), true);
+    assert.equal(encoded.endsWith('}'.repeat(20_000)), true);
+  });
+
   it('encrypts cursor state and does not expose its owner binding', () => {
     const cursor = encodeCursor({ ownerScope: ownerA, operation: 'list_projects', query: { includeArchived: false }, after: 'prj_b' }, cursorSecret);
     assert.match(cursor, /^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u);
@@ -57,6 +87,23 @@ describe('Project Memory core primitives', () => {
         operation: 'list_projects',
         query: { includeArchived: false, search: 'bicycle repair', filters: ['active', { label: 'café shop' }] },
       }, cursorSecret).after,
+      'prj_b',
+    );
+  });
+
+  it('binds a deeply nested cursor query without recursive stack failure', () => {
+    let query = '  Café\tRepair  ';
+    for (let index = 0; index < 20_000; index += 1) query = { child: query };
+
+    const cursor = encodeCursor({
+      ownerScope: ownerA,
+      operation: 'list_projects',
+      query,
+      after: 'prj_b',
+    }, cursorSecret);
+
+    assert.equal(
+      decodeCursor(cursor, { ownerScope: ownerA, operation: 'list_projects', query }, cursorSecret).after,
       'prj_b',
     );
   });

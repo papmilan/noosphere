@@ -12,6 +12,31 @@ Dates are npm publish dates. The format follows
 
 ## noosphere-continuity
 
+### Unreleased
+
+- **Windows lifecycle reliability.** Background services run through hidden
+  WScript launchers with an explicit working directory, bounded logs, liveness
+  checks, restart supervision, and coalesced manager passes. PowerShell profile
+  activation is non-blocking and idempotent, so opening a shell neither waits
+  for Noosphere nor creates duplicate hooks or visible service windows.
+- **Claude SessionEnd continuity.** An activated Git project now receives one
+  bounded local journal handoff before any optional upload. Offline relayers and
+  `privacy.share_journal=false` cannot suppress that local record, concurrent
+  hooks cannot duplicate it, and a summary from another project is never used
+  as a fallback. Long transcripts are read from a secure bounded tail instead
+  of being discarded wholesale, invalid configuration blocks only the remote
+  upload, local write failures are surfaced through the hook exit status, and
+  reinstalling collapses duplicate current or legacy registrations without
+  removing unrelated Claude hooks.
+- **Crash-safe coordination.** ACP, local Project Memory, and repository journal
+  mutations serialize across processes and reclaim only locks carrying an
+  explicitly dead owner PID. Malformed or unverifiable locks fail closed. The
+  reclaimer guard survives its own process death and recognizes only the exact
+  AppleDouble companion macOS creates on external volumes.
+- **Portable container builds.** `scripts/docker-build.mjs` stages a sanitized,
+  symlink-free BuildKit context for Remote MCP or the relayer, avoiding the
+  external-volume xattr failure without the deprecated legacy builder.
+
 ### 2.5.1 — 2026-08-18
 
 - **Commits that arrive by pull are observed too.** `noosphere hooks install`
@@ -238,6 +263,17 @@ Dates are npm publish dates. The format follows
   graceful degradation when Windows blocks `schtasks /Create`.
 
 ## noosphere-relayer
+
+### Unreleased
+
+- **Runnable production image.** The relayer Docker image now includes every
+  published top-level runtime module and the real sibling `@noosphere/secure-fs`
+  package. A manifest-derived regression test prevents a Dockerfile from
+  silently omitting a future runtime module, and container smoke verification
+  covers the non-root entrypoint plus `/health` and `/ready`.
+- **Windows credential processes.** DPAPI PowerShell helpers run with hidden
+  windows, reject silent zero-byte output, clean failed writes, and retain
+  actionable stderr without exposing credential material.
 
 ### 2.1.4 — 2026-08-17
 

@@ -105,6 +105,18 @@ describe('ACP execution state invariants', () => {
     assert.ok(errorCodes(result).includes('duplicate-id'));
   });
 
+  it('rejects object keys that collide after Unicode normalization', () => {
+    const envelope = validEnvelope();
+    envelope.origin['caf\u00e9'] = 'composed';
+    envelope.origin['cafe\u0301'] = 'decomposed';
+
+    const result = createExecutionState(envelope, { clock: CREATED_AT });
+
+    assert.equal(result.ok, false);
+    assert.ok(errorCodes(result).includes('normalized-key-collision'));
+    assert.equal('state' in result, false);
+  });
+
   it('rejects a dangling cursor step and a dangling parent', () => {
     const danglingCursor = createExecutionState(
       validEnvelope({ cursor: { ...validEnvelope().cursor, step_id: 'missing' } }),
@@ -118,6 +130,77 @@ describe('ACP execution state invariants', () => {
     const danglingParent = createExecutionState(envelope, { clock: CREATED_AT });
     assert.equal(danglingParent.ok, false);
     assert.ok(errorCodes(danglingParent).includes('dangling-step'));
+  });
+
+  it('rejects parent cycles even when every referenced step exists', () => {
+    const envelope = validEnvelope();
+    envelope.steps[0] = { ...envelope.steps[0], parent_step_id: 's2' };
+
+    const result = createExecutionState(envelope, { clock: CREATED_AT });
+
+    assert.equal(result.ok, false);
+    assert.ok(errorCodes(result).includes('step-cycle'));
+  });
+
+  it('requires the execution tree to have exactly one root', () => {
+    const envelope = validEnvelope();
+    envelope.steps[1] = { ...envelope.steps[1], parent_step_id: null };
+
+    const result = createExecutionState(envelope, { clock: CREATED_AT });
+
+    assert.equal(result.ok, false);
+    assert.ok(errorCodes(result).includes('invalid-root-count'));
+  });
+
+  it('requires exactly one current step and binds the cursor to it', () => {
+    const duplicateCurrent = validEnvelope();
+    duplicateCurrent.steps[0] = { ...duplicateCurrent.steps[0], status: 'current' };
+    const duplicateResult = createExecutionState(duplicateCurrent, { clock: CREATED_AT });
+    assert.equal(duplicateResult.ok, false);
+    assert.ok(errorCodes(duplicateResult).includes('invalid-current-count'));
+
+    const cursorMismatch = validEnvelope();
+    cursorMismatch.steps[0] = { ...cursorMismatch.steps[0], status: 'current' };
+    cursorMismatch.steps[1] = { ...cursorMismatch.steps[1], status: 'pending' };
+    const mismatchResult = createExecutionState(cursorMismatch, { clock: CREATED_AT });
+    assert.equal(mismatchResult.ok, false);
+    assert.ok(errorCodes(mismatchResult).includes('cursor-current-mismatch'));
+  });
+
+  it('rejects calendar-impossible timestamps instead of normalizing them', () => {
+    const envelope = validEnvelope({
+      created_at: '2026-02-30T00:00:00.000Z',
+      expires_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    const result = createExecutionState(envelope, { clock: '2026-03-03T00:00:00.000Z' });
+
+    assert.equal(result.ok, false);
+    assert.ok(errorCodes(result).includes('invalid-timestamp'));
+  });
+
+  it('rejects sparse execution arrays before normalization', () => {
+    const envelope = validEnvelope();
+    envelope.steps.length = 3;
+
+    const result = createExecutionState(envelope, { clock: CREATED_AT });
+
+    assert.equal(result.ok, false);
+    assert.ok(errorCodes(result).includes('sparse-array'));
+  });
+
+  it('rejects extremely deep unknown input without overflowing the JavaScript stack', () => {
+    const envelope = validEnvelope();
+    let cursor = envelope;
+    for (let index = 0; index < 20_000; index += 1) {
+      cursor.deep = {};
+      cursor = cursor.deep;
+    }
+
+    const result = createExecutionState(envelope, { clock: '2026-07-13T10:00:00.000Z' });
+
+    assert.equal(result.ok, false);
+    assert.ok(errorCodes(result).includes('additional-property'));
   });
 
   it('requires expires_at', () => {

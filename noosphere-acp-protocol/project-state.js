@@ -1,3 +1,5 @@
+import { findJsonValueErrors, findNormalizedKeyCollisions } from './wire.js';
+
 export const ACP_PROTOCOL = 'acp.project-state-envelope';
 export const ACP_SCHEMA_VERSION = '1.0.0';
 
@@ -25,6 +27,10 @@ export const defaultPolicy = Object.freeze({
 });
 
 export function createProjectState(envelope, { clock, policy = defaultPolicy } = {}) {
+  const jsonErrors = findJsonValueErrors(envelope);
+  if (jsonErrors.length) return { ok: false, errors: orderErrors(jsonErrors) };
+  const normalizationErrors = findNormalizedKeyCollisions(envelope);
+  if (normalizationErrors.length) return { ok: false, errors: orderErrors(normalizationErrors) };
   const normalized = normalizeEnvelope(envelope);
   const errors = validateEnvelope(normalized, policy);
   if (errors.length) return { ok: false, errors: orderErrors(errors) };
@@ -75,6 +81,7 @@ function validateEnvelope(envelope, policy) {
   validateIntegrity(envelope.integrity, errors, limits);
   enumValue(envelope.permission_scope, '$.permission_scope', ['project'], errors);
   validateTrust(envelope.trust, errors, limits);
+  validateTrustBinding(envelope.integrity?.signature, envelope.trust, errors);
   validateRepository(envelope.repository, errors, limits);
   enumValue(envelope.phase, '$.phase', ['discovery', 'planning', 'implementation', 'verification', 'blocked', 'complete'], errors);
   validateGoal(envelope.goal, errors, limits);
@@ -107,6 +114,15 @@ function validateIntegrity(value, errors, limits) {
   nullableString(value?.signature?.algorithm, '$.integrity.signature.algorithm', errors, limits);
   nullableString(value?.signature?.key_id, '$.integrity.signature.key_id', errors, limits);
   nullableString(value?.signature?.value, '$.integrity.signature.value', errors, limits);
+  const signature = value?.signature;
+  if (signature?.status === 'unsigned'
+    && (signature.algorithm !== null || signature.key_id !== null || signature.value !== null)) {
+    error(errors, '$.integrity.signature', 'invalid-signature-fields', 'unsigned signatures must not include algorithm, key_id, or value');
+  }
+  if (signature?.status === 'signed'
+    && (![signature.algorithm, signature.key_id, signature.value].every((field) => typeof field === 'string' && field.length > 0))) {
+    error(errors, '$.integrity.signature', 'invalid-signature-fields', 'signed signatures require algorithm, key_id, and value');
+  }
 }
 
 function validateTrust(value, errors, limits) {
@@ -114,6 +130,15 @@ function validateTrust(value, errors, limits) {
   required(value, '$.trust', ['level', 'reasons'], errors);
   enumValue(value?.level, '$.trust.level', ['local-unverified', 'local-verified', 'shared-unverified', 'shared-verified'], errors);
   strings(value?.reasons, '$.trust.reasons', errors, limits);
+  if (Array.isArray(value?.reasons) && value.reasons.length === 0) {
+    error(errors, '$.trust.reasons', 'invalid-size', 'must include at least one trust reason');
+  }
+}
+
+function validateTrustBinding(signature, trust, errors) {
+  if (signature?.status === 'unsigned' && trust?.level !== 'local-unverified') {
+    error(errors, '$.trust.level', 'unsigned-trust-elevation', 'unsigned v1 envelopes are capped at local-unverified trust');
+  }
 }
 
 function validateRepository(value, errors, limits) {
@@ -259,26 +284,33 @@ function validateConflictCandidate(candidate, path, errors, limits) {
 function validateIdentityAndProvenance(envelope, errors) {
   const ids = new Map();
   const known = new Set();
-  for (const reference of envelope.references ?? []) {
+  const references = Array.isArray(envelope.references) ? envelope.references : [];
+  for (const reference of references) {
     recordId(reference?.id, '$.references', ids, errors);
     if (typeof reference?.id === 'string') known.add(reference.id);
   }
   for (const type of ASSERTION_TYPES) {
-    for (const assertion of envelope[type] ?? []) {
+    const assertions = Array.isArray(envelope[type]) ? envelope[type] : [];
+    for (const assertion of assertions) {
       recordId(assertion?.id, `$.${type}`, ids, errors);
       if (type === 'evidence' && typeof assertion?.id === 'string') known.add(assertion.id);
     }
   }
   for (const type of ASSERTION_TYPES) {
-    for (const [index, assertion] of (envelope[type] ?? []).entries()) {
-      for (const [provenanceIndex, referenceId] of (assertion?.provenance ?? []).entries()) {
+    const assertions = Array.isArray(envelope[type]) ? envelope[type] : [];
+    for (const [index, assertion] of assertions.entries()) {
+      const provenance = Array.isArray(assertion?.provenance) ? assertion.provenance : [];
+      for (const [provenanceIndex, referenceId] of provenance.entries()) {
         if (typeof referenceId === 'string' && !known.has(referenceId)) error(errors, `$.${type}[${index}].provenance[${provenanceIndex}]`, 'dangling-provenance', 'provenance must resolve to a reference or evidence ID');
       }
     }
   }
-  for (const [conflictIndex, conflict] of (envelope.conflicts ?? []).entries()) {
-    for (const [candidateIndex, candidate] of (conflict?.candidates ?? []).entries()) {
-      for (const [provenanceIndex, referenceId] of (candidate?.provenance ?? []).entries()) {
+  const conflicts = Array.isArray(envelope.conflicts) ? envelope.conflicts : [];
+  for (const [conflictIndex, conflict] of conflicts.entries()) {
+    const candidates = Array.isArray(conflict?.candidates) ? conflict.candidates : [];
+    for (const [candidateIndex, candidate] of candidates.entries()) {
+      const provenance = Array.isArray(candidate?.provenance) ? candidate.provenance : [];
+      for (const [provenanceIndex, referenceId] of provenance.entries()) {
         if (typeof referenceId === 'string' && !known.has(referenceId)) error(errors, `$.conflicts[${conflictIndex}].candidates[${candidateIndex}].provenance[${provenanceIndex}]`, 'dangling-provenance', 'provenance must resolve to a reference or evidence ID');
       }
     }
@@ -310,7 +342,7 @@ function buildIndexes(envelope, clock) {
   for (const ids of Object.values(activeByType)) ids.sort();
   for (const ids of Object.values(activeDecisionsByDomain)) ids.sort();
 
-  const conflicts = Object.keys(activeDecisionsByDomain).sort().flatMap((domain) => {
+  const decisionConflicts = Object.keys(activeDecisionsByDomain).sort().flatMap((domain) => {
     const assertionIds = activeDecisionsByDomain[domain];
     return assertionIds.length > 1 ? [{
       kind: 'decision-domain',
@@ -320,6 +352,17 @@ function buildIndexes(envelope, clock) {
       candidates: assertionIds.map((id) => conflictCandidate(byId[id], envelope.trust.level)),
     }] : [];
   });
+  const priorityIds = activeByType.next_actions
+    .filter((id) => byId[id].priority === 1)
+    .sort();
+  const priorityConflicts = priorityIds.length > 1 ? [{
+    kind: 'priority-contention',
+    severity: 'high',
+    status: 'unresolved',
+    domain: 'next_actions',
+    candidates: priorityIds.map((id) => conflictCandidate(byId[id], envelope.trust.level)),
+  }] : [];
+  const conflicts = [...decisionConflicts, ...priorityConflicts];
   return { errors, value: { byId, referencesById, activeByType, activeDecisionsByDomain, conflicts } };
 }
 

@@ -81,12 +81,63 @@ describe('resumeProject consistent freshness', () => {
   it('flags stale resume when session activity is newer than the checkpoint', async () => {
     const { service, tick } = harness();
     const { project, session } = await seedCommitted(service);
-    tick(60_000);
     await service.saveCheckpoint({ ownerScope: ownerA, input: saveInput({ projectId: project.id, sessionId: session.id }) });
+    tick(60_000);
+    await service.transitionSession({
+      ownerScope: ownerA,
+      input: { project_id: project.id, session_id: session.id, status: 'paused' },
+    });
     const resumed = await service.resumeProject({ ownerScope: ownerA, input: { project_id: project.id } });
     assert.equal(resumed.freshness, 'stale');
     assert.deepEqual(resumed.warnings.map(({ code }) => code), ['checkpoint-predates-session']);
     resumed.warnings.forEach(assertValidWarning);
+  });
+
+  it('treats an immediately committed checkpoint as fresh despite upload delay', async () => {
+    const { service } = harness('2026-07-19T12:00:01.000Z');
+    const { project, session } = await seedCommitted(service);
+
+    const saved = await service.saveCheckpoint({
+      ownerScope: ownerA,
+      input: saveInput({ projectId: project.id, sessionId: session.id }),
+    });
+    const resumed = await service.resumeProject({ ownerScope: ownerA, input: { project_id: project.id } });
+
+    assert.equal(saved.checkpoint.created_at, '2026-07-19T12:00:01.000Z');
+    assert.equal(resumed.freshness, 'fresh');
+    assert.deepEqual(resumed.warnings, []);
+  });
+
+  it('replaces a client-supplied future checkpoint timestamp with server commit time', async () => {
+    const { service } = harness('2026-07-19T12:00:01.000Z');
+    const { project, session } = await seedCommitted(service);
+    const input = saveInput({ projectId: project.id, sessionId: session.id });
+    input.checkpoint.created_at = '9999-12-31T23:59:59.999Z';
+
+    const saved = await service.saveCheckpoint({ ownerScope: ownerA, input });
+
+    assert.equal(saved.checkpoint.created_at, '2026-07-19T12:00:01.000Z');
+  });
+
+  it('classifies the latest interrupted session as incomplete even when another session owns the head', async () => {
+    const { service, tick } = harness();
+    const { project, session } = await seedCommitted(service);
+    await service.saveCheckpoint({ ownerScope: ownerA, input: saveInput({ projectId: project.id, sessionId: session.id }) });
+    tick(1_000);
+    const later = await service.createSession({
+      ownerScope: ownerA,
+      input: { project_id: project.id, source_client: 'claude' },
+    });
+    tick(1_000);
+    await service.transitionSession({
+      ownerScope: ownerA,
+      input: { project_id: project.id, session_id: later.id, status: 'interrupted' },
+    });
+
+    const resumed = await service.resumeProject({ ownerScope: ownerA, input: { project_id: project.id } });
+
+    assert.equal(resumed.freshness, 'incomplete');
+    assert.equal(resumed.warnings.some(({ code }) => code === 'interrupted-session'), true);
   });
 
   it('returns incomplete with no durable checkpoint when none is committed', async () => {
@@ -157,5 +208,64 @@ describe('resumeProject rejects inconsistent durable state as untrusted', () => 
     const result = await service.resumeProject({ ownerScope: ownerA, input: { project_id: project.id } });
     assert.deepEqual(result.warnings, [genericWarning]);
     result.warnings.forEach(assertValidWarning);
+  });
+
+  it('rejects a highest-revision head whose predecessor chain is incomplete', async () => {
+    const checkpointOne = validCheckpoint({
+      id: 'chk_one', revision: 1, previous_checkpoint_id: null, session_id: null,
+    });
+    const checkpointThree = validCheckpoint({
+      id: 'chk_three', revision: 3, previous_checkpoint_id: 'chk_missing', session_id: null,
+    });
+    const project = validProject({ latest_checkpoint_id: 'chk_three' });
+    const service = new ProjectMemoryService({
+      repository: stubRepository({ project, sessions: [], checkpoints: [checkpointOne, checkpointThree] }),
+    });
+
+    const result = await service.resumeProject({ ownerScope: ownerA, input: { project_id: project.id } });
+
+    assert.deepEqual(result.warnings, [genericWarning]);
+    assert.equal(result.latest_checkpoint, null);
+  });
+
+  it('rejects forked checkpoint history even when the selected head has the maximum revision', async () => {
+    const checkpointOne = validCheckpoint({
+      id: 'chk_one', revision: 1, previous_checkpoint_id: null, session_id: null,
+    });
+    const checkpointTwoA = validCheckpoint({
+      id: 'chk_two_a', revision: 2, previous_checkpoint_id: 'chk_one', session_id: null,
+    });
+    const checkpointTwoB = validCheckpoint({
+      id: 'chk_two_b', revision: 2, previous_checkpoint_id: 'chk_one', session_id: null,
+    });
+    const project = validProject({ latest_checkpoint_id: 'chk_two_b' });
+    const service = new ProjectMemoryService({
+      repository: stubRepository({
+        project,
+        sessions: [],
+        checkpoints: [checkpointOne, checkpointTwoA, checkpointTwoB],
+      }),
+    });
+
+    const result = await service.resumeProject({ ownerScope: ownerA, input: { project_id: project.id } });
+
+    assert.deepEqual(result.warnings, [genericWarning]);
+    assert.equal(result.latest_checkpoint, null);
+  });
+
+  it('rejects a session head that points at a checkpoint owned by no session', async () => {
+    const checkpoint = validCheckpoint({
+      id: 'chk_one', revision: 1, previous_checkpoint_id: null, session_id: null,
+    });
+    const project = validProject({ latest_checkpoint_id: checkpoint.id });
+    const session = validSession({ latest_checkpoint_id: checkpoint.id });
+    const service = new ProjectMemoryService({
+      repository: stubRepository({ project, sessions: [session], checkpoints: [checkpoint] }),
+    });
+
+    const result = await service.resumeProject({ ownerScope: ownerA, input: { project_id: project.id } });
+
+    assert.deepEqual(result.warnings, [genericWarning]);
+    assert.equal(result.latest_checkpoint, null);
   });
 });

@@ -258,6 +258,32 @@ describe('Windows DPAPI CredentialStore', () => {
       );
     }
   });
+
+  it('hides the PowerShell console for both DPAPI writes and reads', () => {
+    const launches = [];
+    const captureSpawn = (command, args, options = {}) => {
+      launches.push({ command, options });
+      return makeFakePowerShell({ behavior: 'ok' })(command, args, options);
+    };
+    const store = new CredentialStore('default', {
+      platform: 'win32',
+      home,
+      run: captureSpawn,
+    });
+
+    store.setPassword('{"MEMWAL_PRIVATE_KEY":"secret"}');
+    store.getPassword();
+
+    assert.equal(launches.length, 2);
+    for (const launch of launches) {
+      assert.equal(launch.command, 'powershell.exe');
+      assert.equal(
+        launch.options.windowsHide,
+        true,
+        'DPAPI must never create a visible PowerShell console window',
+      );
+    }
+  });
 });
 
 // `security add-generic-password -w` (no value) prompts twice: "password data

@@ -146,7 +146,13 @@ describe('decodeEnvelope', () => {
   });
 
   it('ignores signature value when verifying integrity', () => {
-    const input = signedEnvelope();
+    const input = signedEnvelope({
+      integrity: {
+        algorithm: 'sha256',
+        digest: '0'.repeat(64),
+        signature: { status: 'signed', algorithm: 'ed25519', key_id: 'key-1', value: 'initial-signature' },
+      },
+    });
     input.integrity.signature.value = 'a-later-signature';
     assert.equal(decodeEnvelope(input, { clock: CREATED_AT }).ok, true);
   });

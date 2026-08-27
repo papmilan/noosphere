@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
-import { withOwnerLock } from '../continuity/acp/owner-lock.js';
+import { reclaimStaleLock, staleLock, withOwnerLock } from '../continuity/acp/owner-lock.js';
 
 const dirs = [];
 after(async () => Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true }))));
@@ -157,6 +157,35 @@ describe('ACP owner lock', () => {
         `trial ${trial}: the lock admitted more than one holder at a time`,
       );
     }
+  });
+
+  it('does not classify malformed lock metadata as stale based on wall-clock age', async () => {
+    const lockPath = path.join(await temp(), 'owner.lock');
+    await writeFile(lockPath, '{malformed', { mode: 0o600 });
+    await utimes(lockPath, new Date(0), new Date(0));
+
+    assert.equal(await staleLock(lockPath, false), false);
+    assert.equal(await readFile(lockPath, 'utf8'), '{malformed');
+  });
+
+  it('recovers the process guard when a prior stale-lock reclaimer was killed', async () => {
+    const lockPath = path.join(await temp(), 'owner.lock');
+    const guard = `${lockPath}.reclaim`;
+    await writeFile(lockPath, JSON.stringify({
+      pid: await deadPid(),
+      token: 'dead-holder',
+      created_at: Date.now(),
+    }), { mode: 0o600 });
+    await mkdir(guard);
+    await writeFile(
+      path.join(guard, 'owner-2147483647-00000000-0000-4000-8000-00000000000b'),
+      '',
+      { mode: 0o600 },
+    );
+
+    assert.equal(await reclaimStaleLock(lockPath, false), true);
+    assert.equal(existsSync(lockPath), false);
+    assert.equal(existsSync(guard), false);
   });
 
   // Windows reports a held lock as EPERM/EACCES/EBUSY, not EEXIST. Surfacing

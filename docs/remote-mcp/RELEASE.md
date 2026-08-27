@@ -49,7 +49,7 @@ Run locally or confirm from CI:
 (cd noosphere-remote-mcp-server && npm ci && npm test)
 
 # Image + startup
-docker build -f noosphere-remote-mcp-server/Dockerfile -t noosphere-remote-mcp-server:rc .
+node scripts/docker-build.mjs remote-mcp --tag noosphere-remote-mcp-server:rc
 docker run -d --name rc -p 8080:8080 \
   -e NOOSPHERE_AUDIENCE=https://rc.example/pm \
   -e NOOSPHERE_RESOURCE_METADATA_URL=https://rc.example/.well-known/oauth-protected-resource \

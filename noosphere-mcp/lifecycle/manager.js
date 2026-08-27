@@ -7,8 +7,10 @@ import { fileURLToPath } from 'node:url';
 
 import { noosphereHome, readRegistry } from './registry.js';
 import { maxLogBytes, rotateLogs } from './log-rotation.js';
+import { createCoalescedRunner, superviseChild } from './manager-supervision.js';
 import { canStart, recordExit } from './restart-policy.js';
 import { recordManagerStart } from './service-state.js';
+import { windowsProcessOptions } from './util.js';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(directory, '..');
@@ -35,9 +37,14 @@ await recordManagerStart(packageRoot).catch((error) => {
   console.error(`[manager] Could not record runtime marker: ${error.message}`);
 });
 
-await reconcile();
+const reconcileRunner = createCoalescedRunner(reconcile, {
+  onError: (error) => {
+    console.error(`[manager] Reconciliation failed: ${error.message}`);
+  },
+});
+await reconcileRunner.run();
 const timer = setInterval(() => {
-  void reconcile();
+  void reconcileRunner.run();
 }, pollMs);
 
 // The manager is the only always-running process that can cap these files;
@@ -94,14 +101,18 @@ function startIdeBridge() {
   const child = spawn(process.execPath, [ideBridge], {
     env: { ...process.env },
     stdio: ['ignore', 'inherit', 'inherit'],
+    ...windowsProcessOptions(),
   });
   ideBridgeChild = child;
   console.log('[manager] IDE bridge started');
-  child.once('exit', (code, signal) => {
+  superviseChild(child, ({ code, signal, error }) => {
     if (ideBridgeChild === child) ideBridgeChild = null;
     if (!stopping) {
+      const outcome = error
+        ? `${error.code || error.message}`
+        : `${signal || code}`;
       console.error(
-        `[manager] IDE bridge exited (${signal || code}), restarting in 5 s`,
+        `[manager] IDE bridge exited (${outcome}), restarting in 5 s`,
       );
       setTimeout(() => {
         if (!stopping) startIdeBridge();
@@ -120,15 +131,16 @@ function startWatcher(project) {
       NOOSPHERE_CLIENT: 'system-project-manager',
     },
     stdio: ['ignore', 'inherit', 'inherit'],
+    ...windowsProcessOptions(),
   });
   children.set(project.path, child);
   console.log(
     `[manager] Watching ${project.project_id} at ${project.path}`,
   );
-  child.once('exit', (code, signal) => {
-    children.delete(project.path);
+  superviseChild(child, ({ code, signal, error }) => {
+    if (children.get(project.path) === child) children.delete(project.path);
     if (stopping) return;
-    if (code === 0) {
+    if (!error && code === 0) {
       restarts.delete(project.path);
       return;
     }
@@ -137,8 +149,11 @@ function startWatcher(project) {
       Date.now() - startedAt,
     );
     restarts.set(project.path, record);
+    const outcome = error
+      ? `${error.code || error.message}`
+      : `${signal || code}`;
     console.error(
-      `[manager] Watcher exited for ${project.path} (${signal || code}); ` +
+      `[manager] Watcher exited for ${project.path} (${outcome}); ` +
         `retry ${record.consecutiveFailures} in ${Math.round(
           (record.retryAt - Date.now()) / 1000,
         )} s`,
@@ -160,6 +175,7 @@ function stop() {
   stopping = true;
   clearInterval(timer);
   clearInterval(logTimer);
+  reconcileRunner.stop();
   for (const child of children.values()) child.kill('SIGTERM');
   children.clear();
   if (ideBridgeChild) ideBridgeChild.kill('SIGTERM');

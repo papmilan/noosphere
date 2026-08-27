@@ -2,17 +2,16 @@
 
 ## Boundary
 
-Remote Project Memory is a new, higher-level continuity layer. It is separate
-from CSP v1 and ACP, both of which retain their existing repository-oriented
-semantics.
+Project Memory is a higher-level continuity layer. It is separate from CSP v1
+and ACP, both of which retain their repository-oriented semantics.
 
 ```text
 MCP client
-  -> Streamable HTTP MCP endpoint (later PR 4)
-  -> OAuth/OIDC request context (later PR 3)
-  -> Project Memory service (later PR 2)
-  -> owner-scoped storage port
-  -> PostgreSQL adapter (later PR 3)
+  -> Remote Streamable HTTP -> OAuth/OIDC owner scope -> PostgreSQL
+   or Local STDIO          -> fixed local owner      -> owner-only JSON file
+  -> shared MCP tool builder
+  -> Project Memory service
+  -> owner-scoped repository port
 ```
 
 The remote process cannot read the user's local filesystem and has no access to
@@ -34,15 +33,18 @@ that state as incomplete; it never presents the checkpoint as a final handoff.
 
 | Class | Storage | v1 content |
 | --- | --- | --- |
-| Project metadata | PostgreSQL | names, aliases, lifecycle, timestamps |
-| Session metadata | PostgreSQL | client/model attribution and state |
-| Checkpoint | PostgreSQL | bounded user-visible continuity state |
+| Project metadata | PostgreSQL or Local STDIO file | names, aliases, lifecycle, timestamps |
+| Session metadata | PostgreSQL or Local STDIO file | client/model attribution and state |
+| Checkpoint | PostgreSQL or Local STDIO file | bounded user-visible continuity state |
 | Authentication | external OIDC + validated request context | issuer/audience/subject/scope |
 | Artifacts/transcripts | not implemented | excluded from v1 |
 
 ## Deployment boundary
 
-The reference production deployment will use HTTPS, a Streamable HTTP MCP
-endpoint, externally managed OAuth/OIDC, PostgreSQL, and an EU-region runtime.
-Region selection alone does not establish legal or regulatory compliance.
-PR 1 does not include infrastructure, a container, migrations, or an endpoint.
+The reference production deployment uses HTTPS terminated by a reverse proxy,
+a Streamable HTTP MCP endpoint, externally managed OAuth/OIDC, and PostgreSQL.
+The repository includes a container, Docker Compose reference, systemd unit,
+and forward-only migrations under `deploy/` and
+`noosphere-remote-mcp-postgres/`. Region selection alone does not establish
+legal or regulatory compliance. See [`../remote-mcp/`](../remote-mcp/README.md)
+for the operator contract.

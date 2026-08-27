@@ -3,17 +3,18 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 
 import { MCP_TOOLS } from '@noosphere/remote-mcp-contracts/index.js';
 
-// MCP tool name -> ProjectMemoryService method. Only the 15 published tools.
+// MCP tool name -> ProjectMemoryService method. Only the 16 published tools.
 export const TOOL_METHOD = Object.freeze({
   create_project: 'createProject', get_project: 'getProject', list_projects: 'listProjects',
   find_projects: 'findProjects', update_project: 'updateProject', archive_project: 'archiveProject',
   create_session: 'createSession', get_session: 'getSession', list_project_sessions: 'listProjectSessions',
+  transition_session: 'transitionSession',
   save_checkpoint: 'saveCheckpoint', get_latest_checkpoint: 'getLatestCheckpoint', get_checkpoint: 'getCheckpoint',
   list_checkpoints: 'listCheckpoints', resume_project: 'resumeProject', get_project_summary: 'getProjectSummary',
 });
 // Bare single-entity returns are wrapped into the published MCP output envelope
 // here at the transport boundary (discharges the PR2 wrapping follow-up).
-export const WRAP_KEY = Object.freeze({ create_project: 'project', get_project: 'project', update_project: 'project', archive_project: 'project', create_session: 'session', get_session: 'session' });
+export const WRAP_KEY = Object.freeze({ create_project: 'project', get_project: 'project', update_project: 'project', archive_project: 'project', create_session: 'session', get_session: 'session', transition_session: 'session' });
 
 export function toolError(publicError) {
   return { isError: true, content: [{ type: 'text', text: publicError.error.code }], structuredContent: publicError };

@@ -125,6 +125,18 @@ describe('ACP execution store', () => {
     assert.equal(await readFile(json, 'utf8'), '{ not valid');
   });
 
+  it('rejects malformed UTF-8 in a persisted execution checkpoint', async () => {
+    const fresh = await makeRepo();
+    await writeExecutionState(fresh, envelope(), { now: '2026-07-13T10:00:00.000Z' });
+    const { json } = executionPaths(fresh);
+    await writeFile(json, Buffer.from([0x7b, 0x22, 0xc3, 0x28, 0x22, 0x7d]));
+
+    const result = await readExecutionState(fresh);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.errors[0].code, 'invalid-utf8');
+  });
+
   it('leaves previous files intact and cleans temp files when a write fails', async () => {
     const fresh = await makeRepo();
     await writeExecutionState(fresh, envelope(), { now: '2026-07-13T10:00:00.000Z' });

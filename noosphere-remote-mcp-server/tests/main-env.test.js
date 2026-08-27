@@ -9,6 +9,8 @@ const BASE = Object.freeze({
   NOOSPHERE_OIDC_ISSUERS: JSON.stringify([{ iss: 'https://issuer.example/', jwks_uri: 'https://issuer.example/jwks' }]),
 });
 
+const CURSOR_SECRET = 'test-cursor-secret-that-is-at-least-32-bytes';
+
 test('parses a minimal valid non-production (memory) environment', () => {
   const options = parseServerEnv({ ...BASE });
   assert.equal(options.repository, 'memory');
@@ -22,6 +24,7 @@ const PROD = Object.freeze({
   ...BASE,
   NOOSPHERE_PRODUCTION: 'true',
   NOOSPHERE_AUTHORIZATION_SERVERS: 'https://issuer.example/',
+  NOOSPHERE_CURSOR_SECRET: CURSOR_SECRET,
 });
 
 test('production defaults to the postgres repository and requires DATABASE_URL', () => {
@@ -40,6 +43,12 @@ test('production requires at least one authorization server (RFC 9728 metadata)'
   assert.throws(() => parseServerEnv(env), /config-requires:NOOSPHERE_AUTHORIZATION_SERVERS/);
   // Non-production may still omit it.
   assert.doesNotThrow(() => parseServerEnv({ ...BASE }));
+});
+
+test('production requires a shared cursor secret so pagination survives restarts and replicas', () => {
+  const env = { ...PROD, DATABASE_URL: 'postgres://u:p@db:5432/n' };
+  delete env.NOOSPHERE_CURSOR_SECRET;
+  assert.throws(() => parseServerEnv(env), /config-requires:NOOSPHERE_CURSOR_SECRET/);
 });
 
 test('production must not run the ephemeral in-memory repository', () => {
@@ -89,12 +98,33 @@ test('parses lists, port, quota, and body limit', () => {
     NOOSPHERE_AUTHORIZATION_SERVERS: 'https://issuer.example/',
     NOOSPHERE_PROJECTS_PER_OWNER: '50',
     NOOSPHERE_MAX_BODY_BYTES: '2097152',
+    NOOSPHERE_CURSOR_SECRET: CURSOR_SECRET,
+    NOOSPHERE_MCP_SESSION_TTL_MS: '60000',
+    NOOSPHERE_MAX_MCP_SESSIONS: '250',
   });
   assert.equal(options.port, 9000);
   assert.deepEqual(options.allowedOrigins, ['https://a.example', 'https://b.example']);
   assert.deepEqual(options.requiredScopes, ['project.read', 'project.write']);
   assert.equal(options.projectsPerOwner, 50);
   assert.equal(options.maxBodyBytes, 2097152);
+  assert.equal(options.cursorSecret, CURSOR_SECRET);
+  assert.equal(options.mcpSessionTtlMs, 60000);
+  assert.equal(options.maxMcpSessions, 250);
+});
+
+test('rejects weak cursor secrets and invalid MCP session bounds', () => {
+  assert.throws(
+    () => parseServerEnv({ ...BASE, NOOSPHERE_CURSOR_SECRET: 'too-short' }),
+    /config-invalid-cursor-secret/,
+  );
+  assert.throws(
+    () => parseServerEnv({ ...BASE, NOOSPHERE_MCP_SESSION_TTL_MS: '0' }),
+    /config-invalid-mcp-session-ttl-ms/,
+  );
+  assert.throws(
+    () => parseServerEnv({ ...BASE, NOOSPHERE_MAX_MCP_SESSIONS: '0' }),
+    /config-invalid-max-mcp-sessions/,
+  );
 });
 
 test('rejects an out-of-range port', () => {

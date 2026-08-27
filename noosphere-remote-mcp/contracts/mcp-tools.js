@@ -22,6 +22,7 @@ export const MCP_TOOLS = Object.freeze({
   create_session: { input: input({ project_id: id, source_client: text(80), source_model: nullable(text(160)), source_conversation_reference: nullable(text(160)), metadata: METADATA_SCHEMA }, ['project_id', 'source_client']), output: output({ session: SESSION_SCHEMA }) },
   get_session: { input: input({ project_id: id, session_id: id }), output: output({ session: SESSION_SCHEMA }) },
   list_project_sessions: { input: input({ project_id: id, ...page.properties }), output: output({ sessions: { type: 'array', maxItems: 100, items: SESSION_SCHEMA }, next_cursor: nullable(text(512)) }) },
+  transition_session: { input: input({ project_id: id, session_id: id, status: { enum: ['active', 'paused', 'interrupted', 'completed', 'archived'] } }), output: output({ session: SESSION_SCHEMA }) },
   save_checkpoint: { input: CHECKPOINT_SAVE_INPUT_SCHEMA, output: output({ checkpoint: CHECKPOINT_SCHEMA, deduplicated: { type: 'boolean' } }) },
   get_latest_checkpoint: { input: input({ project_id: id }), output: output({ checkpoint: nullable(CHECKPOINT_SCHEMA), content_trust: untrusted }) },
   get_checkpoint: { input: input({ project_id: id, checkpoint_id: id }), output: output({ checkpoint: CHECKPOINT_SCHEMA, content_trust: untrusted }) },

@@ -51,13 +51,40 @@ function cursorKey(secret) {
 }
 
 function normalizeQueryValue(value) {
-  if (typeof value === 'string') return normalizeProjectText(value);
-  if (Array.isArray(value)) return value.map(normalizeQueryValue);
-  if (value && typeof value === 'object') {
-    if (Object.getPrototypeOf(value) !== Object.prototype) return value;
-    return Object.fromEntries(Object.keys(value).map((key) => [key, normalizeQueryValue(value[key])]));
+  const root = normalizedQueryNode(value);
+  if (!root.container) return root.value;
+  const pending = [{ source: value, target: root.value }];
+  while (pending.length > 0) {
+    const { source, target } = pending.pop();
+    const entries = Array.isArray(source)
+      ? source.map((child, index) => [index, child])
+      : Object.keys(source).map((key) => [key, source[key]]);
+    for (const [key, child] of entries) {
+      const normalized = normalizedQueryNode(child);
+      // defineProperty treats "__proto__" as data rather than invoking the
+      // legacy prototype setter on an ordinary object.
+      Object.defineProperty(target, key, {
+        value: normalized.value,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+      if (normalized.container) pending.push({ source: child, target: normalized.value });
+    }
   }
-  return value;
+  return root.value;
+}
+
+function normalizedQueryNode(value) {
+  if (typeof value === 'string') return { value: normalizeProjectText(value), container: false };
+  if (Array.isArray(value)) return { value: [], container: true };
+  if (value && typeof value === 'object') {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype === Object.prototype || prototype === null) {
+      return { value: {}, container: true };
+    }
+  }
+  return { value, container: false };
 }
 
 function bindingDigest(binding, key) {

@@ -28,7 +28,7 @@ function envelope({ parent = null, objective = 'remote', expiresAt = null } = {}
     created_at: '2026-07-12T00:00:00.000Z', expires_at: expiresAt,
     origin: { agent_id: 'remote', client: 'test', session_id: null },
     integrity: { algorithm: 'sha256', digest: '0'.repeat(64), signature: { status: 'unsigned', algorithm: null, key_id: null, value: null } },
-    permission_scope: 'project', trust: { level: 'shared-unverified', reasons: ['test'] },
+    permission_scope: 'project', trust: { level: 'local-unverified', reasons: ['unsigned test fixture'] },
     repository: { project_id: 'p', root_identity: id('a'), head: 'git-head', branch: 'main', merge_base: null, dirty: false, workspace_fingerprint: id('b') },
     phase: 'implementation', goal: { project: 'p', current_objective: objective, success_conditions: [] },
     plan: [], completed_work: [], decisions: [], evidence: [], assumptions: [], rejected_approaches: [], unknowns: [], blockers: [], risks: [], conflicts: [],
@@ -65,6 +65,28 @@ describe('ACP sync discovery', () => {
     assert.deepEqual(client.fetched.sort(), [child.snapshot_id, parent.snapshot_id].sort());
     assert.equal(result.reconciliation.action, 'remote-only-restore');
     assert.equal(result.validatedById.size, 2);
+  });
+
+  it('rejects malformed UTF-8 remote snapshot bytes before reconciliation', async () => {
+    const remote = envelope();
+    const client = clientFor(new Map([[remote.snapshot_id, remote]]), remote.snapshot_id);
+    client.getSnapshot = async () => ({
+      bytes: Buffer.from([0x7b, 0x22, 0xc3, 0x28, 0x22, 0x7d]),
+      etag: `"${remote.snapshot_id}"`,
+      relayer_index_id: id('c'),
+    });
+
+    await assert.rejects(
+      discoverRemoteState('/unused', 'p', {
+        client,
+        readState: async () => null,
+        observeRepository: async () => observed(),
+        quarantineBytes: async () => undefined,
+        clock: () => NOW,
+      }),
+      (error) => error.code === 'remote-invalid'
+        && error.cause.some(({ code }) => code === 'invalid-utf8'),
+    );
   });
 
   it('never issues confirmation for expired or over-bounded ancestry', async () => {

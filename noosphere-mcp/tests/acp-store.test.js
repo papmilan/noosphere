@@ -96,6 +96,19 @@ describe('ACP store and CLI', () => {
     assert.equal(reread.state.envelope.goal.current_objective, 'Persist ACP state.');
   });
 
+  it('rejects malformed UTF-8 in persisted project state before JSON parsing', async () => {
+    const dir = await makeRepo();
+    const observed = await observeRepository(dir);
+    const state = decodeEnvelope(await signedEnvelope(observed), { clock: CREATED_AT }).state;
+    await writeState(dir, state, { clock: CREATED_AT });
+    await writeFile(path.join(dir, '.noosphere', 'continuity.json'), Buffer.from([0x7b, 0x22, 0xc3, 0x28, 0x22, 0x7d]));
+
+    const result = await readState(dir, { clock: CREATED_AT });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.errors[0].code, 'invalid-utf8');
+  });
+
   it('imports a structured handoff through the CLI', async () => {
     const dir = await makeRepo();
     const observed = await observeRepository(dir);

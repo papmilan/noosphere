@@ -24,6 +24,7 @@ const PROD_OPTIONS = Object.freeze({
   repository: 'postgres',
   projectsPerOwner: null,
   logMode: 'json',
+  cursorSecret: 'production-test-cursor-secret-00000001',
   issuers: [{ iss: 'https://issuer.example/', jwksUri: 'https://issuer.example/jwks' }],
   databaseUrl: 'postgres://u:p@db:5432/n',
 });

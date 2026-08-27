@@ -101,6 +101,49 @@ function decisionConflict(overrides = {}) {
 }
 
 describe('createProjectState', () => {
+  it('caps unsigned envelopes at local-unverified trust', () => {
+    const input = validEnvelope({
+      trust: { level: 'shared-verified', reasons: ['self-asserted trust'] },
+    });
+
+    const result = createProjectState(input, { clock: input.created_at });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.errors.some(({ code }) => code === 'unsigned-trust-elevation'), true);
+  });
+
+  it('requires signature fields to agree with signature status', () => {
+    const unsignedWithKey = validEnvelope({
+      integrity: {
+        algorithm: 'sha256',
+        digest: 'a'.repeat(64),
+        signature: { status: 'unsigned', algorithm: 'ed25519', key_id: 'key-1', value: null },
+      },
+    });
+    const signedWithoutKey = validEnvelope({
+      integrity: {
+        algorithm: 'sha256',
+        digest: 'a'.repeat(64),
+        signature: { status: 'signed', algorithm: null, key_id: null, value: null },
+      },
+    });
+
+    for (const input of [unsignedWithKey, signedWithoutKey]) {
+      const result = createProjectState(input, { clock: input.created_at });
+      assert.equal(result.ok, false);
+      assert.equal(result.errors.some(({ code }) => code === 'invalid-signature-fields'), true);
+    }
+  });
+
+  it('requires at least one reason for the declared trust level', () => {
+    const input = validEnvelope({ trust: { level: 'local-unverified', reasons: [] } });
+
+    const result = createProjectState(input, { clock: input.created_at });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.errors.some(({ path, code }) => path === '$.trust.reasons' && code === 'invalid-size'), true);
+  });
+
   it('rejects duplicate assertion IDs', () => {
     const input = validEnvelope({
       references: [{ id: 'r1', kind: 'file', locator: 'README.md' }],
@@ -111,6 +154,19 @@ describe('createProjectState', () => {
 
     assert.equal(result.ok, false);
     assert.equal(result.errors[0].code, 'duplicate-id');
+  });
+
+  it('returns structured invalid-type errors for non-array collections instead of throwing', () => {
+    for (const field of ['references', 'plan', 'conflicts']) {
+      const input = validEnvelope({ [field]: {} });
+      let result;
+
+      assert.doesNotThrow(() => {
+        result = createProjectState(input, { clock: input.created_at });
+      }, field);
+      assert.equal(result.ok, false, field);
+      assert.equal(result.errors.some(({ code }) => code === 'invalid-type'), true, field);
+    }
   });
 
   it('rejects canonically equivalent IDs before building runtime state', () => {
@@ -126,6 +182,18 @@ describe('createProjectState', () => {
 
     assert.equal(result.ok, false);
     assert.equal(result.errors.some(({ code }) => code === 'duplicate-id'), true);
+    assert.equal('state' in result, false);
+  });
+
+  it('rejects object keys that collide after Unicode normalization', () => {
+    const input = validEnvelope();
+    input.origin['caf\u00e9'] = 'composed';
+    input.origin['cafe\u0301'] = 'decomposed';
+
+    const result = createProjectState(input, { clock: input.created_at });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.errors.some(({ code }) => code === 'normalized-key-collision'), true);
     assert.equal('state' in result, false);
   });
 
@@ -152,6 +220,32 @@ describe('createProjectState', () => {
           assertion_id: 'd2', value: 'Postgres', provenance: ['r1'], repository_binding: null,
           trust: 'local-unverified', created_at: CREATED_AT, expires_at: null,
         },
+      ],
+    }]);
+  });
+
+  it('creates an unresolved conflict for competing active priority-1 next actions', () => {
+    const action = (id, text) => ({
+      id, text, status: 'planned', confidence: 'high', provenance: ['r1'],
+      created_at: CREATED_AT, expires_at: null, repository_fingerprint: null,
+      supersedes: [], priority: 1,
+    });
+    const input = validEnvelope({
+      references: [{ id: 'r1', kind: 'user-instruction', locator: 'Choose the next action.' }],
+      next_actions: [action('n2', 'Ship B'), action('n1', 'Ship A')],
+    });
+
+    const result = createProjectState(input, { clock: input.created_at });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.state.runtime.conflicts, [{
+      kind: 'priority-contention',
+      severity: 'high',
+      status: 'unresolved',
+      domain: 'next_actions',
+      candidates: [
+        { assertion_id: 'n1', value: 'Ship A', provenance: ['r1'], repository_binding: null, trust: 'local-unverified', created_at: CREATED_AT, expires_at: null },
+        { assertion_id: 'n2', value: 'Ship B', provenance: ['r1'], repository_binding: null, trust: 'local-unverified', created_at: CREATED_AT, expires_at: null },
       ],
     }]);
   });
@@ -282,6 +376,21 @@ describe('createProjectState', () => {
     assert.equal(createProjectState(oversizedArray, { clock: CREATED_AT }).ok, false);
   });
 
+  it('rejects JSON-impossible extension values before constructing runtime state', () => {
+    const undefinedLeaf = validEnvelope({ extensions: { 'example.com.payload': undefined } });
+    const functionLeaf = validEnvelope({ extensions: { 'example.com.payload': () => 'hidden' } });
+    const sparse = [];
+    sparse.length = 1;
+    const sparseLeaf = validEnvelope({ extensions: { 'example.com.payload': sparse } });
+
+    for (const input of [undefinedLeaf, functionLeaf, sparseLeaf]) {
+      const result = createProjectState(input, { clock: CREATED_AT });
+      assert.equal(result.ok, false);
+      assert.equal(result.errors.some(({ code }) => code === 'non-json-value' || code === 'sparse-array'), true);
+      assert.equal('state' in result, false);
+    }
+  });
+
   it('rejects a 20,000-level extension without throwing', () => {
     let nested = 'leaf';
     for (let index = 0; index < 20_000; index += 1) nested = { nested };
@@ -314,6 +423,17 @@ describe('createProjectState', () => {
     assert.deepEqual(schema.$defs.assertion.properties.status.enum, ['active', 'resolved', 'superseded', 'rejected']);
     assert.deepEqual(schema.$defs.planAssertion.properties.status.enum, ['planned', 'in_progress', 'completed', 'blocked', 'superseded']);
     assert.deepEqual(schema.$defs.conflict.properties.status.enum, ['unresolved', 'resolved']);
+  });
+
+  it('publishes trust and signature invariants that match runtime validation', () => {
+    const schema = ACP_SCHEMA;
+    const signatureRules = schema.$defs.integrity.properties.signature.allOf;
+
+    assert.equal(schema.$defs.trust.properties.reasons.minItems, 1);
+    assert.equal(signatureRules.length, 2);
+    assert.equal(signatureRules[0].then.properties.algorithm.type, 'null');
+    assert.equal(signatureRules[1].then.properties.value.minLength, 1);
+    assert.equal(schema.allOf[0].then.properties.trust.properties.level.const, 'local-unverified');
   });
 
   it('uses finite schema levels that match runtime extension bounds', () => {

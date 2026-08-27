@@ -124,6 +124,22 @@ describe('ACP execution CLI', () => {
     assert.equal(stored.steps[2].status, 'pending');
     assert.equal(stored.cursor.step_id, stored.steps[1].id);
     assert.equal(stored.steps[1].goal, 'Implement the validator');
+    assert.deepEqual(stored.steps.map(({ parent_step_id: parent }) => parent), [null, 's1', 's2']);
+  });
+
+  it('refuses completed or malformed UTF-8 plans instead of inventing a current step', async () => {
+    const fresh = await makeRepo();
+    const completed = path.join(fresh, 'completed.md');
+    await writeFile(completed, '- [x] Already finished\n');
+    await assert.rejects(run(['exec', 'import-plan', completed], fresh), /no unchecked step/i);
+
+    const malformed = path.join(fresh, 'malformed.md');
+    await writeFile(malformed, Buffer.from([0x2d, 0x20, 0x5b, 0x20, 0x5d, 0x20, 0xc3, 0x28]));
+    await assert.rejects(run(['exec', 'import-plan', malformed], fresh), /not valid UTF-8/i);
+    await assert.rejects(
+      readFile(path.join(fresh, '.noosphere', 'execution', 'plan-import.json')),
+      (error) => error.code === 'ENOENT',
+    );
   });
 
   it('clears the checkpoint', async () => {

@@ -41,6 +41,21 @@ describe('Project Memory versioned schemas', () => {
     assert.throws(() => validateProject(validProject({ category: 7 })), /invalid-string:category/);
   });
 
+  it('ignores polluted prototype values for optional fields', () => {
+    const project = validProject();
+    delete project.description;
+    delete project.category;
+    Object.defineProperty(Object.prototype, 'description', {
+      value: 7,
+      configurable: true,
+    });
+    try {
+      assert.deepEqual(validateProject(project), project);
+    } finally {
+      delete Object.prototype.description;
+    }
+  });
+
   it('accepts standard formatting whitespace but rejects other controls in text', () => {
     assert.deepEqual(validateProject(validProject({ description: 'First line\nSecond line\tIndented\rCarriage return' })), validProject({ description: 'First line\nSecond line\tIndented\rCarriage return' }));
     assert.deepEqual(validateCheckpoint(validCheckpoint({ goal: 'First line\nSecond line\tIndented\rCarriage return' })), validCheckpoint({ goal: 'First line\nSecond line\tIndented\rCarriage return' }));
@@ -95,5 +110,17 @@ describe('Project Memory versioned schemas', () => {
       () => validateCheckpoint(validCheckpoint({ revision: 2, previous_checkpoint_id: 'chk_01j3bicycle' })),
       /revision-predecessor/,
     );
+  });
+
+  it('rejects calendar-impossible timestamps and inherited record fields', () => {
+    assert.throws(
+      () => validateProject(validProject({ created_at: '2026-02-31T00:00:00.000Z' })),
+      /invalid-timestamp:created_at/,
+    );
+    assert.throws(
+      () => validateSession(validSession({ updated_at: '2026-04-31T00:00:00.000Z' })),
+      /invalid-timestamp:updated_at/,
+    );
+    assert.throws(() => validateProject(Object.create(validProject())), /invalid-object:root/);
   });
 });

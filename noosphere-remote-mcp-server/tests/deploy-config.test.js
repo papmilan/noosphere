@@ -41,3 +41,10 @@ test('every documented deploy-stack compose command uses --env-file deploy/noosp
     assert.ok(checkedByDoc.has(rel), `${rel}: expected at least one documented compose command`);
   }
 });
+
+test('production environment templates include the required shared cursor secret', () => {
+  for (const rel of ['deploy/noosphere.env.example', 'deploy/systemd/remote-mcp.env.example']) {
+    const text = readFileSync(join(repoRoot, rel), 'utf8');
+    assert.match(text, /^NOOSPHERE_CURSOR_SECRET=.{32,}$/m, `${rel}: missing a 32-byte cursor-secret placeholder`);
+  }
+});

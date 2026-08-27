@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
 
 const MIGRATION_NAME = /^(\d{4})_[a-z0-9_]+\.sql$/;
 
@@ -26,6 +26,12 @@ export function orderMigrations(filenames) {
 export function readMigrations(dir = join(dirname(fileURLToPath(import.meta.url)), 'migrations')) {
   const ordered = orderMigrations(readdirSync(dir).filter((name) => name.endsWith('.sql')));
   return ordered.map((entry) => ({ ...entry, sql: readFileSync(join(dir, entry.name), 'utf8') }));
+}
+
+export function isDirectRun(moduleUrl, scriptPath) {
+  return typeof scriptPath === 'string'
+    && scriptPath.length > 0
+    && moduleUrl === pathToFileURL(resolve(scriptPath)).href;
 }
 
 const SCHEMA_MIGRATIONS = `
@@ -67,7 +73,7 @@ export async function applyMigrations(pool, migrations = readMigrations()) {
 }
 
 // CLI entry: `node migrate.js` applies migrations to DATABASE_URL.
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isDirectRun(import.meta.url, process.argv[1])) {
   const { Pool } = await import('pg');
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
   try {

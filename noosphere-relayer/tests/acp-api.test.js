@@ -311,7 +311,7 @@ function exactEnvelope() {
     parent_snapshot_id: null, created_at: '2026-07-13T00:00:00.000Z', expires_at: null,
     origin: { agent_id: 'test', client: 'test', session_id: null },
     integrity: { algorithm: 'sha256', digest: '0'.repeat(64), signature: { status: 'unsigned', algorithm: null, key_id: null, value: null } },
-    permission_scope: 'project', trust: { level: 'local-unverified', reasons: [] },
+    permission_scope: 'project', trust: { level: 'local-unverified', reasons: ['unsigned test fixture'] },
     repository: { project_id: 'p', root_identity: `sha256:${'a'.repeat(64)}`, head: null, branch: null, merge_base: null, dirty: false, workspace_fingerprint: `sha256:${'b'.repeat(64)}` },
     phase: 'implementation', goal: { project: 'p', current_objective: 'receipt replay', success_conditions: [] },
     plan: [], completed_work: [], decisions: [], evidence: [], assumptions: [], rejected_approaches: [], unknowns: [], blockers: [], risks: [], conflicts: [],

@@ -26,7 +26,12 @@ import { OidcVerifier } from '../../noosphere-remote-mcp-postgres/src/oidc.js';
 import { createPool } from '../../noosphere-remote-mcp-postgres/src/pool.js';
 import { PostgresProjectMemoryRepository } from '../../noosphere-remote-mcp-postgres/src/repository.js';
 
-import { loadConfig } from './config.js';
+import {
+  MAX_MCP_SESSIONS_CEILING,
+  MAX_MCP_SESSION_TTL_MS,
+  isValidCursorSecret,
+  loadConfig,
+} from './config.js';
 import { createMcpServer } from './server.js';
 
 // Every NOOSPHERE_* environment variable the server understands. Any other
@@ -41,6 +46,9 @@ export const KNOWN_ENV_KEYS = Object.freeze([
   'NOOSPHERE_ALLOWED_ORIGINS',
   'NOOSPHERE_REQUIRED_SCOPES',
   'NOOSPHERE_MAX_BODY_BYTES',
+  'NOOSPHERE_CURSOR_SECRET',
+  'NOOSPHERE_MCP_SESSION_TTL_MS',
+  'NOOSPHERE_MAX_MCP_SESSIONS',
   'NOOSPHERE_PRODUCTION',
   'NOOSPHERE_REPOSITORY',
   'NOOSPHERE_PROJECTS_PER_OWNER',
@@ -121,6 +129,30 @@ export function parseServerEnv(env = process.env) {
     if (!Number.isInteger(maxBodyBytes) || maxBodyBytes <= 0) throw new Error('config-invalid-max-body-bytes');
   }
 
+  let cursorSecret;
+  if (env.NOOSPHERE_CURSOR_SECRET !== undefined) {
+    cursorSecret = requireValue(env, 'NOOSPHERE_CURSOR_SECRET');
+    if (!isValidCursorSecret(cursorSecret)) throw new Error('config-invalid-cursor-secret');
+  } else if (production) {
+    throw new Error('config-requires:NOOSPHERE_CURSOR_SECRET');
+  }
+
+  let mcpSessionTtlMs;
+  if (env.NOOSPHERE_MCP_SESSION_TTL_MS !== undefined) {
+    mcpSessionTtlMs = Number(env.NOOSPHERE_MCP_SESSION_TTL_MS);
+    if (!Number.isInteger(mcpSessionTtlMs) || mcpSessionTtlMs <= 0 || mcpSessionTtlMs > MAX_MCP_SESSION_TTL_MS) {
+      throw new Error('config-invalid-mcp-session-ttl-ms');
+    }
+  }
+
+  let maxMcpSessions;
+  if (env.NOOSPHERE_MAX_MCP_SESSIONS !== undefined) {
+    maxMcpSessions = Number(env.NOOSPHERE_MAX_MCP_SESSIONS);
+    if (!Number.isInteger(maxMcpSessions) || maxMcpSessions <= 0 || maxMcpSessions > MAX_MCP_SESSIONS_CEILING) {
+      throw new Error('config-invalid-max-mcp-sessions');
+    }
+  }
+
   let projectsPerOwner = null;
   if (env.NOOSPHERE_PROJECTS_PER_OWNER !== undefined) {
     projectsPerOwner = Number(env.NOOSPHERE_PROJECTS_PER_OWNER);
@@ -145,6 +177,9 @@ export function parseServerEnv(env = process.env) {
     databaseUrl: repository === 'postgres' ? requireValue(env, 'DATABASE_URL') : env.DATABASE_URL,
   };
   if (maxBodyBytes !== undefined) options.maxBodyBytes = maxBodyBytes;
+  if (cursorSecret !== undefined) options.cursorSecret = cursorSecret;
+  if (mcpSessionTtlMs !== undefined) options.mcpSessionTtlMs = mcpSessionTtlMs;
+  if (maxMcpSessions !== undefined) options.maxMcpSessions = maxMcpSessions;
   return options;
 }
 
@@ -185,6 +220,9 @@ export function buildServerOptions(
     resourceMetadataUrl: options.resourceMetadataUrl,
     production: options.production,
     port: options.port,
+    cursorSecret: options.cursorSecret,
+    mcpSessionTtlMs: options.mcpSessionTtlMs,
+    maxMcpSessions: options.maxMcpSessions,
     ...(options.maxBodyBytes !== undefined ? { maxBodyBytes: options.maxBodyBytes } : {}),
   });
 

@@ -7,6 +7,13 @@
 #
 #   docker compose --env-file deploy/noosphere.env -f deploy/docker-compose.yml up -d
 #
+# On a macOS external volume carrying AppleDouble `._*` files, BuildKit may
+# fail before `.dockerignore` is applied. Build a clean context first, then keep
+# Compose from rebuilding it:
+#
+#   node scripts/docker-build.mjs remote-mcp
+#   docker compose --env-file deploy/noosphere.env -f deploy/docker-compose.yml up -d --no-build
+#
 # The `--env-file` flag is REQUIRED: Compose resolves the `${VAR:?}` guards below
 # during interpolation (before any service starts), and it only reads the file
 # named by `--env-file` (or the project-directory `.env`) for that — never a

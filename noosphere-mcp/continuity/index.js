@@ -12,7 +12,7 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
+import { promisify, TextDecoder } from 'node:util';
 
 import {
   disableProject,
@@ -2569,9 +2569,15 @@ async function execImportPlan(root, planPath, now) {
   const resolved = path.resolve(planPath);
   const plan = await readBoundedRegularFile(resolved, { maxBytes: MAX_REPOSITORY_INPUT_BYTES });
   if (plan === null) throw new Error(`No such plan file: ${resolved}`);
-  const markdown = plan.toString('utf8');
+  let markdown;
+  try {
+    markdown = new TextDecoder('utf-8', { fatal: true }).decode(plan);
+  } catch {
+    throw new Error('Plan is not valid UTF-8.');
+  }
   const boxes = [...markdown.matchAll(/^[-*] \[([ xX])\] (.+)$/gm)];
   if (!boxes.length) throw new Error('No markdown checkboxes (`- [ ]` / `- [x]`) found in the plan.');
+  if (boxes.every(([, mark]) => mark !== ' ')) throw new Error('The plan has no unchecked step to continue.');
   const relativePlan = path.relative(root, resolved) || path.basename(resolved);
   let cursorStep = null;
   const steps = boxes.map(([, mark, text], index) => {
@@ -2581,7 +2587,7 @@ async function execImportPlan(root, planPath, now) {
     if (!done && !cursorStep) cursorStep = id;
     return {
       id,
-      parent_step_id: null,
+      parent_step_id: index === 0 ? null : `s${index}`,
       kind: 'task',
       status,
       target: { file: relativePlan, symbol: null, content_hash: null },

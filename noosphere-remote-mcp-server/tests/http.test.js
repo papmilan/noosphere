@@ -10,6 +10,13 @@ describe('config validation', () => {
     assert.throws(() => loadConfig({ audience: 'a', issuers: { a: 1 } }), /config-requires-resource-metadata-url/);
     assert.throws(() => loadConfig({ audience: 'a', issuers: { a: 1 }, resourceMetadataUrl: 'u', production: true, allowTestIdentities: true }), /production-forbids-test-identities/);
   });
+
+  it('requires a strong shared cursor secret in production configuration', () => {
+    const base = { audience: 'a', issuers: { a: 1 }, resourceMetadataUrl: 'u', production: true };
+    assert.throws(() => loadConfig(base), /config-requires-cursor-secret/);
+    assert.throws(() => loadConfig({ ...base, cursorSecret: 'short' }), /config-invalid-cursor-secret/);
+    assert.doesNotThrow(() => loadConfig({ ...base, cursorSecret: 'a'.repeat(32) }));
+  });
 });
 
 describe('HTTP surface', () => {
@@ -39,6 +46,59 @@ describe('HTTP surface', () => {
   it('rejects an invalid bearer token as 401', async () => {
     const res = await fetch(h.mcpUrl, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer not-a-jwt' }, body: '{}' });
     assert.equal(res.status, 401);
+  });
+
+  it('preserves an authenticated-but-under-scoped verifier result as 403', async () => {
+    const forbiddenVerifier = {
+      async verify() {
+        const error = new Error('forbidden');
+        error.code = 'forbidden';
+        throw error;
+      },
+    };
+    const scoped = await startServer({ deps: { verifier: forbiddenVerifier } });
+    try {
+      const res = await fetch(scoped.mcpUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer valid-but-under-scoped' },
+        body: '{}',
+      });
+      assert.equal(res.status, 403);
+      assert.deepEqual(await res.json(), { error: 'forbidden' });
+      assert.equal(res.headers.get('www-authenticate'), null);
+    } finally {
+      await scoped.close();
+    }
+  });
+
+  it('answers allowed browser preflight and exposes MCP response headers', async () => {
+    const res = await fetch(h.mcpUrl, {
+      method: 'OPTIONS',
+      headers: {
+        origin: 'https://app.example',
+        'access-control-request-method': 'POST',
+        'access-control-request-headers': 'authorization,content-type,mcp-session-id,mcp-protocol-version',
+      },
+    });
+
+    assert.equal(res.status, 204);
+    assert.equal(res.headers.get('access-control-allow-origin'), 'https://app.example');
+    assert.match(res.headers.get('vary') || '', /Origin/i);
+    assert.match(res.headers.get('access-control-allow-methods') || '', /POST/i);
+    assert.match(res.headers.get('access-control-allow-headers') || '', /authorization/i);
+    assert.match(res.headers.get('access-control-expose-headers') || '', /mcp-session-id/i);
+  });
+
+  it('adds CORS headers to an allowed-origin authentication response', async () => {
+    const res = await fetch(h.mcpUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'https://app.example' },
+      body: '{}',
+    });
+
+    assert.equal(res.status, 401);
+    assert.equal(res.headers.get('access-control-allow-origin'), 'https://app.example');
+    assert.match(res.headers.get('access-control-expose-headers') || '', /www-authenticate/i);
   });
 
   it('rejects a disallowed Origin as 403 before auth', async () => {

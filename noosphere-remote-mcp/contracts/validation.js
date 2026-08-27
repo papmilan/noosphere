@@ -18,7 +18,10 @@ function fail(code) {
 }
 
 function assertObject(value, path) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) fail(`invalid-object:${path}`);
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+    fail(`invalid-object:${path}`);
+  }
 }
 
 function assertExactKeys(value, allowed, required, path) {
@@ -27,7 +30,7 @@ function assertExactKeys(value, allowed, required, path) {
     if (PRIVATE_KEYS.has(key) || !allowed.has(key)) fail(`unknown-field:${path === 'root' ? key : `${path}.${key}`}`);
   }
   for (const key of required) {
-    if (!(key in value)) fail(`missing-field:${path === 'root' ? key : `${path}.${key}`}`);
+    if (!Object.hasOwn(value, key)) fail(`missing-field:${path === 'root' ? key : `${path}.${key}`}`);
   }
 }
 
@@ -44,7 +47,9 @@ function assertId(value, path, { nullable = false } = {}) {
 }
 
 function assertTimestamp(value, path) {
-  if (typeof value !== 'string' || !TIMESTAMP.test(value) || Number.isNaN(Date.parse(value))) fail(`invalid-timestamp:${path}`);
+  if (typeof value !== 'string' || !TIMESTAMP.test(value)) fail(`invalid-timestamp:${path}`);
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.valueOf()) || parsed.toISOString() !== value) fail(`invalid-timestamp:${path}`);
 }
 
 function assertEnum(value, path, values) {
@@ -73,8 +78,8 @@ export function validateProject(value) {
   assertSchemaVersion(value.schema_version);
   assertText(value.name, 'name', PROJECT_MEMORY_LIMITS.projectNameChars);
   assertText(value.normalized_name, 'normalized_name', PROJECT_MEMORY_LIMITS.projectNameChars);
-  if ('description' in value) assertText(value.description, 'description', PROJECT_MEMORY_LIMITS.descriptionChars, { nullable: true });
-  if ('category' in value) assertText(value.category, 'category', PROJECT_MEMORY_LIMITS.categoryChars, { nullable: true });
+  if (Object.hasOwn(value, 'description')) assertText(value.description, 'description', PROJECT_MEMORY_LIMITS.descriptionChars, { nullable: true });
+  if (Object.hasOwn(value, 'category')) assertText(value.category, 'category', PROJECT_MEMORY_LIMITS.categoryChars, { nullable: true });
   assertEnum(value.status, 'status', ['active', 'paused', 'completed', 'archived']);
   assertArray(value.aliases, 'aliases', PROJECT_MEMORY_LIMITS.aliasesPerProject);
   for (const [index, alias] of value.aliases.entries()) assertText(alias, `aliases[${index}]`, PROJECT_MEMORY_LIMITS.aliasChars);
@@ -178,7 +183,7 @@ export function validateSaveCheckpointInput(value) {
   const required = new Set(['project_id', 'checkpoint', 'idempotency_key']);
   assertExactKeys(value, allowed, required, 'root');
   assertId(value.project_id, 'project_id');
-  if ('session_id' in value) assertId(value.session_id, 'session_id', { nullable: true });
+  if (Object.hasOwn(value, 'session_id')) assertId(value.session_id, 'session_id', { nullable: true });
   assertText(value.idempotency_key, 'idempotency_key', 128);
   const checkpoint = validateCheckpoint(value.checkpoint);
   if (checkpoint.project_id !== value.project_id) fail('checkpoint-project-mismatch');

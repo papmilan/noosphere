@@ -24,24 +24,29 @@ See [`DEPLOYMENT.md`](DEPLOYMENT.md) and [`OPERATIONS.md`](OPERATIONS.md).
 ## Local STDIO MCP
 
 - **Package:** `noosphere-local-mcp` (binary `noosphere-local-mcp`).
-- **Who:** a single local user. **No HTTP, no OIDC, no sessions** — one fixed
-  local owner identity.
-- **State:** in-memory repository (PR7). It is **ephemeral**: memory exists only
-  for the lifetime of the process and is not persisted across restarts.
+- **Who:** a single local user. **No HTTP transport, no OIDC, and no transport
+  session registry** — one fixed local owner identity. Project Memory's
+  `create_session` records remain part of the shared tool surface.
+- **State:** owner-only JSON at
+  `~/.noosphere/local-mcp/project-memory.json`. The executable loads it on
+  startup and atomically replaces it after successful mutations, so state
+  survives ordinary host restarts.
 - **Lifecycle:** the MCP host (desktop app / editor) launches the process,
   speaks MCP over stdin/stdout, and the process exits when the host closes the
   stream or sends `SIGINT`/`SIGTERM`. **Not a daemon.**
 
 **Use it when** a single developer wants project memory inside one editor/desktop
 host without standing up a server, and does not need cross-machine sharing or
-durable central storage.
+multi-user access control. Multiple same-owner processes on one host are
+serialized safely; this is not a distributed lock across machines.
 
 ### Installing / editor integration
 
-Install the CLI (from the package directory or once published):
+The package currently carries the monorepo development version `0.0.0`. From a
+checkout, point the MCP host at its executable directly:
 
-```sh
-npm install -g @noosphere/local-mcp    # or run via the package's bin
+```text
+/absolute/path/to/noosphere-local-mcp/bin/noosphere-local-mcp.js
 ```
 
 Register it with an MCP host by pointing the host's MCP config at the binary,
@@ -51,8 +56,8 @@ for example:
 {
   "mcpServers": {
     "noosphere-local": {
-      "command": "noosphere-local-mcp",
-      "args": []
+      "command": "node",
+      "args": ["/absolute/path/to/noosphere-local-mcp/bin/noosphere-local-mcp.js"]
     }
   }
 }
@@ -60,12 +65,15 @@ for example:
 
 The host starts the process on demand; nothing runs in the background otherwise.
 
-### Single-user limitations
+### Local limitations
 
-- Ephemeral (PR7): restarting the host clears in-process memory.
 - One local owner: no multi-user isolation, no authentication.
+- Cross-process mutations are serialized through an owner-only lock and reload
+  the latest durable file before applying a change. Lock acquisition is bounded
+  and fails closed under unresolved contention. A lock whose recorded process
+  is proven dead can be recovered; live or unverifiable owners are preserved.
 - No network exposure: it must **not** be published as a network service. For
-  sharing or durability, use the Remote HTTP transport instead.
+  cross-machine or multi-user sharing, use the Remote HTTP transport instead.
 
 ## Choosing a transport
 
@@ -73,6 +81,7 @@ The host starts the process on demand; nothing runs in the background otherwise.
 | --- | --- |
 | Shared memory across machines / agents / users | Remote HTTP |
 | Durable, centrally stored memory | Remote HTTP |
+| Durable, owner-local single-host memory | Local STDIO |
 | Per-identity access control (OIDC) | Remote HTTP |
 | Single developer, one editor, no server | Local STDIO |
 | Zero-infrastructure quick start | Local STDIO |

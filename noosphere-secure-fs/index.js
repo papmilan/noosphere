@@ -1,10 +1,11 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
-import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, opendir, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { TextDecoder } from 'node:util';
 
 const NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
 // O_NONBLOCK is what makes opening an unknown filesystem object safe. O_NOFOLLOW
@@ -14,6 +15,7 @@ const NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
 // returns immediately and fstat then decides what was actually opened.
 const NONBLOCK = fs.constants.O_NONBLOCK || 0;
 const WINDOWS_SCRIPT = fileURLToPath(new URL('./windows-owner-only.ps1', import.meta.url));
+const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true });
 
 export class PathBoundaryError extends Error {
   constructor(code, message, cause) {
@@ -861,6 +863,66 @@ export async function readBoundedRegularFile(file, { maxBytes } = {}) {
   }
 }
 
+// Read the newest bounded window of a regular file without requiring the whole
+// file to fit in memory. This is for append-only inputs such as Claude JSONL
+// transcripts: long sessions may legitimately exceed the ordinary whole-file
+// bound, while only their final records are relevant at SessionEnd.
+//
+// The same open-time type and symlink protections as readBoundedRegularFile
+// apply. A file that changes while its tail is being read is rejected rather
+// than returning a silently stale or torn window; callers may retry or degrade
+// to a safe fallback.
+export async function readBoundedRegularFileTail(file, { maxBytes } = {}) {
+  const limit = boundedReadLimit(maxBytes);
+  const absolute = path.resolve(file);
+  if (process.platform === 'win32') {
+    const before = await lstat(absolute).catch((error) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (before === null) return null;
+    if (before.isSymbolicLink()) {
+      throw new PathBoundaryError('state-file-symlink', `refusing symlinked file: ${absolute}`);
+    }
+    assertRegularFile(before, absolute);
+  }
+
+  let handle;
+  try {
+    handle = await open(absolute, fs.constants.O_RDONLY | NOFOLLOW | NONBLOCK);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw boundedOpenError(error, absolute);
+  }
+  try {
+    const before = await handle.stat();
+    if (process.platform === 'win32') {
+      const afterOpen = await lstat(absolute).catch(() => null);
+      assertWindowsIdentityUnchanged(before, afterOpen, absolute);
+    }
+    assertRegularFile(before, absolute);
+    const length = Math.min(before.size, limit);
+    const start = before.size - length;
+    const bytes = Buffer.allocUnsafe(length);
+    let read = 0;
+    while (read < length) {
+      const { bytesRead } = await handle.read(bytes, read, length - read, start + read);
+      if (bytesRead === 0) break;
+      read += bytesRead;
+    }
+    const after = await handle.stat();
+    if (read !== length || !sameReadObservation(before, after)) {
+      throw new PathBoundaryError(
+        'state-file-changed',
+        `file changed while its bounded tail was being read: ${absolute}`,
+      );
+    }
+    return bytes;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
 export function readBoundedRegularFileSync(file, { maxBytes } = {}) {
   const limit = boundedReadLimit(maxBytes);
   const absolute = path.resolve(file);
@@ -935,6 +997,24 @@ function windowsPreOpen(info, file, limit) {
   return info;
 }
 
+function assertRegularFile(info, file) {
+  if (info.isDirectory()) {
+    const error = new Error(`EISDIR: illegal operation on a directory, read ${file}`);
+    error.code = 'EISDIR';
+    throw error;
+  }
+  if (!info.isFile()) {
+    throw new PathBoundaryError('state-file-not-regular', `refusing non-regular file: ${file}`);
+  }
+}
+
+function sameReadObservation(before, after) {
+  return before.dev === after.dev &&
+    before.ino === after.ino &&
+    before.size === after.size &&
+    before.mtimeMs === after.mtimeMs;
+}
+
 // Windows-only, and a narrowing rather than a fix.
 //
 // Without O_NOFOLLOW the no-follow decision has to be made by the pre-open
@@ -969,14 +1049,7 @@ function assertWindowsIdentityUnchanged(info, after, file) {
 }
 
 function assertBoundedRegular(info, file, limit) {
-  if (info.isDirectory()) {
-    const error = new Error(`EISDIR: illegal operation on a directory, read ${file}`);
-    error.code = 'EISDIR';
-    throw error;
-  }
-  if (!info.isFile()) {
-    throw new PathBoundaryError('state-file-not-regular', `refusing non-regular file: ${file}`);
-  }
+  assertRegularFile(info, file);
   // Apparent size, checked before a single byte is allocated: a sparse file
   // reports its full logical length here, so an 8 GiB hole is refused for the
   // cost of one fstat.
@@ -1068,12 +1141,309 @@ export async function atomicRepositoryWrite(file, data, options = {}) {
   }
 }
 
+const APPEND_LOCK_MAX_BYTES = 4096;
+const PROCESS_GUARD_MARKER = new RegExp(
+  `^owner-([1-9][0-9]*)-(${LOCK_TOKEN_V4.source.slice(1, -1)})$`,
+);
+
+function appendLockContention(error, platform) {
+  if (error?.code === 'EEXIST') return true;
+  return platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(error?.code);
+}
+
+async function readAppendLock(lock, root, platform) {
+  let bytes;
+  try {
+    bytes = await readBoundedRegularFile(lock, {
+      maxBytes: APPEND_LOCK_MAX_BYTES,
+      root,
+      platform,
+    });
+  } catch {
+    // A symlink, FIFO, oversized file, or unreadable object is never safe to
+    // reclaim automatically. The bounded waiter will fail closed instead.
+    return Object.freeze({ kind: 'unsafe', record: null });
+  }
+  if (bytes === null) return Object.freeze({ kind: 'missing', record: null });
+  try {
+    const record = JSON.parse(STRICT_UTF8.decode(bytes));
+    if (
+      record === null ||
+      Array.isArray(record) ||
+      typeof record !== 'object' ||
+      !Number.isInteger(record.pid) ||
+      record.pid <= 0 ||
+      typeof record.token !== 'string' ||
+      !LOCK_TOKEN_V4.test(record.token)
+    ) {
+      return Object.freeze({ kind: 'malformed', record: null });
+    }
+    return Object.freeze({ kind: 'valid', record });
+  } catch {
+    return Object.freeze({ kind: 'malformed', record: null });
+  }
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but cannot be signalled. Every unknown
+    // result is treated as live; only the OS's explicit ESRCH is reclaimable.
+    return error?.code !== 'ESRCH';
+  }
+}
+
+async function staleAppendLock(lock, root, platform) {
+  const observed = await readAppendLock(lock, root, platform);
+  if (observed.kind !== 'valid') return false;
+  return !processIsAlive(observed.record.pid);
+}
+
+async function processGuardState(guard) {
+  const info = await lstat(guard).catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (info === null) return Object.freeze({ kind: 'missing' });
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    return Object.freeze({ kind: 'unsafe' });
+  }
+
+  const entries = [];
+  let directory;
+  try {
+    directory = await opendir(guard);
+    for await (const entry of directory) {
+      entries.push(entry);
+      if (entries.length > 2) break;
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') return Object.freeze({ kind: 'missing' });
+    throw error;
+  } finally {
+    await directory?.close().catch((error) => {
+      if (error.code !== 'ERR_DIR_CLOSED') throw error;
+    });
+  }
+  if (entries.length === 0) return Object.freeze({ kind: 'empty' });
+  if (entries.length > 2) return Object.freeze({ kind: 'unsafe' });
+
+  const markerEntry = entries.find((entry) => PROCESS_GUARD_MARKER.test(entry.name));
+  if (!markerEntry) {
+    // macOS writes an AppleDouble companion beside a file on filesystems that
+    // cannot store its metadata natively. If a process dies after unlinking the
+    // real marker but before the companion disappears, the exact companion is
+    // still sufficient to identify the dead owner. No other lone entry is.
+    if (entries.length !== 1 || !entries[0].isFile() || !entries[0].name.startsWith('._')) {
+      return Object.freeze({ kind: 'unsafe' });
+    }
+    const companionMatch = PROCESS_GUARD_MARKER.exec(entries[0].name.slice(2));
+    if (!companionMatch) return Object.freeze({ kind: 'unsafe' });
+    const companionPid = Number(companionMatch[1]);
+    if (!Number.isSafeInteger(companionPid) || companionPid <= 0) {
+      return Object.freeze({ kind: 'unsafe' });
+    }
+    return Object.freeze({
+      kind: 'sidecar-only',
+      pid: companionPid,
+      marker: null,
+      sidecar: entries[0].name,
+    });
+  }
+  if (!markerEntry.isFile()) return Object.freeze({ kind: 'unsafe' });
+  const match = PROCESS_GUARD_MARKER.exec(markerEntry.name);
+  const companion = entries.find((entry) => entry.name !== markerEntry.name);
+  if (companion && (companion.name !== `._${markerEntry.name}` || !companion.isFile())) {
+    return Object.freeze({ kind: 'unsafe' });
+  }
+  const pid = Number(match[1]);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return Object.freeze({ kind: 'unsafe' });
+  return Object.freeze({
+    kind: 'owned',
+    pid,
+    marker: markerEntry.name,
+    sidecar: companion?.name ?? null,
+  });
+}
+
+async function recoverProcessGuard(guard) {
+  const state = await processGuardState(guard);
+  if (state.kind === 'missing') return true;
+  if (state.kind === 'unsafe') {
+    throw new PathBoundaryError(
+      'state-process-guard-unsafe',
+      `refusing unsafe process guard: ${guard}`,
+    );
+  }
+  if (state.kind === 'owned' || state.kind === 'sidecar-only') {
+    if (processIsAlive(state.pid)) return false;
+    if (state.marker !== null) {
+      try {
+        // Remove only the exact dead owner's marker. If another reclaimer
+        // already removed it, do not touch whatever may now occupy the fixed
+        // guard path.
+        await rm(path.join(guard, state.marker), { force: false });
+      } catch (error) {
+        if (error.code === 'ENOENT') return false;
+        throw error;
+      }
+    } else {
+      try {
+        await rm(path.join(guard, state.sidecar), { force: false });
+      } catch (error) {
+        if (error.code === 'ENOENT') return false;
+        throw error;
+      }
+    }
+    if (state.marker !== null && state.sidecar !== null) {
+      // On AppleDouble filesystems unlinking the marker normally removes this
+      // companion as one operation. The explicit exact-name cleanup also
+      // handles copied or simulated sidecars and cannot target a successor,
+      // whose UUID-named companion differs.
+      await rm(path.join(guard, state.sidecar), { force: true });
+    }
+  }
+
+  try {
+    await rmdir(guard);
+    return true;
+  } catch (error) {
+    // A prepared contender can atomically replace the now-empty directory
+    // before rmdir. Its marker makes rmdir fail, preserving the successor.
+    if (['ENOENT', 'EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES', 'EBUSY'].includes(error.code)) {
+      return error.code === 'ENOENT';
+    }
+    throw error;
+  }
+}
+
+function processGuardContention(error) {
+  return ['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES', 'EBUSY'].includes(error?.code);
+}
+
+async function cleanupProcessGuardCandidate(candidate, marker) {
+  await rm(path.join(candidate, marker), { force: true }).catch(() => undefined);
+  await rmdir(candidate).catch(() => undefined);
+}
+
+// A crash-recoverable process guard with no age heuristic. The owner marker is
+// prepared inside a unique directory before that directory is atomically moved
+// to the fixed guard path. Consequently, the fixed path is never a live but
+// unidentifiable empty guard. Recovery removes only an exact dead-owner marker;
+// its exact AppleDouble companion is recognized on macOS external volumes, and
+// rmdir cannot delete a successor because the successor's marker makes it
+// non-empty.
+export async function tryAcquireOwnerProcessGuard(guard, options = {}) {
+  const resolved = rootAndDirectory(guard, options.root);
+  await ensureContainedDir(resolved.root, resolved.directory, {
+    mode: options.directoryMode ?? 0o700,
+  });
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const token = randomUUID();
+    const marker = `owner-${process.pid}-${token}`;
+    const candidate = `${resolved.file}.candidate-${token}`;
+    await mkdir(candidate, { mode: 0o700 });
+    try {
+      await writeFile(path.join(candidate, marker), '', { flag: 'wx', mode: 0o600 });
+      try {
+        await rename(candidate, resolved.file);
+      } catch (error) {
+        if (!processGuardContention(error)) throw error;
+        const existing = await lstat(resolved.file).catch((readError) => {
+          if (readError.code === 'ENOENT') return null;
+          throw readError;
+        });
+        if (existing === null) continue;
+        if (existing.isSymbolicLink() || !existing.isDirectory()) {
+          throw new PathBoundaryError(
+            'state-process-guard-unsafe',
+            `refusing unsafe process guard: ${resolved.file}`,
+            error,
+          );
+        }
+        if (await recoverProcessGuard(resolved.file)) continue;
+        return null;
+      }
+
+      let released = false;
+      return Object.freeze({
+        file: resolved.file,
+        token,
+        async release() {
+          if (released) return;
+          try {
+            await rm(path.join(resolved.file, marker), { force: false });
+          } catch (error) {
+            if (error.code === 'ENOENT') {
+              throw new PathBoundaryError(
+                'state-process-guard-not-owner',
+                'process guard owner marker disappeared before release',
+                error,
+              );
+            }
+            throw error;
+          }
+          // macOS external volumes may materialize this exact metadata sidecar.
+          // Removing the real marker usually removes it too; force makes the
+          // cleanup harmless on native filesystems and copied test fixtures.
+          await rm(path.join(resolved.file, `._${marker}`), { force: true });
+          try {
+            await rmdir(resolved.file);
+          } catch (error) {
+            if (!['ENOENT', 'EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES', 'EBUSY'].includes(error.code)) {
+              throw error;
+            }
+          }
+          released = true;
+        },
+      });
+    } finally {
+      await cleanupProcessGuardCandidate(candidate, marker);
+    }
+  }
+  return null;
+}
+
+// A staleness check followed by a bare unlink has a classic replacement race:
+// another waiter can install a live lock between those calls and then be
+// deleted. Serialize reclaimers behind the crash-recoverable process guard and
+// repeat the staleness decision while that guard is held.
+async function reclaimStaleAppendLock(lock, root, platform) {
+  const guard = await tryAcquireOwnerProcessGuard(`${lock}.reclaim`, { root });
+  if (guard === null) return false;
+  try {
+    if (!(await staleAppendLock(lock, root, platform))) return false;
+    await rm(lock, { force: true });
+    return true;
+  } finally {
+    await guard.release().catch(() => undefined);
+  }
+}
+
 export async function appendRepositoryFile(file, data, options = {}) {
   const resolved = rootAndDirectory(file, options.root);
   const limit = boundedReadLimit(options.maxBytes);
   const bytes = buffer(data);
+  const skipIfContains = options.skipIfContains === undefined
+    ? null
+    : buffer(options.skipIfContains);
   if (bytes.length > limit) {
     throw new PathBoundaryError('state-file-too-large', `append exceeds the ${limit}-byte bound: ${resolved.file}`);
+  }
+  if (skipIfContains !== null && skipIfContains.length === 0) {
+    throw new PathBoundaryError(
+      'state-append-marker-empty',
+      'an idempotent append marker must not be empty',
+    );
+  }
+  if (skipIfContains !== null && !bytes.includes(skipIfContains)) {
+    throw new PathBoundaryError(
+      'state-append-marker-missing',
+      'the appended bytes must contain their idempotency marker',
+    );
   }
   await ensureContainedDir(resolved.root, resolved.directory, {
     mode: options.directoryMode ?? 0o755,
@@ -1083,29 +1453,49 @@ export async function appendRepositoryFile(file, data, options = {}) {
   let lockHandle;
   let ownsLock = false;
   const maxAttempts = options.lockAttempts ?? 100;
+  const lockBackoffMs = options.lockBackoffMs ?? 10;
+  if (!Number.isInteger(maxAttempts) || maxAttempts <= 0) {
+    throw new PathBoundaryError('state-append-options-invalid', 'lockAttempts must be a positive integer');
+  }
+  if (!Number.isFinite(lockBackoffMs) || lockBackoffMs < 0) {
+    throw new PathBoundaryError('state-append-options-invalid', 'lockBackoffMs must be a non-negative finite number');
+  }
+  const token = randomUUID();
   try {
     for (let attempt = 1; ; attempt += 1) {
+      let opened;
       try {
-        lockHandle = await (options.open ?? open)(
+        opened = await (options.open ?? open)(
           lock,
           fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | NOFOLLOW,
           0o600,
         );
+        await opened.writeFile(JSON.stringify({ pid: process.pid, token, created_at: Date.now() }));
+        await opened.sync();
+        lockHandle = opened;
         ownsLock = true;
         break;
       } catch (error) {
-        let contention = error.code === 'EEXIST';
-        if (platform === 'win32' && ['EPERM', 'EACCES'].includes(error.code)) {
+        if (opened) {
+          await opened.close().catch(() => undefined);
+          await rm(lock, { force: true }).catch(() => undefined);
+        }
+        let contention = appendLockContention(error, platform);
+        if (platform === 'win32' && contention && error.code !== 'EEXIST') {
           const lockInfo = await assertFinalNotReparse(lock);
           contention = lockInfo === null || lockInfo.isFile();
         }
-        if (!contention || attempt >= maxAttempts) {
-          if (contention) {
-            throw new PathBoundaryError('state-append-busy', `append lock remained busy: ${lock}`, error);
-          }
-          throw error;
+        if (!contention) throw error;
+        if (attempt >= maxAttempts) {
+          throw new PathBoundaryError('state-append-busy', `append lock remained busy: ${lock}`, error);
         }
-        await new Promise((resolve) => setTimeout(resolve, options.lockBackoffMs ?? 10));
+        const reclaimed = await reclaimStaleAppendLock(
+          lock,
+          resolved.root,
+          platform,
+        );
+        if (reclaimed) continue;
+        await new Promise((resolve) => setTimeout(resolve, Math.random() * lockBackoffMs));
       }
     }
     await lockHandle.close();
@@ -1115,6 +1505,18 @@ export async function appendRepositoryFile(file, data, options = {}) {
       platform: options.platform,
     });
     const existing = current ?? Buffer.alloc(0);
+    // This check deliberately happens after taking the same lock as the append.
+    // A read-before-lock check lets two SessionEnd processes both observe the
+    // marker as absent and then serialize two identical entries. Keeping the
+    // predicate and mutation in one critical section makes the append exactly
+    // once for every marker, including across processes.
+    if (skipIfContains !== null && existing.includes(skipIfContains)) {
+      return Object.freeze({
+        appended: false,
+        path: resolved.file,
+        byteLength: existing.length,
+      });
+    }
     if (existing.length + bytes.length > limit) {
       throw new PathBoundaryError('state-file-too-large', `append exceeds the ${limit}-byte bound: ${resolved.file}`);
     }
@@ -1122,11 +1524,21 @@ export async function appendRepositoryFile(file, data, options = {}) {
       ...options,
       root: resolved.root,
     });
+    return Object.freeze({
+      appended: true,
+      path: resolved.file,
+      byteLength: existing.length + bytes.length,
+    });
   } catch (error) {
     throw normalizeSecurityError(error);
   } finally {
     await lockHandle?.close().catch(() => undefined);
-    if (ownsLock) await rm(lock, { force: true }).catch(() => undefined);
+    if (ownsLock) {
+      const current = await readAppendLock(lock, resolved.root, platform);
+      if (current.kind === 'valid' && current.record.token === token) {
+        await rm(lock, { force: true }).catch(() => undefined);
+      }
+    }
   }
 }
 

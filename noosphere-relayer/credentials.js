@@ -361,7 +361,7 @@ export class CredentialStore {
     return this.#runChecked(
       'powershell.exe',
       ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
-      options,
+      { ...options, windowsHide: true },
     );
   }
 

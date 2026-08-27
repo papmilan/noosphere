@@ -76,6 +76,17 @@ describe('renderKernel', () => {
     assert.match(output, /Render a compact kernel\./);
   });
 
+  it('renders envelope trust and marks assertions without provenance as unverified', () => {
+    const s = state({
+      decisions: [assertion('d1', 'Unproven choice', { domain: 'storage', provenance: [] })],
+    });
+
+    const output = renderKernel(s, { compatibility: exactCompatibility });
+
+    assert.match(output, /Trust: local-unverified \(unsigned local envelope\)/);
+    assert.match(output, /UNVERIFIED DECISION \[storage\]: Unproven choice/);
+  });
+
   it('is byte-for-byte deterministic', () => {
     const s = state({ blockers: [assertion('b1', 'Blocked on review')] });
     assert.equal(renderKernel(s, { compatibility: exactCompatibility }), renderKernel(s, { compatibility: exactCompatibility }));

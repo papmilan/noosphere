@@ -9,11 +9,14 @@ Only the latest published release of each package receives security fixes.
 
 | Package | Supported |
 | --- | --- |
-| `noosphere-continuity` | 2.3.x |
+| `noosphere-continuity` | 2.5.x |
 | `noosphere-relayer` | 2.1.x |
 
 Older versions do not receive backported fixes. Upgrade to the latest
 release before reporting an issue you can only reproduce on an old version.
+Project Memory packages currently carrying version `0.0.0` are repository
+components, not a stable public-release line; report findings against the exact
+commit you tested.
 
 ## Reporting a vulnerability
 
@@ -49,6 +52,9 @@ In scope:
 
 - the `noosphere-continuity` and `noosphere-relayer` npm packages;
 - the shared `@noosphere/acp-protocol` package vendored in this repository;
+- the shared `@noosphere/secure-fs` owner-only persistence boundary;
+- the Local STDIO and Remote HTTP Project Memory packages, including OIDC,
+  owner isolation, PostgreSQL persistence, MCP sessions, and tool schemas;
 - credential storage and handling (`noosphere setup`, platform keychains,
   the owner-only fallback file);
 - the relayer HTTP surface: authentication, CORS, rate limiting, and the

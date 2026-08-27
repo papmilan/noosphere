@@ -20,7 +20,12 @@ import { promisify } from 'node:util';
 import { noosphereHome } from './registry.js';
 import { RelayerSourceError, resolveRelayerPath } from './relayer-source.js';
 import { formatServiceInstallError } from './service-errors.js';
-import { isStale, readManagerMarker, sourceStamp } from './service-state.js';
+import {
+  isProcessAlive,
+  isStale,
+  readManagerMarker,
+  sourceStamp,
+} from './service-state.js';
 import {
   escapeRegExp,
   exists,
@@ -295,6 +300,7 @@ async function doctor() {
     ...platformChecks,
     manager_pid: marker?.pid ?? null,
     manager_started_at: marker?.started_at ?? null,
+    manager_running: isProcessAlive(marker?.pid),
     // true = the running manager predates the installed code. null = unknown,
     // which is not a failure: no marker yet, a manager started from a checkout,
     // or no manager running at all.
@@ -309,6 +315,7 @@ async function doctor() {
     !checks.installed_cli ||
     !checks.relayer_service ||
     !checks.manager_service ||
+    !checks.manager_running ||
     !checks.credentials ||
     !checks.relayer_ready.ok ||
     // A reachable relayer whose uploads keep failing is the case every
@@ -569,63 +576,110 @@ end
 async function writePowerShellIntegration() {
   const integrationPath = path.join(shellDirectory, 'shell.ps1');
   const noosphereCmd = cliWrapperPath;
+  const hidden =
+    effectivePlatform === 'win32' || effectivePlatform === 'windows'
+      ? ' -WindowStyle Hidden'
+      : '';
   await writeFile(
     integrationPath,
     `# Noosphere automatic project activation
-$env:PATH = "${binDirectory}" + [IO.Path]::PathSeparator + $env:PATH
+if (($env:PATH -split [IO.Path]::PathSeparator) -notcontains '${powerShellLiteral(binDirectory)}') {
+  $env:PATH = '${powerShellLiteral(binDirectory)}' + [IO.Path]::PathSeparator + $env:PATH
+}
 
 function Invoke-NoosphereActivate {
-  & "${noosphereCmd}" activate --quiet 2>$null
-}
-
-# Override Set-Location (cd) to trigger activation
-$ExecutionContext.SessionState.InvokeCommand.PostCommandLookupAction = {
-  param($CommandName, $CommandLookupEventArgs)
-  if ($CommandName -in 'Set-Location', 'cd', 'chdir', 'sl') {
-    $OriginalCommand = $CommandLookupEventArgs.Command
-    $CommandLookupEventArgs.CommandScriptBlock = {
-      & $OriginalCommand @args
-      Invoke-NoosphereActivate
-    }.GetNewClosure()
+  try {
+    $CurrentLocation = Get-Location
+    if ($CurrentLocation.Provider.Name -ne 'FileSystem') { return }
+    Start-Process -FilePath '${powerShellLiteral(noosphereCmd)}' -ArgumentList @('activate', '--quiet') -WorkingDirectory $CurrentLocation.Path${hidden} | Out-Null
+  } catch {
+    # Shell navigation must never fail because background activation could not start.
   }
 }
+
+# PowerShell profiles can be dot-sourced more than once in one process. Without
+# this runtime guard each source wrapped LocationChangedAction again, so one cd
+# launched two, then three, then more activation processes.
+if ($global:__NoosphereLocationHookInstalled) { return }
+
+# Run after every provider location change without replacing cd/Set-Location.
+$NoospherePreviousLocationChangedAction = $ExecutionContext.SessionState.InvokeCommand.LocationChangedAction
+$ExecutionContext.SessionState.InvokeCommand.LocationChangedAction = {
+  param($Sender, $EventArgs)
+  try {
+    if ($null -ne $NoospherePreviousLocationChangedAction) {
+      $NoospherePreviousLocationChangedAction.Invoke($Sender, $EventArgs)
+    }
+  } catch {
+    # A pre-existing location hook must not prevent Noosphere activation or cd.
+  }
+  Invoke-NoosphereActivate
+}.GetNewClosure()
+$global:__NoosphereLocationHookInstalled = $true
+
+# Activate the directory in which this PowerShell session started.
+Invoke-NoosphereActivate
 `,
     'utf8',
   );
 
-  // Resolve the PowerShell profile path
-  const psProfile = await resolvePowerShellProfile();
-  if (psProfile) {
-    const block = `. "${integrationPath}"`;
-    await injectShellBlock(psProfile, block);
+  // PowerShell does not create a profile until the user asks for one. Create
+  // the per-user/all-hosts profiles on Windows so a fresh installation is
+  // actually attached, and attach both PowerShell 7 and Windows PowerShell.
+  const psProfiles = await resolvePowerShellProfiles();
+  for (const psProfile of psProfiles) {
+    const block = `. '${powerShellLiteral(integrationPath)}'`;
+    await injectShellBlock(psProfile, block, { create: true });
   }
 }
 
-async function resolvePowerShellProfile() {
-  // Common PowerShell profile locations
-  const candidates = [];
-
+async function resolvePowerShellProfiles() {
   if (effectivePlatform === 'win32' || effectivePlatform === 'windows') {
-    const docs = process.env.USERPROFILE
-      ? path.join(process.env.USERPROFILE, 'Documents')
-      : path.join(os.homedir(), 'Documents');
-    candidates.push(
-      path.join(docs, 'PowerShell', 'Microsoft.PowerShell_profile.ps1'),
-      path.join(docs, 'WindowsPowerShell', 'Microsoft.PowerShell_profile.ps1'),
-    );
-  } else {
-    // macOS / Linux — PowerShell Core
-    const xdgConfig = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
-    candidates.push(
-      path.join(xdgConfig, 'powershell', 'Microsoft.PowerShell_profile.ps1'),
-      path.join(os.homedir(), '.config', 'powershell', 'Microsoft.PowerShell_profile.ps1'),
-    );
+    const docs = await windowsDocumentsDirectory();
+    return [
+      path.join(docs, 'PowerShell', 'profile.ps1'),
+      path.join(docs, 'WindowsPowerShell', 'profile.ps1'),
+    ];
   }
 
+  // macOS / Linux — PowerShell Core. Preserve the established no-create
+  // behavior off Windows because PowerShell is optional there.
+  const xdgConfig = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+  const candidates = [
+    path.join(xdgConfig, 'powershell', 'Microsoft.PowerShell_profile.ps1'),
+    path.join(os.homedir(), '.config', 'powershell', 'Microsoft.PowerShell_profile.ps1'),
+  ];
+  const profiles = [];
   for (const candidate of candidates) {
-    if (await exists(candidate)) return candidate;
+    if (await exists(candidate)) profiles.push(candidate);
   }
-  return null; // No existing profile — skip injection
+  return [...new Set(profiles)];
+}
+
+async function windowsDocumentsDirectory() {
+  // The known Documents folder can be redirected (commonly to OneDrive), so
+  // USERPROFILE/Documents is only a fallback. Avoid the native lookup under
+  // NOOSPHERE_TEST_PLATFORM so cross-platform installer tests remain isolated.
+  if (process.platform === 'win32' && !process.env.NOOSPHERE_TEST_PLATFORM) {
+    try {
+      const { stdout } = await execFileAsync('powershell.exe', [
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        '[Console]::Out.Write([Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments))',
+      ], { windowsHide: true });
+      if (stdout.trim()) return path.resolve(stdout.trim());
+    } catch {
+      // Fall through to the deterministic home-relative path.
+    }
+  }
+  const userHome = process.env.USERPROFILE || os.homedir();
+  return path.join(userHome, 'Documents');
+}
+
+function powerShellLiteral(value) {
+  return String(value).replaceAll("'", "''");
 }
 
 // ---- shared block injection ------------------------------------------------
@@ -634,8 +688,12 @@ async function resolvePowerShellProfile() {
  * Inject or replace the noosphere block in an existing rc file.
  * If the file does not exist, this is a no-op (we never create rc files).
  */
-async function injectShellBlock(rcFile, innerBlock) {
-  if (!(await exists(rcFile))) return;
+async function injectShellBlock(rcFile, innerBlock, { create = false } = {}) {
+  if (!(await exists(rcFile))) {
+    if (!create) return;
+    await mkdir(path.dirname(rcFile), { recursive: true, mode: 0o700 });
+    await writeFile(rcFile, '', 'utf8');
+  }
   const block = `${GUARD_START}\n${innerBlock}\n${GUARD_END}`;
   let current = await readFile(rcFile, 'utf8').catch(() => '');
   const pattern = new RegExp(
@@ -796,9 +854,8 @@ async function removeAllShellBlocks() {
   const xdgConfig = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
   rcFiles.push(path.join(xdgConfig, 'fish', 'config.fish'));
 
-  // PowerShell profile
-  const psProfile = await resolvePowerShellProfile();
-  if (psProfile) rcFiles.push(psProfile);
+  // PowerShell profiles
+  rcFiles.push(...await resolvePowerShellProfiles());
 
   const pattern = /# >>> noosphere >>>[\s\S]*?# <<< noosphere <<<\n?/g;
 

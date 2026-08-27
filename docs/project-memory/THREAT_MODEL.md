@@ -20,7 +20,7 @@ encryption keys are secrets and must never enter logs or tool results.
 | Ambiguous natural-language project name | return candidates; require user/client confirmation |
 | Cross-tenant cache leakage | include owner scope in every key; avoid shared response caches |
 | SSRF | excluded because v1 cannot fetch URLs or remote artifacts |
-| Retention/deletion failure | explicit archive, deletion, export, and retention contracts before implementation |
+| Retention/deletion failure | explicit archive, owner-scoped export/delete/retention operations; lock and recheck the current marker before purge |
 
 ## Local replay-ledger controls
 
@@ -45,8 +45,8 @@ Replay state is not server-authenticated authorship, human-presence proof,
 unlimited history, or rollback-proof audit evidence. Complete owner-local
 replay-root deletion loses history but does not alter authority.
 
-## Residual risks deferred to later PRs
+## Deployment residual risks
 
-The first service deployment must separately validate reverse-proxy header
+Each service deployment must separately validate reverse-proxy header
 trust, OAuth provider configuration, database backups, distributed rate limits,
 real-client behavior, data residency, and operational incident response.

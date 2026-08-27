@@ -26,16 +26,16 @@ describe('Local single-user identity', () => {
 // These two write, so they run against an isolated store rather than the CLI's
 // real one under the owner's home directory.
 describe('Local STDIO single-user semantics', () => {
-  it('ignores any ownerScope-looking field in tool input (identity cannot be spoofed by arguments)', async () => {
+  it('rejects ownerScope-looking fields in tool input (identity cannot be spoofed by arguments)', async () => {
     const s = await startStdioClient({ stateFile: await temporaryStateFile() });
     try {
-      // An injected ownerScope is inert: the server derives the owner from the
-      // fixed local identity, never from arguments. The project is created and
-      // remains retrievable by the same single local owner.
-      const created = structured(await s.client.callTool({ name: 'create_project', arguments: { name: 'Local Only', ownerScope: 'local:deadbeef', owner_scope: 'local:evil' } }));
-      const got = structured(await s.client.callTool({ name: 'get_project', arguments: { project_id: created.project.id } }));
-      assert.equal(got.project.id, created.project.id);
-      assert.equal(got.project.name, 'Local Only');
+      // The closed input contract rejects injected identity fields before any
+      // write. The transport still derives its owner only from LocalOwnerIdentity.
+      const rejected = await s.client.callTool({ name: 'create_project', arguments: { name: 'Local Only', ownerScope: 'local:deadbeef', owner_scope: 'local:evil' } });
+      assert.equal(rejected.isError, true);
+      assert.equal(rejected.structuredContent.error.code, 'invalid-argument');
+      const listed = structured(await s.client.callTool({ name: 'list_projects', arguments: {} }));
+      assert.deepEqual(listed.projects, []);
     } finally {
       await s.close();
     }

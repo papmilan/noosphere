@@ -20,10 +20,10 @@ describe('MCP session over Streamable HTTP', () => {
   before(async () => { h = await startServer(); });
   after(async () => { await h.close(); });
 
-  it('initializes and lists the 15 project-memory tools', async () => {
+  it('initializes and lists the 16 project-memory tools', async () => {
     const { client, transport } = await connect(h, await h.token());
     const { tools } = await client.listTools();
-    assert.equal(tools.length, 15);
+    assert.equal(tools.length, 16);
     assert.ok(tools.find((t) => t.name === 'create_project'));
     assert.ok(tools.every((t) => t.inputSchema && t.inputSchema.type === 'object'));
     await transport.close();
@@ -58,11 +58,44 @@ describe('MCP session over Streamable HTTP', () => {
     await transport.close();
   });
 
+  it('lets a client close the session lifecycle instead of leaving every session active', async () => {
+    const { client, transport } = await connect(h, await h.token({ sub: 'transitioner' }));
+    const project = structured(await client.callTool({ name: 'create_project', arguments: { name: 'Lifecycle' } })).project;
+    const session = structured(await client.callTool({
+      name: 'create_session',
+      arguments: { project_id: project.id, source_client: 'claude' },
+    })).session;
+
+    const transitioned = structured(await client.callTool({
+      name: 'transition_session',
+      arguments: { project_id: project.id, session_id: session.id, status: 'interrupted' },
+    }));
+
+    assert.equal(transitioned.session.status, 'interrupted');
+    await transport.close();
+  });
+
   it('returns a tool error for invalid input and unknown tools', async () => {
     const { client, transport } = await connect(h, await h.token());
     const bad = await client.callTool({ name: 'get_project', arguments: { project_id: 'NOT VALID ID' } });
     assert.equal(bad.isError, true);
     assert.equal(bad.structuredContent.error.code, 'invalid-argument');
+    const unknown = await client.callTool({ name: 'not_a_published_tool', arguments: {} });
+    assert.equal(unknown.isError, true);
+    assert.equal(unknown.structuredContent.error.code, 'invalid-argument');
+    await transport.close();
+  });
+
+  it('rejects unknown input fields through the real transport without creating a record', async () => {
+    const { client, transport } = await connect(h, await h.token({ sub: 'strict-contract-owner' }));
+    const bad = await client.callTool({
+      name: 'create_project',
+      arguments: { name: 'Must Not Exist', unexpected: true },
+    });
+    assert.equal(bad.isError, true);
+    assert.equal(bad.structuredContent.error.code, 'invalid-argument');
+    const listed = structured(await client.callTool({ name: 'list_projects', arguments: {} }));
+    assert.deepEqual(listed.projects, []);
     await transport.close();
   });
 

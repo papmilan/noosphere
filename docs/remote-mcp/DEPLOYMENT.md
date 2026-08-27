@@ -4,11 +4,8 @@ This guide covers deploying **Noosphere Remote Project Memory**: the multi-user,
 OIDC-authenticated MCP server backed by PostgreSQL. It is a different subsystem
 from the single-user local relayer described in [`docs/DEPLOYMENT.md`](../DEPLOYMENT.md).
 
-> This is an **operational** guide. It changes no protocol, tool schema, or
-> business logic. PR6 adds the production entrypoint, readiness/shutdown wiring,
-> and the deployment/packaging assets described here (production composition);
-> the service core it runs was implemented in PR1–PR5/PR7. For the STDIO desktop
-> transport see
+> This is an **operational** guide for the production composition. For the
+> STDIO desktop transport see
 > [`TRANSPORTS.md`](TRANSPORTS.md); for every environment variable see
 > [`CONFIGURATION.md`](CONFIGURATION.md).
 
@@ -34,6 +31,9 @@ implemented). This has two consequences:
 
 Run a single instance unless your load balancer enforces `Mcp-Session-Id`
 affinity. Transparent horizontal scaling is **not** currently supported.
+All replicas must also receive the same owner-controlled
+`NOOSPHERE_CURSOR_SECRET`; session affinity does not make pagination cursors
+replica-local, and changing that secret invalidates outstanding cursors.
 
 ## Supported deployment models
 
@@ -55,7 +55,7 @@ affinity. Transparent horizontal scaling is **not** currently supported.
 
 ```sh
 cp deploy/noosphere.env.example deploy/noosphere.env
-# edit deploy/noosphere.env: audience, issuers, DATABASE_URL, POSTGRES_* ...
+# edit deploy/noosphere.env: audience, issuers, CURSOR_SECRET, DATABASE_URL, POSTGRES_* ...
 docker compose --env-file deploy/noosphere.env -f deploy/docker-compose.yml up -d
 ```
 
@@ -91,6 +91,15 @@ The build context is the **repository root** (the server composes two sibling
 packages):
 
 ```sh
+node scripts/docker-build.mjs remote-mcp --tag noosphere-remote-mcp-server:latest
+```
+
+The helper copies only the three runtime packages into an owner-local temporary
+directory, refuses symlinks and non-regular entries, omits dependencies, tests,
+secrets, and macOS metadata, invokes BuildKit, and removes the context afterward.
+On a native filesystem the equivalent direct command remains:
+
+```sh
 docker build -f noosphere-remote-mcp-server/Dockerfile -t noosphere-remote-mcp-server .
 ```
 
@@ -99,8 +108,11 @@ declares a `/healthz` HEALTHCHECK.
 
 > macOS note: building from a case-insensitive/exFAT volume that carries
 > AppleDouble `._*` files can trip the BuildKit context sender
-> (`failed to xattr … operation not permitted`). Build with `DOCKER_BUILDKIT=0`
-> or from an ext4/APFS checkout. Linux CI is unaffected.
+> (`failed to xattr … operation not permitted`) before `.dockerignore` can
+> exclude them. Use `scripts/docker-build.mjs`; disabling BuildKit is deprecated
+> and may still hang while constructing the legacy context. For the reference
+> stack, run the helper with its default tag and then add `--no-build` to the
+> documented Compose `up` command.
 
 ## 3. systemd standalone
 
@@ -165,9 +177,13 @@ liveness at `/healthz` (process only).
 
 ## 5. Graceful shutdown & upgrades
 
-`src/main.js` traps `SIGTERM`/`SIGINT`, drains open MCP sessions, closes the
-PostgreSQL pool, and exits 0. Docker (`docker stop`) and systemd both send
-`SIGTERM`; allow ~30s before escalation.
+`src/main.js` traps `SIGTERM`/`SIGINT`. The server stops accepting sockets,
+closes MCP transports concurrently, allows up to five seconds for the HTTP
+drain, force-closes remaining connections, then closes the PostgreSQL pool.
+Concurrent shutdown signals share the same cleanup operation. Docker
+(`docker stop`) and systemd both send `SIGTERM`; retain a supervisor timeout
+above the five-second application grace period (the reference service uses
+30 seconds).
 
 Upgrade path: apply new migrations (forward-only, advisory-locked), then roll
 the server image/version. See [`OPERATIONS.md`](OPERATIONS.md#upgrade-procedure).

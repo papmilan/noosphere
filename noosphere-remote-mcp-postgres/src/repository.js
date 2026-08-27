@@ -6,6 +6,7 @@ import {
   validateProject,
   validateSession,
 } from '../../noosphere-remote-mcp/index.js';
+import { isDeepStrictEqual } from 'node:util';
 
 import { assertOwnerScope, withTransaction } from './pool.js';
 
@@ -27,6 +28,19 @@ function assertReceiptProjectId(projectId) {
   if (projectId !== undefined && (typeof projectId !== 'string' || projectId.length < 1 || projectId.length > 128)) {
     throw new Error('invalid-project-id');
   }
+}
+
+function laterTimestamp(left, right) {
+  return left > right ? left : right;
+}
+
+function assertUtcTimestamp(value, code) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) {
+    throw new Error(code);
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.valueOf()) || parsed.toISOString() !== value) throw new Error(code);
+  return value;
 }
 
 async function selectOne(runner, text, values) {
@@ -87,12 +101,16 @@ export class PostgresProjectMemoryRepository extends ProjectMemoryRepository {
     return rows.map((row) => row.document);
   }
 
-  async replaceProject({ ownerScope, projectId, project } = {}) {
+  async replaceProject({ ownerScope, projectId, project, expectedProject } = {}) {
     assertOwnerScope(ownerScope);
     return withTransaction(this.#pool, async (client) => {
       const current = await selectOne(client, 'select document from projects where owner_scope = $1 and id = $2 for update', [ownerScope, projectId]);
       if (!current) throw new RepositoryNotFoundError('project-not-found');
       validateProject(current.document);
+      if (expectedProject !== undefined
+        && !isDeepStrictEqual(current.document, validateProject(expectedProject))) {
+        throw new RepositoryConflictError('project-version-conflict');
+      }
       const value = validateProject(project);
       if (value.id !== projectId || current.document.id !== projectId) throw new Error('project-id-mismatch');
       if (value.latest_checkpoint_id !== current.document.latest_checkpoint_id) throw new Error('project-checkpoint-head-mismatch');
@@ -114,7 +132,7 @@ export class PostgresProjectMemoryRepository extends ProjectMemoryRepository {
     });
   }
 
-  async createSession({ ownerScope, session } = {}) {
+  async createSession({ ownerScope, session, projectActivityAt } = {}) {
     assertOwnerScope(ownerScope);
     const value = validateSession(session);
     if (value.latest_checkpoint_id !== null) throw new Error('session-checkpoint-head-mismatch');
@@ -124,11 +142,21 @@ export class PostgresProjectMemoryRepository extends ProjectMemoryRepository {
       const project = await selectOne(client, 'select document from projects where owner_scope = $1 and id = $2 for update', [ownerScope, value.project_id]);
       if (!project) throw new RepositoryNotFoundError('project-not-found');
       validateProject(project.document);
+      const nextProject = projectActivityAt === undefined
+        ? null
+        : validateProject({
+          ...project.document,
+          updated_at: laterTimestamp(project.document.updated_at, projectActivityAt),
+          last_activity_at: laterTimestamp(project.document.last_activity_at, projectActivityAt),
+        });
       try {
         await client.query('insert into sessions (owner_scope, document) values ($1, $2)', [ownerScope, value]);
       } catch (error) {
         if (error.code === '23505') throw new RepositoryConflictError('session-conflict');
         throw error;
+      }
+      if (nextProject) {
+        await client.query('update projects set document = $3 where owner_scope = $1 and id = $2', [ownerScope, value.project_id, nextProject]);
       }
       return value;
     });
@@ -146,20 +174,34 @@ export class PostgresProjectMemoryRepository extends ProjectMemoryRepository {
     return rows.map((row) => row.document);
   }
 
-  async replaceSession({ ownerScope, projectId, sessionId, session } = {}) {
+  async replaceSession({ ownerScope, projectId, sessionId, session, expectedSession, projectActivityAt } = {}) {
     assertOwnerScope(ownerScope);
     return withTransaction(this.#pool, async (client) => {
-      const project = await selectOne(client, 'select document from projects where owner_scope = $1 and id = $2', [ownerScope, projectId]);
+      const project = await selectOne(client, 'select document from projects where owner_scope = $1 and id = $2 for update', [ownerScope, projectId]);
       if (!project) throw new RepositoryNotFoundError('project-not-found');
       validateProject(project.document);
       const current = await selectOne(client, 'select document from sessions where owner_scope = $1 and project_id = $2 and id = $3 for update', [ownerScope, projectId, sessionId]);
       if (!current) throw new RepositoryNotFoundError('session-not-found');
       validateSession(current.document);
+      if (expectedSession !== undefined
+        && !isDeepStrictEqual(current.document, validateSession(expectedSession))) {
+        throw new RepositoryConflictError('session-version-conflict');
+      }
       const value = validateSession(session);
       if (value.project_id !== projectId) throw new Error('session-project-mismatch');
       if (value.id !== sessionId) throw new Error('session-id-mismatch');
       if (value.latest_checkpoint_id !== current.document.latest_checkpoint_id) throw new Error('session-checkpoint-head-mismatch');
+      const nextProject = projectActivityAt === undefined
+        ? null
+        : validateProject({
+          ...project.document,
+          updated_at: laterTimestamp(project.document.updated_at, projectActivityAt),
+          last_activity_at: laterTimestamp(project.document.last_activity_at, projectActivityAt),
+        });
       await client.query('update sessions set document = $4 where owner_scope = $1 and project_id = $2 and id = $3', [ownerScope, projectId, sessionId, value]);
+      if (nextProject) {
+        await client.query('update projects set document = $3 where owner_scope = $1 and id = $2', [ownerScope, projectId, nextProject]);
+      }
       return value;
     });
   }
@@ -178,12 +220,29 @@ export class PostgresProjectMemoryRepository extends ProjectMemoryRepository {
 
   async inspectProjectState({ ownerScope, projectId } = {}) {
     assertOwnerScope(ownerScope);
-    const project = await this.getProject({ ownerScope, projectId });
-    if (!project) throw new RepositoryNotFoundError('project-not-found');
+    // One SQL statement gives the project and both child collections one MVCC
+    // snapshot. Three independent READ COMMITTED statements can otherwise mix
+    // a project head from before a checkpoint commit with children from after it.
+    const snapshot = await selectOne(this.#pool, `
+      select p.document as project,
+        coalesce((
+          select jsonb_agg(s.document order by s.seq asc)
+          from sessions s
+          where s.owner_scope = p.owner_scope and s.project_id = p.id
+        ), '[]'::jsonb) as sessions,
+        coalesce((
+          select jsonb_agg(c.document order by c.seq asc)
+          from checkpoints c
+          where c.owner_scope = p.owner_scope and c.project_id = p.id
+        ), '[]'::jsonb) as checkpoints
+      from projects p
+      where p.owner_scope = $1 and p.id = $2
+    `, [ownerScope, projectId]);
+    if (!snapshot) throw new RepositoryNotFoundError('project-not-found');
     return {
-      project,
-      sessions: await this.listSessions({ ownerScope, projectId }),
-      checkpoints: await this.listCheckpoints({ ownerScope, projectId }),
+      project: snapshot.project,
+      sessions: snapshot.sessions,
+      checkpoints: snapshot.checkpoints,
     };
   }
 
@@ -228,9 +287,15 @@ export class PostgresProjectMemoryRepository extends ProjectMemoryRepository {
       }
 
       validateProject(currentProject.document);
-      const nextProject = validateProject(project);
-      if (nextProject.id !== value.project_id) throw new Error('checkpoint-project-mismatch');
-      if (nextProject.latest_checkpoint_id !== value.id) throw new Error('project-checkpoint-head-mismatch');
+      const projectedProject = validateProject(project);
+      if (projectedProject.id !== value.project_id) throw new Error('checkpoint-project-mismatch');
+      if (projectedProject.latest_checkpoint_id !== value.id) throw new Error('project-checkpoint-head-mismatch');
+      const nextProject = validateProject({
+        ...currentProject.document,
+        updated_at: laterTimestamp(currentProject.document.updated_at, projectedProject.updated_at),
+        last_activity_at: laterTimestamp(currentProject.document.last_activity_at, projectedProject.last_activity_at),
+        latest_checkpoint_id: value.id,
+      });
 
       if (await selectOne(client, 'select 1 from checkpoints where owner_scope = $1 and project_id = $2 and id = $3', [ownerScope, value.project_id, value.id])) {
         throw new RepositoryConflictError('checkpoint-conflict');
@@ -253,9 +318,14 @@ export class PostgresProjectMemoryRepository extends ProjectMemoryRepository {
         const currentSession = await selectOne(client, 'select document from sessions where owner_scope = $1 and project_id = $2 and id = $3 for update', [ownerScope, value.project_id, value.session_id]);
         if (!currentSession) throw new RepositoryNotFoundError('session-not-found');
         validateSession(currentSession.document);
-        nextSession = validateSession(session);
-        if (nextSession.project_id !== value.project_id || nextSession.id !== value.session_id) throw new Error('checkpoint-session-mismatch');
-        if (nextSession.latest_checkpoint_id !== value.id) throw new Error('session-checkpoint-head-mismatch');
+        const projectedSession = validateSession(session);
+        if (projectedSession.project_id !== value.project_id || projectedSession.id !== value.session_id) throw new Error('checkpoint-session-mismatch');
+        if (projectedSession.latest_checkpoint_id !== value.id) throw new Error('session-checkpoint-head-mismatch');
+        nextSession = validateSession({
+          ...currentSession.document,
+          updated_at: laterTimestamp(currentSession.document.updated_at, projectedSession.updated_at),
+          latest_checkpoint_id: value.id,
+        });
       }
 
       await client.query('insert into checkpoints (owner_scope, document) values ($1, $2)', [ownerScope, value]);
@@ -278,7 +348,7 @@ export class PostgresProjectMemoryRepository extends ProjectMemoryRepository {
 
   async setRetentionMarker({ ownerScope, projectId, retainUntil, reason = null } = {}) {
     assertOwnerScope(ownerScope);
-    if (typeof retainUntil !== 'string' || retainUntil.length === 0) throw new Error('invalid-retain-until');
+    assertUtcTimestamp(retainUntil, 'invalid-retain-until');
     // Lock the project row so a concurrent deleteProject cannot commit between
     // the existence check and the upsert and leave an orphan marker.
     return withTransaction(this.#pool, async (client) => {
@@ -295,18 +365,36 @@ export class PostgresProjectMemoryRepository extends ProjectMemoryRepository {
 
   async listExpiredProjects({ ownerScope, now } = {}) {
     assertOwnerScope(ownerScope);
-    if (typeof now !== 'string' || now.length === 0) throw new Error('invalid-now');
+    assertUtcTimestamp(now, 'invalid-now');
     const { rows } = await this.#pool.query('select project_id from retention_markers where owner_scope = $1 and retain_until <= $2 order by retain_until asc', [ownerScope, now]);
     return rows.map((row) => row.project_id);
   }
 
   // Delete job: hard-delete every project whose retention window has elapsed.
   async purgeExpiredProjects({ ownerScope, now } = {}) {
+    assertOwnerScope(ownerScope);
+    assertUtcTimestamp(now, 'invalid-now');
     const expired = await this.listExpiredProjects({ ownerScope, now });
+    const purged = [];
     for (const projectId of expired) {
-      await this.deleteProject({ ownerScope, projectId });
-      await this.#pool.query('delete from retention_markers where owner_scope = $1 and project_id = $2', [ownerScope, projectId]);
+      const removed = await withTransaction(this.#pool, async (client) => {
+        // setRetentionMarker and deleteProject lock this same row first. Once it
+        // is held, re-read the marker: the candidate list is only advisory and
+        // an owner may have extended retention after it was produced.
+        const project = await selectOne(client, 'select 1 from projects where owner_scope = $1 and id = $2 for update', [ownerScope, projectId]);
+        if (!project) return false;
+        const marker = await selectOne(client, 'select retain_until from retention_markers where owner_scope = $1 and project_id = $2 for update', [ownerScope, projectId]);
+        const retainUntilMs = Date.parse(marker?.retain_until);
+        if (!Number.isFinite(retainUntilMs) || retainUntilMs > Date.parse(now)) return false;
+        await client.query('delete from checkpoints where owner_scope = $1 and project_id = $2', [ownerScope, projectId]);
+        await client.query('delete from sessions where owner_scope = $1 and project_id = $2', [ownerScope, projectId]);
+        await client.query('delete from idempotency_receipts where owner_scope = $1 and project_id = $2', [ownerScope, projectId]);
+        await client.query('delete from retention_markers where owner_scope = $1 and project_id = $2', [ownerScope, projectId]);
+        await client.query('delete from projects where owner_scope = $1 and id = $2', [ownerScope, projectId]);
+        return true;
+      });
+      if (removed) purged.push(projectId);
     }
-    return expired;
+    return purged;
   }
 }

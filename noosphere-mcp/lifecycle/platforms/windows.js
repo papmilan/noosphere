@@ -14,6 +14,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { noosphereHome } from '../registry.js';
+import { windowsProcessOptions } from '../util.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -33,10 +34,11 @@ function taskDefinitionDir() {
  * @param {string} opts.managerLabel
  * @param {string} opts.installedMcp
  * @param {string} opts.installedRelayer
+ * @param {string} opts.logDirectory
  * @param {string} opts.node
  */
 export async function installServices(opts) {
-  const { installedMcp, installedRelayer, node } = opts;
+  const { installedMcp, installedRelayer, logDirectory, node } = opts;
 
   const relayerTn = `${TASK_FOLDER}\\Relayer`;
   const managerTn = `${TASK_FOLDER}\\Manager`;
@@ -46,21 +48,49 @@ export async function installServices(opts) {
 
   const relayerXml = path.join(definitionDir, 'Relayer.xml');
   const managerXml = path.join(definitionDir, 'Manager.xml');
+  const relayerCommand = path.join(definitionDir, 'Relayer.cmd');
+  const managerCommand = path.join(definitionDir, 'Manager.cmd');
+  const relayerLauncher = path.join(definitionDir, 'Relayer.vbs');
+  const managerLauncher = path.join(definitionDir, 'Manager.vbs');
+
+  await writeHiddenLauncher({
+    commandFile: relayerCommand,
+    launcherFile: relayerLauncher,
+    node,
+    entry: path.join(installedRelayer, 'index.js'),
+    workingDirectory: installedRelayer,
+    stdout: path.join(logDirectory, 'relayer.log'),
+    stderr: path.join(logDirectory, 'relayer.error.log'),
+  });
+  await writeHiddenLauncher({
+    commandFile: managerCommand,
+    launcherFile: managerLauncher,
+    node,
+    entry: path.join(installedMcp, 'lifecycle', 'manager.js'),
+    workingDirectory: installedMcp,
+    stdout: path.join(logDirectory, 'manager.log'),
+    stderr: path.join(logDirectory, 'manager.error.log'),
+  });
 
   await writeTaskDefinition(relayerXml, {
     description: 'Noosphere Relayer',
-    command: node,
-    argument: path.join(installedRelayer, 'index.js'),
+    command: 'wscript.exe',
+    arguments: `//B //NoLogo "${relayerLauncher}"`,
     workingDirectory: installedRelayer,
   });
   await writeTaskDefinition(managerXml, {
     description: 'Noosphere Manager',
-    command: node,
-    argument: path.join(installedMcp, 'lifecycle', 'manager.js'),
+    command: 'wscript.exe',
+    arguments: `//B //NoLogo "${managerLauncher}"`,
     workingDirectory: installedMcp,
   });
 
   if (!skipSchtasks()) {
+    // IgnoreNew is correct during normal operation, but it also means an
+    // upgrade can keep the old process alive and reject the freshly installed
+    // one. Stop any prior instances before replacing and starting the tasks.
+    await schtasks('/End', '/TN', relayerTn).catch(() => undefined);
+    await schtasks('/End', '/TN', managerTn).catch(() => undefined);
     await schtasks('/Create', '/TN', relayerTn, '/XML', relayerXml, '/F');
     await schtasks('/Create', '/TN', managerTn, '/XML', managerXml, '/F');
     // Start them immediately. Failures here aren't fatal — the tasks
@@ -96,6 +126,8 @@ export async function uninstallServices(opts) {
   if (skipSchtasks()) return;
   const relayerTn = `${TASK_FOLDER}\\Relayer`;
   const managerTn = `${TASK_FOLDER}\\Manager`;
+  await schtasks('/End', '/TN', relayerTn).catch(() => undefined);
+  await schtasks('/End', '/TN', managerTn).catch(() => undefined);
   await schtasks('/Delete', '/TN', relayerTn, '/F').catch(() => undefined);
   await schtasks('/Delete', '/TN', managerTn, '/F').catch(() => undefined);
 }
@@ -134,7 +166,49 @@ async function writeTaskDefinition(file, definition) {
   await writeFile(file, `﻿${taskXml(definition)}`, 'utf16le');
 }
 
-function taskXml({ description, command, argument, workingDirectory }) {
+/**
+ * Task Scheduler launches wscript.exe without a console. The script waits for
+ * the CMD wrapper so Task Scheduler can observe exits and apply its restart
+ * policy; the wrapper pins cwd and routes output to persistent log files.
+ * UTF-16LE keeps non-ASCII Windows profile paths intact in VBScript.
+ */
+async function writeHiddenLauncher({
+  commandFile,
+  launcherFile,
+  node,
+  entry,
+  workingDirectory,
+  stdout,
+  stderr,
+}) {
+  const command = [
+    '@echo off',
+    // The first line is ASCII, so cmd.exe can switch before it decodes any
+    // owner path. This keeps UTF-8 batch files usable for non-ASCII profiles.
+    'chcp 65001 >nul',
+    // pushd handles both another drive and a UNC-backed profile. Refuse to run
+    // from an unintended directory if navigation fails.
+    `pushd "${batchPath(workingDirectory)}" || exit /b 1`,
+    `"${batchPath(node)}" "${batchPath(entry)}" 1>>"${batchPath(stdout)}" 2>>"${batchPath(stderr)}"`,
+    'set "NoosphereExitCode=%errorlevel%"',
+    'popd',
+    'exit /b %NoosphereExitCode%',
+    '',
+  ].join('\r\n');
+  await writeFile(commandFile, command, 'utf8');
+
+  const launcher = [
+    'Option Explicit',
+    'Dim shell, exitCode',
+    'Set shell = CreateObject("WScript.Shell")',
+    `exitCode = shell.Run(Chr(34) & "${vbString(commandFile)}" & Chr(34), 0, True)`,
+    'WScript.Quit exitCode',
+    '',
+  ].join('\r\n');
+  await writeFile(launcherFile, `﻿${launcher}`, 'utf16le');
+}
+
+function taskXml({ description, command, arguments: args, workingDirectory }) {
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -156,6 +230,10 @@ function taskXml({ description, command, argument, workingDirectory }) {
     <StartWhenAvailable>true</StartWhenAvailable>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>255</Count>
+    </RestartOnFailure>
     <!-- Both tasks are daemons. The Task Scheduler default of PT72H would
          terminate them after three days; launchd and systemd keep them up. -->
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
@@ -164,12 +242,21 @@ function taskXml({ description, command, argument, workingDirectory }) {
   <Actions Context="Author">
     <Exec>
       <Command>${xml(command)}</Command>
-      <Arguments>"${xml(argument)}"</Arguments>
+      <Arguments>${xml(args)}</Arguments>
       <WorkingDirectory>${xml(workingDirectory)}</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>
 `;
+}
+
+function batchPath(value) {
+  // Percent signs are variable delimiters even inside quoted batch arguments.
+  return String(value).replaceAll('%', '%%');
+}
+
+function vbString(value) {
+  return String(value).replaceAll('"', '""');
 }
 
 function xml(value) {
@@ -182,7 +269,11 @@ function xml(value) {
 
 async function schtasks(...args) {
   try {
-    return await execFileAsync('schtasks.exe', args);
+    return await execFileAsync(
+      'schtasks.exe',
+      args,
+      windowsProcessOptions('win32'),
+    );
   } catch (error) {
     error.commandLine = `schtasks.exe ${args
       .map((argument) => (/\s/.test(argument) ? `"${argument}"` : argument))

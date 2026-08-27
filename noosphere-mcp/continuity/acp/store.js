@@ -46,8 +46,7 @@ async function readStateUnlocked(root, options = {}) {
     throw error;
   }
   if (rawBytes === null) return null;
-  const raw = rawBytes.toString('utf8');
-  return decodeEnvelope(raw, { clock: options.clock ?? nowIso(), policy: options.policy });
+  return decodeEnvelope(rawBytes, { clock: options.clock ?? nowIso(), policy: options.policy });
 }
 
 // Builds an initial state from observable Git facts only. It does not infer a
@@ -171,8 +170,7 @@ export async function validateState(root, options = {}) {
   if (rawBytes === null) {
     return { ok: false, errors: [{ path: '$', code: 'missing-state', message: 'no continuity.json to validate' }] };
   }
-  const raw = rawBytes.toString('utf8');
-  const decoded = decodeEnvelope(raw, { clock, policy: options.policy });
+  const decoded = decodeEnvelope(rawBytes, { clock, policy: options.policy });
   if (!decoded.ok) return { ok: false, errors: decoded.errors };
 
   const observed = await observeRepository(root);
@@ -244,8 +242,7 @@ function nowIso() {
 async function currentSnapshotId(root, jsonPath, options) {
   const bytes = await readOwnerOnlyFile(jsonPath, secureOptions(root, options));
   if (bytes === null) return null;
-  const raw = bytes.toString('utf8');
-  const decoded = decodeEnvelope(raw, { clock: options.clock ?? nowIso(), policy: options.policy });
+  const decoded = decodeEnvelope(bytes, { clock: options.clock ?? nowIso(), policy: options.policy });
   if (!decoded.ok) throw storeError('state-unreadable');
   return decoded.state.envelope.snapshot_id;
 }

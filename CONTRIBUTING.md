@@ -9,13 +9,20 @@ For security problems, do not open an issue — follow
 
 ## Repository layout
 
-This is a small monorepo with three packages:
+This monorepo contains the released continuity/relayer pair and the shared and
+Project Memory components they use:
 
 | Directory | npm package | What it is |
 | --- | --- | --- |
 | `noosphere-mcp/` | `noosphere-continuity` | CLI, watcher, lifecycle installer, CSP task state, ACP handoff state |
 | `noosphere-relayer/` | `noosphere-relayer` | HTTP memory relay server |
 | `noosphere-acp-protocol/` | `@noosphere/acp-protocol` | Shared ACP envelopes, schemas, validation (bundled, not published separately) |
+| `noosphere-secure-fs/` | `@noosphere/secure-fs` | Shared secure persistence and Windows owner-ACL boundary |
+| `noosphere-remote-mcp/` | `@noosphere/remote-mcp-contracts` | Project Memory schemas, repository contract, and service core |
+| `noosphere-remote-mcp-postgres/` | `@noosphere/remote-mcp-postgres` | PostgreSQL repository, OIDC verifier, and migrations |
+| `noosphere-remote-mcp-server/` | `@noosphere/remote-mcp-server` | Streamable HTTP MCP transport and production entry point |
+| `noosphere-local-mcp/` | `@noosphere/local-mcp` | Single-user, durable STDIO MCP transport |
+| `noosphere-remote-mcp-acceptance/` | `@noosphere/remote-mcp-acceptance` | Cross-client and transport acceptance tests |
 
 `noosphere-relayer/vendor/acp-protocol/` is a byte-identical mirror of
 `noosphere-acp-protocol/` kept for the Docker build context. If you change
@@ -33,24 +40,45 @@ cd noosphere
 
 npm --prefix noosphere-relayer install
 npm --prefix noosphere-mcp install
+npm --prefix noosphere-remote-mcp-postgres install
+npm --prefix noosphere-remote-mcp-server install
+npm --prefix noosphere-local-mcp install
+npm --prefix noosphere-remote-mcp-acceptance install
 ```
 
-The `noosphere-mcp` tests boot the relayer from its sibling directory, so
-both installs are required even for CLI-only changes.
+Several suites load sibling package source. The `noosphere-mcp` and relayer
+suites need one another's dependencies. The remote server, Local STDIO, and
+acceptance suites also load the PostgreSQL OIDC/server packages. Install the
+siblings shown above before interpreting a missing-module failure as a product
+failure.
 
 ## Running checks and tests
 
-Each package has a `check` script (syntax checks plus the full test suite)
-and a `test` script:
+Run the gate owned by every package you changed:
 
 ```sh
 npm --prefix noosphere-acp-protocol test
+npm --prefix noosphere-secure-fs run check
 npm --prefix noosphere-relayer run check
 npm --prefix noosphere-mcp run check
+npm --prefix noosphere-remote-mcp test
+npm --prefix noosphere-remote-mcp-server test
+npm --prefix noosphere-local-mcp test
+npm --prefix noosphere-remote-mcp-acceptance test
+npm --prefix noosphere-remote-mcp-postgres run test:nodb
 ```
 
-Run all three before opening a pull request. The MCP suite is serialized
-(`--test-concurrency=1`) on purpose; do not parallelize it.
+PostgreSQL integration tests need the disposable development database:
+
+```sh
+npm --prefix noosphere-remote-mcp-postgres run db:up
+npm --prefix noosphere-remote-mcp-postgres run migrate
+npm --prefix noosphere-remote-mcp-postgres run test:db
+npm --prefix noosphere-remote-mcp-postgres run db:down
+```
+
+`db:down` removes that Compose database volume. The continuity suite is
+serialized (`--test-concurrency=1`) on purpose; do not parallelize it.
 
 Live Walrus tests (`npm --prefix noosphere-relayer run test:live`) need real
 credentials and are not required for contributions.
@@ -72,9 +100,17 @@ Every behavior change comes with a test in the package it touches:
 
 - protocol changes → `noosphere-acp-protocol/tests/` plus the vendor mirror
   sync;
+- shared persistence changes → `noosphere-secure-fs/tests/` plus every affected
+  consumer's security suite;
 - relayer routes/queue/security → `noosphere-relayer/tests/`;
 - CLI, watcher, lifecycle, CSP task state, ACP handoff state →
-  `noosphere-mcp/tests/`.
+  `noosphere-mcp/tests/`;
+- Project Memory contracts/core → `noosphere-remote-mcp/tests/`;
+- remote auth/transport → `noosphere-remote-mcp-server/tests/`;
+- database semantics → no-DB parity and PostgreSQL-backed tests in
+  `noosphere-remote-mcp-postgres/tests/`;
+- Local STDIO behavior → `noosphere-local-mcp/tests/`;
+- cross-transport/client promises → `noosphere-remote-mcp-acceptance/tests/`.
 
 Bug fixes include a regression test that fails without the fix.
 

@@ -56,6 +56,11 @@ async function runWorkflow(makeAdapter, h) {
   const got = structured(await a.callTool('get_checkpoint', { project_id: project.id, checkpoint_id: 'chk_p2' }));
   const latest = structured(await a.callTool('get_latest_checkpoint', { project_id: project.id }));
   const resumed = structured(await a.callTool('resume_project', { project_id: project.id }));
+  const transitioned = structured(await a.callTool('transition_session', {
+    project_id: project.id,
+    session_id: session.id,
+    status: 'completed',
+  }));
 
   await a.callTool('create_project', { name: 'Bicycle Maintenance' });
   const ambiguous = structured(await a.callTool('find_projects', { query: 'bicycle' }));
@@ -89,6 +94,7 @@ async function runWorkflow(makeAdapter, h) {
     resumeFreshness: resumed.freshness,
     resumeWarnings: resumed.warnings,
     resumeTrust: resumed.content_trust,
+    transitionSessionStatus: transitioned.session.status,
     ambiguousResult: ambiguous.result,
     ambiguousCount: ambiguous.candidates.length,
     exactResult: exact.result,
@@ -111,7 +117,7 @@ describe('Cross-client semantic parity: SDK client vs raw JSON-RPC client', () =
     }
 
     // Sanity: each path actually exercised the full tool surface and semantics.
-    assert.equal(outcomes.sdk.toolCount, 15);
+    assert.equal(outcomes.sdk.toolCount, 16);
     assert.equal(outcomes.sdk.save1Dedup, false);
     assert.equal(outcomes.sdk.replayDedup, true);
     assert.equal(outcomes.sdk.ambiguousResult, 'ambiguous');
@@ -120,6 +126,7 @@ describe('Cross-client semantic parity: SDK client vs raw JSON-RPC client', () =
     assert.equal(outcomes.sdk.crossOwnerCode, 'not-found');
     assert.equal(outcomes.sdk.resumeHead, 'Phase 2.');
     assert.equal(outcomes.sdk.latestTrust, 'untrusted-persisted-data');
+    assert.equal(outcomes.sdk.transitionSessionStatus, 'completed');
 
     // The parity assertion: both transports yield the same semantics.
     assert.deepEqual(outcomes.raw, outcomes.sdk);
@@ -135,7 +142,7 @@ describe('Cross-client semantic parity: SDK client vs raw JSON-RPC client', () =
       await raw.connect();
       const sdkTools = (await sdk.listTools()).sort((x, y) => x.name.localeCompare(y.name));
       const rawTools = (await raw.listTools()).sort((x, y) => x.name.localeCompare(y.name));
-      assert.equal(rawTools.length, 15);
+      assert.equal(rawTools.length, 16);
       assert.deepEqual(rawTools.map((t) => t.name), sdkTools.map((t) => t.name));
       assert.deepEqual(rawTools.map((t) => t.inputSchema), sdkTools.map((t) => t.inputSchema));
       await sdk.close();

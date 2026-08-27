@@ -292,6 +292,7 @@ describe('Noosphere macOS lifecycle installer', () => {
       assert.ok('installed_cli' in report);
       assert.ok('relayer_service' in report);
       assert.ok('manager_service' in report);
+      assert.equal(report.manager_running, false);
       assert.ok('credentials' in report);
     } finally {
       await rm(fakeHome, { recursive: true, force: true });
@@ -675,7 +676,7 @@ describe('Noosphere Linux lifecycle installer', () => {
 // ---------------------------------------------------------------------------
 
 describe('Noosphere Windows lifecycle installer', () => {
-  it('writes a CMD wrapper, PowerShell fragment, and shell blocks', async () => {
+  it('installs a non-blocking PowerShell hook for a fresh user with no profile', async () => {
     const fakeHome = await makeFakeHome({
       '.zshrc': '# existing\n',
       '.bashrc': '# existing\n',
@@ -702,7 +703,36 @@ describe('Noosphere Windows lifecycle installer', () => {
         'utf8',
       );
       assert.match(shellPs1, /Invoke-NoosphereActivate/);
-      assert.match(shellPs1, /Set-Location/);
+      assert.match(shellPs1, /LocationChangedAction/);
+      assert.match(shellPs1, /PreviousLocationChangedAction/);
+      assert.match(shellPs1, /Start-Process/);
+      assert.match(shellPs1, /-WindowStyle Hidden/);
+      assert.match(shellPs1, /Provider\.Name -ne 'FileSystem'/);
+      assert.match(shellPs1, /-WorkingDirectory \$CurrentLocation\.Path/);
+      assert.match(shellPs1, /\$env:PATH = '[^\r\n]+' \+ \[IO\.Path\]::PathSeparator/);
+      assert.match(shellPs1, /__NoosphereLocationHookInstalled/);
+      assert.match(shellPs1, /if \(\$global:__NoosphereLocationHookInstalled\) \{ return \}/);
+      assert.match(shellPs1, /try \{\s*if \(\$null -ne \$NoospherePreviousLocationChangedAction\)/);
+      assert.doesNotMatch(shellPs1, /PostCommandLookupAction/);
+      assert.equal(
+        shellPs1.trimEnd().endsWith('Invoke-NoosphereActivate'),
+        true,
+        'the initial PowerShell directory must activate without waiting for cd',
+      );
+
+      // A fresh PowerShell user usually has no profile file yet. Installation
+      // must create all-host profiles for both PowerShell 7 and Windows
+      // PowerShell, otherwise shell.ps1 exists but nothing ever sources it and
+      // even ~/.noosphere/bin is absent from PATH.
+      for (const directory of ['PowerShell', 'WindowsPowerShell']) {
+        const profile = await readFile(
+          path.join(fakeHome, 'Documents', directory, 'profile.ps1'),
+          'utf8',
+        );
+        assert.match(profile, />>> noosphere >>>/);
+        assert.match(profile, /^\. '[^\r\n]+'$/m);
+        assert.match(normalizePathSeparators(profile), /\.noosphere\/shell\.ps1/);
+      }
 
       // zsh and bash fragments still written (cross-shell)
       const shellZsh = await readFile(path.join(noosphereHome, 'shell.zsh'), 'utf8');
@@ -804,6 +834,32 @@ describe('Noosphere Windows lifecycle installer', () => {
       );
       // schtasks /XML only accepts Unicode; the BOM must survive the write.
       assert.equal(relayer.charCodeAt(0), 0xfeff);
+      for (const definition of [relayer, manager]) {
+        assert.match(definition, /<RestartOnFailure>/);
+        assert.match(definition, /<Interval>PT1M<\/Interval>/);
+        assert.match(definition, /<Count>255<\/Count>/);
+        assert.match(definition, /<Command>wscript\.exe<\/Command>/);
+      }
+
+      // wscript owns the scheduled action so neither node.exe nor cmd.exe gets
+      // a visible console. Its hidden, blocking launch runs a small CMD wrapper
+      // that pins cwd and appends both output streams to diagnosable logs.
+      const relayerLauncher = await readFile(
+        path.join(definitions, 'Relayer.vbs'),
+        'utf16le',
+      );
+      const relayerCommand = await readFile(
+        path.join(definitions, 'Relayer.cmd'),
+        'utf8',
+      );
+      assert.equal(relayerLauncher.charCodeAt(0), 0xfeff);
+      assert.match(relayerLauncher, /\.Run\([^\n]+, 0, True\)/);
+      assert.match(relayerCommand, /relayer\.log/);
+      assert.match(relayerCommand, /relayer\.error\.log/);
+      assert.match(relayerCommand, /pushd /);
+      assert.match(relayerCommand, /NoosphereExitCode=%errorlevel%/);
+      assert.match(relayerCommand, /popd/);
+      assert.match(relayerCommand, /^chcp 65001 >nul\r?$/m);
     } finally {
       await rm(fakeHome, { recursive: true, force: true });
     }
@@ -889,10 +945,14 @@ describe('npm child-process invocation', () => {
   });
 
   it('npmSpawnOptions sets shell:true on win32 only (CVE-2024-27980)', async () => {
-    const { npmSpawnOptions } = await import('../lifecycle/util.js');
-    assert.deepEqual(npmSpawnOptions('win32'), { shell: true });
-    assert.deepEqual(npmSpawnOptions('darwin'), { shell: false });
-    assert.deepEqual(npmSpawnOptions('linux'), { shell: false });
+    const { npmSpawnOptions, windowsProcessOptions } = await import('../lifecycle/util.js');
+    assert.equal(typeof windowsProcessOptions, 'function');
+    assert.deepEqual(windowsProcessOptions('win32'), { windowsHide: true });
+    assert.deepEqual(windowsProcessOptions('windows'), { windowsHide: true });
+    assert.deepEqual(windowsProcessOptions('darwin'), { windowsHide: false });
+    assert.deepEqual(npmSpawnOptions('win32'), { shell: true, windowsHide: true });
+    assert.deepEqual(npmSpawnOptions('darwin'), { shell: false, windowsHide: false });
+    assert.deepEqual(npmSpawnOptions('linux'), { shell: false, windowsHide: false });
   });
 
   it('installer on win32 spawns npm.cmd (not npm), so no ENOENT', async () => {

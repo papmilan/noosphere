@@ -11,7 +11,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, test } from 'node:test';
 
-import { readBoundedRegularFile, readBoundedRegularFileSync } from '../index.js';
+import {
+  readBoundedRegularFile,
+  readBoundedRegularFileSync,
+  readBoundedRegularFileTail,
+} from '../index.js';
 
 function temporaryDirectory() {
   return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'bounded-read-'));
@@ -206,5 +210,80 @@ describe('readBoundedRegularFile', () => {
       (await readBoundedRegularFile(path.join(linked, 'file.txt'), { maxBytes: 1024 })).toString('utf8'),
       'CONTENT',
     );
+  });
+});
+
+describe('readBoundedRegularFileTail', () => {
+  test('reads only the bounded tail of a larger regular file', async () => {
+    const dir = temporaryDirectory();
+    const file = path.join(dir, 'large-transcript.jsonl');
+    fs.writeFileSync(file, `${'x'.repeat(4096)}\nLAST-LINE\n`);
+
+    const bytes = await readBoundedRegularFileTail(file, { maxBytes: 64 });
+
+    assert.equal(bytes.length, 64);
+    assert.match(bytes.toString('utf8'), /LAST-LINE\n$/);
+  });
+
+  test('returns the complete file when it fits and absence as null', async () => {
+    const dir = temporaryDirectory();
+    const file = path.join(dir, 'short.txt');
+    fs.writeFileSync(file, 'complete\n');
+
+    assert.equal(
+      (await readBoundedRegularFileTail(file, { maxBytes: 64 })).toString('utf8'),
+      'complete\n',
+    );
+    assert.equal(
+      await readBoundedRegularFileTail(path.join(dir, 'missing.txt'), { maxBytes: 64 }),
+      null,
+    );
+  });
+
+  test('refuses symlinks and non-regular files without blocking', async (t) => {
+    const dir = temporaryDirectory();
+    const target = path.join(dir, 'target.txt');
+    const link = path.join(dir, 'link.txt');
+    fs.writeFileSync(target, 'SECRET');
+    if (trySymlink(target, link)) {
+      await assert.rejects(
+        readBoundedRegularFileTail(link, { maxBytes: 64 }),
+        (error) => error.code === 'state-file-symlink',
+      );
+    }
+
+    const fifo = path.join(dir, 'tail-fifo');
+    if (!mkfifo(fifo)) {
+      t.diagnostic('this platform cannot create a FIFO');
+      return;
+    }
+    let timer;
+    const guard = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('the tail read blocked on a FIFO')), 5_000);
+    });
+    try {
+      await Promise.race([
+        assert.rejects(
+          readBoundedRegularFileTail(fifo, { maxBytes: 64 }),
+          (error) => error.code === 'state-file-not-regular',
+        ),
+        guard,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
+  test('rejects invalid bounds', async () => {
+    const dir = temporaryDirectory();
+    const file = path.join(dir, 'short.txt');
+    fs.writeFileSync(file, 'x');
+
+    for (const maxBytes of [undefined, -1, 1.5, Number.NaN, '64']) {
+      await assert.rejects(
+        readBoundedRegularFileTail(file, { maxBytes }),
+        (error) => error.code === 'state-read-bound-invalid',
+      );
+    }
   });
 });

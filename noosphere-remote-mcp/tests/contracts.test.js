@@ -51,9 +51,13 @@ describe('Project Memory MCP contracts', () => {
       'list_projects',
       'resume_project',
       'save_checkpoint',
+      'transition_session',
       'update_project',
     ]);
     assert.equal(MCP_TOOLS.resume_project.output.properties.content_trust.const, 'untrusted-persisted-data');
+    assert.deepEqual(MCP_TOOLS.transition_session.input.properties.status.enum, [
+      'active', 'paused', 'interrupted', 'completed', 'archived',
+    ]);
   });
 
   it('makes ambiguity explicit in find-projects and never encodes a selected project', () => {

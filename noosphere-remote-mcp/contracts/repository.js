@@ -1,4 +1,5 @@
 import { validateCheckpoint, validateProject, validateSession } from './validation.js';
+import { isDeepStrictEqual } from 'node:util';
 
 function assertOwnerScope(ownerScope) {
   if (typeof ownerScope !== 'string' || ownerScope.length < 3 || ownerScope.length > 512) throw new Error('invalid-owner-scope');
@@ -57,10 +58,19 @@ function mapToObject(map) {
   return Object.fromEntries([...map].map(([key, value]) => [key, value instanceof Map ? mapToObject(value) : value]));
 }
 
-function objectToMap(value, depth, validateLeaf) {
+function objectToMap(value, depth, { validateKey, validateLeaf }, keys = []) {
   if (value === undefined || value === null) return new Map();
-  if (typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid-snapshot');
-  return new Map(Object.entries(value).map(([key, entry]) => [key, depth > 1 ? objectToMap(entry, depth - 1, validateLeaf) : validateLeaf(entry)]));
+  if (typeof value !== 'object' || Array.isArray(value)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+    throw new Error('invalid-snapshot');
+  }
+  return new Map(Object.entries(value).map(([key, entry]) => {
+    validateKey(key, keys.length, keys);
+    const nextKeys = [...keys, key];
+    return [key, depth > 1
+      ? objectToMap(entry, depth - 1, { validateKey, validateLeaf }, nextKeys)
+      : validateLeaf(entry, nextKeys)];
+  }));
 }
 
 function deleteOwnerProjectRecords(root, ownerScope, projectId) {
@@ -111,6 +121,10 @@ function assertReceiptProjectId(projectId) {
   if (projectId !== undefined && (typeof projectId !== 'string' || projectId.length < 1 || projectId.length > 128)) throw new Error('invalid-project-id');
 }
 
+function laterTimestamp(left, right) {
+  return left > right ? left : right;
+}
+
 // Idempotency receipts have no record schema, so restoring one checks the
 // fields the repository itself relies on. `result` stays opaque: it is whatever
 // the recorded operation returned.
@@ -119,6 +133,57 @@ function validateReceipt(receipt) {
   if (typeof receipt.requestHash !== 'string' || receipt.requestHash.length < 1 || receipt.requestHash.length > 512) throw new Error('invalid-idempotency');
   assertReceiptProjectId(receipt.projectId);
   return receipt;
+}
+
+function assertSnapshotIdKey(value) {
+  if (!/^[a-z][a-z0-9_]{2,127}$/.test(value)) throw new Error('invalid-snapshot');
+}
+
+function assertSnapshotOperation(value) {
+  if (!/^[a-z][a-z0-9_]{2,63}$/.test(value)) throw new Error('invalid-snapshot');
+}
+
+function assertSnapshotIdempotencyKey(value) {
+  if (value.length < 1 || value.length > 128) throw new Error('invalid-snapshot');
+}
+
+function validateSnapshotRelationships(projects, sessions, checkpoints) {
+  for (const [ownerScope, ownerSessions] of sessions) {
+    for (const projectId of ownerSessions.keys()) {
+      if (!getTuple(projects, [ownerScope, projectId])) throw new Error('invalid-snapshot');
+    }
+  }
+  for (const [ownerScope, ownerCheckpoints] of checkpoints) {
+    for (const projectId of ownerCheckpoints.keys()) {
+      if (!getTuple(projects, [ownerScope, projectId])) throw new Error('invalid-snapshot');
+    }
+  }
+
+  for (const [ownerScope, ownerProjects] of projects) {
+    for (const [projectId, project] of ownerProjects) {
+      const projectSessions = getTuple(sessions, [ownerScope, projectId]) ?? new Map();
+      const projectCheckpoints = getTuple(checkpoints, [ownerScope, projectId]) ?? new Map();
+      const ordered = [...projectCheckpoints.values()].sort((left, right) => left.revision - right.revision);
+      const latestBySession = new Map();
+      for (let index = 0; index < ordered.length; index += 1) {
+        const checkpoint = ordered[index];
+        const predecessor = index === 0 ? null : ordered[index - 1].id;
+        if (checkpoint.revision !== index + 1 || checkpoint.previous_checkpoint_id !== predecessor) {
+          throw new Error('invalid-snapshot');
+        }
+        if (checkpoint.session_id !== null) {
+          if (!projectSessions.has(checkpoint.session_id)) throw new Error('invalid-snapshot');
+          latestBySession.set(checkpoint.session_id, checkpoint.id);
+        }
+      }
+      if (project.latest_checkpoint_id !== (ordered.at(-1)?.id ?? null)) throw new Error('invalid-snapshot');
+      for (const session of projectSessions.values()) {
+        if (session.latest_checkpoint_id !== (latestBySession.get(session.id) ?? null)) {
+          throw new Error('invalid-snapshot');
+        }
+      }
+    }
+  }
 }
 
 export class ProjectMemoryRepository {
@@ -162,10 +227,49 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
   // invalid record later. Nothing is assigned until all four sections validate,
   // so a rejected snapshot leaves the repository on its previous state.
   restore(snapshot = {}) {
-    const projects = objectToMap(snapshot.projects, 2, validateProject);
-    const sessions = objectToMap(snapshot.sessions, 3, validateSession);
-    const checkpoints = objectToMap(snapshot.checkpoints, 3, validateCheckpoint);
-    const idempotency = objectToMap(snapshot.idempotency, 3, validateReceipt);
+    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)
+      || ![Object.prototype, null].includes(Object.getPrototypeOf(snapshot))) {
+      throw new Error('invalid-snapshot');
+    }
+    const allowedSections = new Set(['projects', 'sessions', 'checkpoints', 'idempotency']);
+    if (Object.keys(snapshot).some((key) => !allowedSections.has(key))) throw new Error('invalid-snapshot');
+    const recordKey = (key, level) => {
+      if (level === 0) assertOwnerScope(key);
+      else assertSnapshotIdKey(key);
+    };
+    const projects = objectToMap(snapshot.projects, 2, {
+      validateKey: recordKey,
+      validateLeaf(entry, [ownerScope, projectId]) {
+        const project = validateProject(entry);
+        if (project.id !== projectId) throw new Error('invalid-snapshot');
+        return project;
+      },
+    });
+    const sessions = objectToMap(snapshot.sessions, 3, {
+      validateKey: recordKey,
+      validateLeaf(entry, [ownerScope, projectId, sessionId]) {
+        const session = validateSession(entry);
+        if (session.id !== sessionId || session.project_id !== projectId) throw new Error('invalid-snapshot');
+        return session;
+      },
+    });
+    const checkpoints = objectToMap(snapshot.checkpoints, 3, {
+      validateKey: recordKey,
+      validateLeaf(entry, [ownerScope, projectId, checkpointId]) {
+        const checkpoint = validateCheckpoint(entry);
+        if (checkpoint.id !== checkpointId || checkpoint.project_id !== projectId) throw new Error('invalid-snapshot');
+        return checkpoint;
+      },
+    });
+    const idempotency = objectToMap(snapshot.idempotency, 3, {
+      validateKey(key, level) {
+        if (level === 0) assertOwnerScope(key);
+        else if (level === 1) assertSnapshotOperation(key);
+        else assertSnapshotIdempotencyKey(key);
+      },
+      validateLeaf: validateReceipt,
+    });
+    validateSnapshotRelationships(projects, sessions, checkpoints);
     this.#projects = projects;
     this.#sessions = sessions;
     this.#checkpoints = checkpoints;
@@ -192,11 +296,15 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
     return listTupleValues(this.#projects, [ownerScope]);
   }
 
-  async replaceProject({ ownerScope, projectId, project } = {}) {
+  async replaceProject({ ownerScope, projectId, project, expectedProject } = {}) {
     assertOwnerScope(ownerScope);
     const current = getTuple(this.#projects, [ownerScope, projectId]);
     if (!current) throw new RepositoryNotFoundError('project-not-found');
     validateProject(current);
+    if (expectedProject !== undefined
+      && !isDeepStrictEqual(current, validateProject(expectedProject))) {
+      throw new RepositoryConflictError('project-version-conflict');
+    }
     const value = validateProject(project);
     if (value.id !== projectId || current.id !== projectId) throw new Error('project-id-mismatch');
     if (value.latest_checkpoint_id !== current.latest_checkpoint_id) throw new Error('project-checkpoint-head-mismatch');
@@ -213,16 +321,24 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
     deleteOwnerProjectReceipts(this.#idempotency, ownerScope, projectId);
   }
 
-  async createSession({ ownerScope, session } = {}) {
+  async createSession({ ownerScope, session, projectActivityAt } = {}) {
     assertOwnerScope(ownerScope);
     const value = validateSession(session);
     if (value.latest_checkpoint_id !== null) throw new Error('session-checkpoint-head-mismatch');
     const project = getTuple(this.#projects, [ownerScope, value.project_id]);
     if (!project) throw new RepositoryNotFoundError('project-not-found');
     validateProject(project);
+    const nextProject = projectActivityAt === undefined
+      ? null
+      : validateProject({
+        ...project,
+        updated_at: laterTimestamp(project.updated_at, projectActivityAt),
+        last_activity_at: laterTimestamp(project.last_activity_at, projectActivityAt),
+      });
     const tuple = [ownerScope, value.project_id, value.id];
     if (getTuple(this.#sessions, tuple)) throw new RepositoryConflictError('session-conflict');
     setTuple(this.#sessions, tuple, value);
+    if (nextProject) setTuple(this.#projects, [ownerScope, value.project_id], nextProject);
     return structuredClone(value);
   }
 
@@ -237,7 +353,7 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
     return listTupleValues(this.#sessions, [ownerScope, projectId]);
   }
 
-  async replaceSession({ ownerScope, projectId, sessionId, session } = {}) {
+  async replaceSession({ ownerScope, projectId, sessionId, session, expectedSession, projectActivityAt } = {}) {
     assertOwnerScope(ownerScope);
     const project = getTuple(this.#projects, [ownerScope, projectId]);
     if (!project) throw new RepositoryNotFoundError('project-not-found');
@@ -245,11 +361,23 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
     const current = getTuple(this.#sessions, [ownerScope, projectId, sessionId]);
     if (!current) throw new RepositoryNotFoundError('session-not-found');
     validateSession(current);
+    if (expectedSession !== undefined
+      && !isDeepStrictEqual(current, validateSession(expectedSession))) {
+      throw new RepositoryConflictError('session-version-conflict');
+    }
     const value = validateSession(session);
     if (value.project_id !== projectId) throw new Error('session-project-mismatch');
     if (value.id !== sessionId) throw new Error('session-id-mismatch');
     if (value.latest_checkpoint_id !== current.latest_checkpoint_id) throw new Error('session-checkpoint-head-mismatch');
+    const nextProject = projectActivityAt === undefined
+      ? null
+      : validateProject({
+        ...project,
+        updated_at: laterTimestamp(project.updated_at, projectActivityAt),
+        last_activity_at: laterTimestamp(project.last_activity_at, projectActivityAt),
+      });
     setTuple(this.#sessions, [ownerScope, projectId, sessionId], value);
+    if (nextProject) setTuple(this.#projects, [ownerScope, projectId], nextProject);
     return structuredClone(value);
   }
 
@@ -307,9 +435,15 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
     const currentProjectValue = getTuple(this.#projects, [ownerScope, value.project_id]);
     if (!currentProjectValue) throw new RepositoryNotFoundError('project-not-found');
     const currentProject = validateProject(currentProjectValue);
-    const nextProject = validateProject(project);
-    if (nextProject.id !== value.project_id) throw new Error('checkpoint-project-mismatch');
-    if (nextProject.latest_checkpoint_id !== value.id) throw new Error('project-checkpoint-head-mismatch');
+    const projectedProject = validateProject(project);
+    if (projectedProject.id !== value.project_id) throw new Error('checkpoint-project-mismatch');
+    if (projectedProject.latest_checkpoint_id !== value.id) throw new Error('project-checkpoint-head-mismatch');
+    const nextProject = validateProject({
+      ...currentProject,
+      updated_at: laterTimestamp(currentProject.updated_at, projectedProject.updated_at),
+      last_activity_at: laterTimestamp(currentProject.last_activity_at, projectedProject.last_activity_at),
+      latest_checkpoint_id: value.id,
+    });
 
     const checkpointTuple = [ownerScope, value.project_id, value.id];
     if (getTuple(this.#checkpoints, checkpointTuple)) throw new RepositoryConflictError('checkpoint-conflict');
@@ -331,9 +465,14 @@ export class InMemoryProjectMemoryRepository extends ProjectMemoryRepository {
       const currentSessionValue = getTuple(this.#sessions, [ownerScope, value.project_id, value.session_id]);
       if (!currentSessionValue) throw new RepositoryNotFoundError('session-not-found');
       validateSession(currentSessionValue);
-      nextSession = validateSession(session);
-      if (nextSession.project_id !== value.project_id || nextSession.id !== value.session_id) throw new Error('checkpoint-session-mismatch');
-      if (nextSession.latest_checkpoint_id !== value.id) throw new Error('session-checkpoint-head-mismatch');
+      const projectedSession = validateSession(session);
+      if (projectedSession.project_id !== value.project_id || projectedSession.id !== value.session_id) throw new Error('checkpoint-session-mismatch');
+      if (projectedSession.latest_checkpoint_id !== value.id) throw new Error('session-checkpoint-head-mismatch');
+      nextSession = validateSession({
+        ...currentSessionValue,
+        updated_at: laterTimestamp(currentSessionValue.updated_at, projectedSession.updated_at),
+        latest_checkpoint_id: value.id,
+      });
     }
 
     // Every supplied/current value is validated before these synchronous map

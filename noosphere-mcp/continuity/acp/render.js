@@ -16,7 +16,24 @@ const UNSAFE_KERNEL = [
 export function unresolvedConflicts(state) {
   const generated = state.runtime.conflicts;
   const persisted = (state.envelope.conflicts ?? []).filter((conflict) => conflict.status === 'unresolved');
-  return [...generated, ...persisted];
+  const remaining = new Set(persisted.keys());
+  const resolved = generated.map((conflict) => {
+    const key = generatedConflictKey(conflict);
+    if (key === null) return conflict;
+    const persistedIndex = persisted.findIndex((candidate, index) =>
+      remaining.has(index) && generatedConflictKey(candidate) === key);
+    if (persistedIndex === -1) return conflict;
+    remaining.delete(persistedIndex);
+    return persisted[persistedIndex];
+  });
+  for (const index of remaining) resolved.push(persisted[index]);
+  return resolved;
+}
+
+function generatedConflictKey(conflict) {
+  if (conflict.kind !== 'decision-domain' && conflict.kind !== 'priority-contention') return null;
+  const ids = conflict.candidates.map((candidate) => candidate.assertion_id).sort();
+  return `${conflict.kind}\u0000${conflict.domain ?? ''}\u0000${ids.join('\u0000')}`;
 }
 
 export function renderKernel(state, inputs = {}) {
@@ -29,11 +46,12 @@ export function renderKernel(state, inputs = {}) {
     '# ACP CONTINUITY KERNEL',
     `Snapshot: ${inputs.snapshotId ?? state.envelope.snapshot_id}`,
     `Repository: ${compatibility.status} (${compatibility.actionable ? 'actionable' : 'not actionable'})`,
+    `Trust: ${oneLine(state.envelope.trust.level)} (${state.envelope.trust.reasons.map(oneLine).join('; ')})`,
     ...(projection ? ['STALE HISTORY: repository-dependent assertions and next actions are non-authoritative.'] : []),
     `Phase: ${state.envelope.phase}`,
     `Objective: ${oneLine(state.envelope.goal.current_objective)}`,
     ...conflicts.map(conflictLine),
-    ...blockers.map((item) => `${authorityLabel(item.id, projection)}BLOCKER: ${oneLine(item.text)}`),
+    ...blockers.map((item) => `${authorityLabel(item, projection)}BLOCKER: ${oneLine(item.text)}`),
   ].join('\n');
 
   if (byteLength(mandatory) > BUDGET) return UNSAFE_KERNEL;
@@ -49,8 +67,8 @@ export function renderKernel(state, inputs = {}) {
 
 function optionalSections(state, projection) {
   return [
-    section(activeItems(state, 'risks').map((item) => `${authorityLabel(item.id, projection)}RISK: ${oneLine(item.text)}`)),
-    section(activeItems(state, 'decisions').map((item) => `${authorityLabel(item.id, projection)}DECISION [${oneLine(item.domain)}]: ${oneLine(item.text)}`)),
+    section(activeItems(state, 'risks').map((item) => `${authorityLabel(item, projection)}RISK: ${oneLine(item.text)}`)),
+    section(activeItems(state, 'decisions').map((item) => `${authorityLabel(item, projection)}DECISION [${oneLine(item.domain)}]: ${oneLine(item.text)}`)),
     section([`Stance: confidence=${state.envelope.working_stance.confidence}, momentum=${state.envelope.working_stance.momentum}, risk=${state.envelope.working_stance.risk_posture}`]),
     section(nextActionLine(state, projection)),
     referenceSection(state, projection),
@@ -63,7 +81,7 @@ function nextActionLine(state, projection) {
     .filter((item) => !suppressed.has(item.id))
     .slice()
     .sort((left, right) => priorityOf(left) - priorityOf(right) || compareText(left.id, right.id));
-  return actions.length ? [`NEXT: ${oneLine(actions[0].text)}`] : [];
+  return actions.length ? [`${authorityLabel(actions[0], projection)}NEXT: ${oneLine(actions[0].text)}`] : [];
 }
 
 function referenceSection(state, projection) {
@@ -75,8 +93,11 @@ function referenceSection(state, projection) {
   return section(refs);
 }
 
-function authorityLabel(id, projection) {
-  return new Set(projection?.nonAuthoritativeAssertionIds || []).has(id) ? 'NON-AUTHORITATIVE ' : '';
+function authorityLabel(item, projection) {
+  const labels = [];
+  if (new Set(projection?.nonAuthoritativeAssertionIds || []).has(item.id)) labels.push('NON-AUTHORITATIVE');
+  if (!Array.isArray(item.provenance) || item.provenance.length === 0) labels.push('UNVERIFIED');
+  return labels.length ? `${labels.join(' ')} ` : '';
 }
 
 function conflictLine(conflict) {

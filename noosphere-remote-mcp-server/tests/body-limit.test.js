@@ -59,6 +59,16 @@ describe('request body size limit', () => {
     } finally { await h.close(); }
   });
 
+  it('rejects malformed UTF-8 even when replacement decoding would form valid JSON', async () => {
+    const h = await startServer({ maxBodyBytes: LIMIT });
+    try {
+      const body = Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0xc3, 0x28, 0x22, 0x7d]);
+      const res = await post(h.mcpUrl, await h.token(), body);
+      assert.equal(res.status, 400);
+      assert.equal((await res.json()).error, 'invalid-json');
+    } finally { await h.close(); }
+  });
+
   it('does not reach tool/service dispatch after a 413 rejection', async () => {
     const { proxy, calls } = recordingRepository();
     const h = await startServer({ maxBodyBytes: LIMIT, repository: proxy });

@@ -95,6 +95,16 @@ The installer supports macOS, Linux, and Windows. It:
 - installs per-user relayer and project-manager background services;
 - adds activation hooks for zsh, bash, fish, and PowerShell.
 
+On Windows, the installer creates the all-host profiles for PowerShell 7 and
+Windows PowerShell when they do not exist. Directory activation is asynchronous
+and hidden, and re-sourcing a profile does not register a second location
+handler. Task Scheduler runs the relayer and manager through hidden wrappers,
+checks their working directories, records logs under `~/.noosphere/logs/`, and
+restarts a failed task after one minute. A visible PowerShell window during
+normal activation is therefore a stale-install or environment symptom; rerun
+the installer, restart existing shells, and inspect `noosphere doctor` plus the
+service logs.
+
 When a terminal enters a Git repository, the hook runs
 `noosphere activate --quiet`. The command discovers the repository root,
 initializes Noosphere if needed, and registers it with the project manager.
@@ -491,8 +501,18 @@ extends the same state across machines.
 Protocol semantics — validation rules, freshness classification, kernel
 budgets, and exact-sync requirements — live in [docs/ACP.md](../docs/ACP.md).
 
-The Claude Code SessionEnd hook remains available for richer reasoning
-summaries. File checkpoints preserve work state; the hook preserves intent.
+The Claude Code `SessionEnd` hook remains available for richer reasoning
+summaries. It writes the bounded local project journal before any optional
+upload, honors `privacy.share_journal`, and does not fall back to a global
+summary when no activated project can be identified. Journal appends use an
+owner-only process lock; after a killed hook, the next hook can recover that
+lock only when its recorded owner is proven dead. File checkpoints preserve
+work state; the hook preserves intent. Long JSONL transcripts are read from a
+secure bounded tail, so exceeding 8 MiB no longer discards the final assistant
+summary. A malformed project configuration still permits the local handoff but
+suppresses upload, and a local write failure exits visibly because `SessionEnd`
+cannot block termination. Reinstalling collapses duplicate current and legacy
+hook registrations while preserving unrelated Claude hooks.
 
 Agents should never be asked to reveal hidden chain-of-thought. The public
 work journal captures only conclusions, evidence, attempted approaches, and

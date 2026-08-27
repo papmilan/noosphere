@@ -45,11 +45,24 @@ export function npmCommand(platform = process.platform) {
 }
 
 /**
+ * Keep background child processes from allocating a visible console window.
+ * `windows` is the installer's test-platform spelling; Node reports `win32`.
+ */
+export function windowsProcessOptions(platform = process.platform) {
+  return {
+    windowsHide: platform === 'win32' || platform === 'windows',
+  };
+}
+
+/**
  * Options to merge into child_process spawn/execFile when invoking an
  * npm-style shim. On Windows, Node refuses to spawn .cmd/.bat files
  * directly since the 18.20.2/20.12.2/21.7.3 CVE-2024-27980 mitigation
  * unless `shell: true` is set. POSIX hosts don't need it.
  */
 export function npmSpawnOptions(platform = process.platform) {
-  return { shell: platform === 'win32' };
+  return {
+    shell: platform === 'win32',
+    ...windowsProcessOptions(platform),
+  };
 }

@@ -95,12 +95,69 @@ describe('applyUpdate', () => {
     assert.equal(result.conflicts.length, 0);
   });
 
+  it('rejects a fast-forward that switches repository identity', () => {
+    const current = state({ decisions: [decision('d1', 'SQLite')] });
+    const update = state({
+      decisions: [decision('d9', 'Foreign state')],
+      parent_snapshot_id: current.envelope.snapshot_id,
+      repository: {
+        ...current.envelope.repository,
+        project_id: 'foreign-project',
+        root_identity: `sha256:${'f'.repeat(64)}`,
+      },
+    });
+    const result = applyUpdate(current, update, inputs);
+    assert.equal(result.ok, false);
+    assert.equal(result.errors.some(({ code }) => code === 'foreign-project'), true);
+  });
+
   it('appends distinct new assertions from a stale update', () => {
     const current = state({ assumptions: [{ id: 'a1', text: 'X', status: 'active', confidence: 'low', provenance: ['r1'], created_at: CREATED_AT, expires_at: null, repository_fingerprint: null, supersedes: [] }] });
     const update = state({ assumptions: [{ id: 'a2', text: 'Y', status: 'active', confidence: 'low', provenance: ['r1'], created_at: CREATED_AT, expires_at: null, repository_fingerprint: null, supersedes: [] }] });
     const result = applyUpdate(current, update, inputs);
     assert.equal(result.ok, true);
     assert.deepEqual(result.state.runtime.activeByType.assumptions, ['a1', 'a2']);
+  });
+
+  it('creates a digest-valid direct descendant when synthesizing a stale merge', () => {
+    const current = state({ assumptions: [{ id: 'a1', text: 'X', status: 'active', confidence: 'low', provenance: ['r1'], created_at: CREATED_AT, expires_at: null, repository_fingerprint: null, supersedes: [] }] });
+    const update = state({ assumptions: [{ id: 'a2', text: 'Y', status: 'active', confidence: 'low', provenance: ['r1'], created_at: CREATED_AT, expires_at: null, repository_fingerprint: null, supersedes: [] }] });
+    const result = applyUpdate(current, update, inputs);
+    assert.equal(result.ok, true);
+    const { envelope: merged } = result.state;
+    assert.equal(merged.parent_snapshot_id, current.envelope.snapshot_id);
+    assert.equal(merged.integrity.digest, digestEnvelope(merged));
+    assert.equal(merged.snapshot_id, `sha256:${merged.integrity.digest}`);
+  });
+
+  it('does not launder unverified stale input through a verified current envelope', () => {
+    const current = state({
+      assumptions: [{ id: 'a1', text: 'X', status: 'active', confidence: 'low', provenance: ['r1'], created_at: CREATED_AT, expires_at: null, repository_fingerprint: null, supersedes: [] }],
+      trust: { level: 'shared-verified', reasons: ['signed upstream'] },
+      integrity: {
+        algorithm: 'sha256',
+        digest: '0'.repeat(64),
+        signature: { status: 'signed', algorithm: 'ed25519', key_id: 'key-1', value: 'signature' },
+      },
+    });
+    const update = state({ assumptions: [{ id: 'a2', text: 'Y', status: 'active', confidence: 'low', provenance: ['r1'], created_at: CREATED_AT, expires_at: null, repository_fingerprint: null, supersedes: [] }] });
+    const result = applyUpdate(current, update, inputs);
+    assert.equal(result.ok, true);
+    assert.equal(result.state.envelope.trust.level, 'local-unverified');
+    assert.equal(result.state.envelope.integrity.signature.status, 'unsigned');
+  });
+
+  it('contests a changed reference and rejects assertions that rely on it', () => {
+    const current = state({ references: [{ id: 'r1', kind: 'file', locator: 'README.md' }] });
+    const update = state({
+      references: [{ id: 'r1', kind: 'external', locator: 'https://example.invalid/untrusted' }],
+      assumptions: [{ id: 'a2', text: 'Based on changed reference', status: 'active', confidence: 'low', provenance: ['r1'], created_at: CREATED_AT, expires_at: null, repository_fingerprint: null, supersedes: [] }],
+    });
+    const result = applyUpdate(current, update, inputs);
+    assert.equal(result.ok, true);
+    assert.equal(result.conflicts.some((conflict) => conflict.kind === 'reference-modified'), true);
+    assert.equal(result.state.runtime.byId.a2, undefined);
+    assert.equal(result.state.runtime.referencesById.r1.locator, 'README.md');
   });
 
   it('creates a conflict when a stale update changes an existing assertion', () => {
@@ -123,7 +180,7 @@ describe('applyUpdate', () => {
     const current = state({ next_actions: [nextAction('n1', 'Ship A')] });
     const update = state({ next_actions: [nextAction('n2', 'Ship B')] });
     const result = applyUpdate(current, update, inputs);
-    assert.equal(result.conflicts.some((c) => c.kind === 'priority-contention'), true);
+    assert.equal(result.conflicts.filter((conflict) => conflict.kind === 'priority-contention').length, 1);
   });
 
   it('is deterministic for repeated identical merges', () => {

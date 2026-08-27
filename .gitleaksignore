@@ -1,0 +1,2 @@
+# False positive: ordinary test-plan prose beginning "conflicting-key reuse".
+b4a7c33bdbd1e12a490e86f74e86dc4876203b68:noosphere-local-mcp/tests/transport-parity.test.js:generic-api-key:37

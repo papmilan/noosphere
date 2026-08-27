@@ -5,6 +5,7 @@
 import { createHash } from 'node:crypto';
 import { open, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { TextDecoder } from 'node:util';
 import { canonicalize } from '@noosphere/acp-protocol';
 import { createExecutionState } from './execution-state.js';
 import { renderExecutionKernel } from './execution-render.js';
@@ -18,6 +19,7 @@ import {
 
 const DEFAULT_AGENT_ID = 'default';
 const AGENT_ID = /^[a-z0-9](?:[a-z0-9-]{0,62})?$/;
+const UTF8 = new TextDecoder('utf-8', { fatal: true });
 
 export function canonicalAgentId(value = DEFAULT_AGENT_ID) {
   if (typeof value !== 'string' || value.normalize('NFC') !== value) throw executionError('invalid-agent-id');
@@ -48,7 +50,12 @@ export async function readExecutionState(root, options = {}) {
   const { json } = executionPaths(root, options.agentId);
   const bytes = await readOwnerOnlyFile(json, secureOptions(root, options));
   if (bytes === null) return null;
-  const raw = bytes.toString('utf8');
+  let raw;
+  try {
+    raw = UTF8.decode(bytes);
+  } catch {
+    return { ok: false, errors: [{ path: '$', code: 'invalid-utf8', message: 'execution checkpoint is not valid UTF-8' }] };
+  }
   let envelope;
   try { envelope = JSON.parse(raw); } catch {
     return { ok: false, errors: [{ path: '$', code: 'malformed-json', message: 'execution checkpoint is not valid JSON' }] };
