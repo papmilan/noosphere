@@ -316,7 +316,7 @@ jobs:
           extra_args: --only-verified
 
       - name: Build production image
-        run: docker build -t noosphere-relayer:test noosphere-relayer
+        run: node scripts/docker-build.mjs relayer --tag noosphere-relayer:test
 
       - name: Scan production image
         uses: aquasecurity/trivy-action@v0.36.0

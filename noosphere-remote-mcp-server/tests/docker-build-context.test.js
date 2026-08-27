@@ -3,10 +3,12 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:f
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { stageDockerBuildContext } from '../../scripts/docker-build.mjs';
 
 const temporary = [];
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 after(async () => {
   for (const directory of temporary) {
     await rm(directory, { recursive: true, force: true }).catch(() => undefined);
@@ -95,4 +97,20 @@ test('stages the relayer plus secure-fs from repository root and refuses source 
   );
   assert.equal(await readFile(path.join(destination, '.dockerignore'), 'utf8'), 'node_modules\n');
   assert.equal(await exists(path.join(destination, 'index.js')), false);
+});
+
+test('CI builds the relayer through the repository-root sanitized context', async () => {
+  const workflow = await readFile(
+    path.join(repositoryRoot, '.github', 'workflows', 'ci.yml'),
+    'utf8',
+  );
+
+  assert.match(
+    workflow,
+    /run: node scripts\/docker-build\.mjs relayer --tag noosphere-relayer:test/,
+  );
+  assert.doesNotMatch(
+    workflow,
+    /run: docker build -t noosphere-relayer:test noosphere-relayer/,
+  );
 });
