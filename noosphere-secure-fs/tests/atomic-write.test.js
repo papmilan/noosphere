@@ -470,6 +470,46 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
     await assert.rejects(fsp.access(file));
   });
 
+  // Reclaiming means deleting another process's lock, so "not alive" has to mean
+  // the OS said the process is gone — not merely that asking about it failed.
+  // EPERM is the answer for a process that exists but belongs to another user;
+  // treating any signal failure as death would reclaim a live owner's lock and
+  // let two writers into the same critical section.
+  it('never reclaims an append lock owned by a process it may not signal', async (t) => {
+    let unsignalable = null;
+    try {
+      process.kill(1, 0);
+    } catch (error) {
+      if (error.code === 'EPERM') unsignalable = 1;
+    }
+    if (unsignalable === null) {
+      t.diagnostic('no live-but-unsignalable process is available to this user');
+      return;
+    }
+
+    const root = await fresh();
+    const file = path.join(root, 'journal.md');
+    const lock = `${file}.append.lock`;
+    const contents = JSON.stringify({
+      pid: unsignalable,
+      token: '00000000-0000-4000-8000-00000000000e',
+      created_at: Date.now(),
+    });
+    await fsp.writeFile(lock, contents);
+
+    await assert.rejects(
+      appendRepositoryFile(file, 'must-not-land\n', {
+        root,
+        maxBytes: 1024,
+        lockAttempts: 3,
+        lockBackoffMs: 1,
+      }),
+      (error) => error.code === 'state-append-busy',
+    );
+    assert.equal(await fsp.readFile(lock, 'utf8'), contents);
+    await assert.rejects(fsp.access(file));
+  });
+
   it('never reclaims malformed append-lock metadata merely because it is old', async () => {
     const root = await fresh();
     const file = path.join(root, 'journal.md');

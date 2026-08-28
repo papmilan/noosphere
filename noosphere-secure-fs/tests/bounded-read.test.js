@@ -286,4 +286,42 @@ describe('readBoundedRegularFileTail', () => {
       );
     }
   });
+
+  // The caller of this read is a SessionEnd hook pointed at a transcript the
+  // agent is still appending to, so a writer racing the read is the ordinary
+  // case rather than an exotic one. Every positional read still succeeds while
+  // a file grows underneath it, so the byte count cannot reveal the change —
+  // only re-observing the file's size and mtime can. Failing closed lets the
+  // caller retry or degrade; returning the window silently would hand back a
+  // tail whose end had already moved.
+  //
+  // The race is not deterministic per attempt, so this repeats and asserts that
+  // the change was detected at least once. A build where detection is broken
+  // never sees it, no matter how many attempts it gets.
+  test('refuses a tail whose file grew while it was being read', async () => {
+    const dir = temporaryDirectory();
+    const file = path.join(dir, 'growing-transcript.jsonl');
+    const megabyte = 1024 * 1024;
+    let detected = null;
+
+    for (let attempt = 0; attempt < 10 && detected === null; attempt += 1) {
+      fs.writeFileSync(file, Buffer.alloc(24 * megabyte, 0x61));
+      let appending = true;
+      const appender = (async () => {
+        while (appending) await fs.promises.appendFile(file, 'x'.repeat(4096));
+      })();
+      try {
+        await readBoundedRegularFileTail(file, { maxBytes: 16 * megabyte });
+      } catch (error) {
+        if (error.code !== 'state-file-changed') throw error;
+        detected = error;
+      } finally {
+        appending = false;
+        await appender;
+      }
+    }
+
+    assert.ok(detected, 'a tail read that raced an appender was never refused');
+    assert.equal(detected.code, 'state-file-changed');
+  });
 });
