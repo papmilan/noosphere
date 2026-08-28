@@ -41,6 +41,32 @@ describe('Project Memory core primitives', () => {
     assert.throws(() => requestHash({ values: sparse }), /invalid-canonical-json/);
   });
 
+  it('rejects values whose own properties are not their whole content', () => {
+    // Dates, Maps, Sets, and class instances carry state that Object.keys cannot
+    // see. Canonicalizing them by their own enumerable properties would hash two
+    // distinct values to one string — every Date to `{}` — which at a request-hash
+    // trust boundary means one request's result answering a different request.
+    class Marker {
+      constructor(value) {
+        this.value = value;
+      }
+    }
+
+    for (const [label, left, right] of [
+      ['Date', new Date(0), new Date(999)],
+      ['Map', new Map([['a', 1]]), new Map([['b', 2]])],
+      ['Set', new Set([1]), new Set([2])],
+      ['class instance', new Marker(1), new Marker(2)],
+    ]) {
+      assert.throws(() => canonicalJson(left), /invalid-canonical-json/, `${label} was canonicalized`);
+      assert.throws(() => requestHash({ value: right }), /invalid-canonical-json/, `${label} was hashed`);
+    }
+
+    // A null-prototype object is still exactly its own properties, so it stays
+    // canonicalizable and must agree with the plain-object form.
+    assert.equal(canonicalJson(Object.assign(Object.create(null), { b: 2, a: 1 })), '{"a":1,"b":2}');
+  });
+
   it('rejects cycles but permits the same acyclic value to appear twice', () => {
     const cycle = {};
     cycle.self = cycle;

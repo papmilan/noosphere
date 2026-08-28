@@ -1201,12 +1201,26 @@ async function staleAppendLock(lock, root, platform) {
   return !processIsAlive(observed.record.pid);
 }
 
-async function processGuardState(guard) {
-  const info = await lstat(guard).catch((error) => {
-    if (error.code === 'ENOENT') return null;
+// Windows reports a directory that is pending deletion as a sharing error
+// rather than as ENOENT, and the fixed guard path is pending deletion for a
+// window on every successful recovery and release. The rest of this file
+// already classifies these codes as contention — appendLockContention and
+// processGuardContention both do — so letting one escape the guard inspection
+// fails the whole append instead of retrying it. POSIX keeps them fatal, where
+// they mean a real permission fault rather than a transient one.
+function guardDirectoryContention(error, platform) {
+  return platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(error?.code);
+}
+
+async function processGuardState(guard, platform, openDirectory) {
+  let info;
+  try {
+    info = await lstat(guard);
+  } catch (error) {
+    if (error.code === 'ENOENT') return Object.freeze({ kind: 'missing' });
+    if (guardDirectoryContention(error, platform)) return Object.freeze({ kind: 'contended' });
     throw error;
-  });
-  if (info === null) return Object.freeze({ kind: 'missing' });
+  }
   if (info.isSymbolicLink() || !info.isDirectory()) {
     return Object.freeze({ kind: 'unsafe' });
   }
@@ -1214,13 +1228,14 @@ async function processGuardState(guard) {
   const entries = [];
   let directory;
   try {
-    directory = await opendir(guard);
+    directory = await openDirectory(guard);
     for await (const entry of directory) {
       entries.push(entry);
       if (entries.length > 2) break;
     }
   } catch (error) {
     if (error.code === 'ENOENT') return Object.freeze({ kind: 'missing' });
+    if (guardDirectoryContention(error, platform)) return Object.freeze({ kind: 'contended' });
     throw error;
   } finally {
     await directory?.close().catch((error) => {
@@ -1268,9 +1283,13 @@ async function processGuardState(guard) {
   });
 }
 
-async function recoverProcessGuard(guard) {
-  const state = await processGuardState(guard);
+async function recoverProcessGuard(guard, platform, openDirectory) {
+  const state = await processGuardState(guard, platform, openDirectory);
   if (state.kind === 'missing') return true;
+  // A guard the platform will not let us inspect right now is not evidence of a
+  // dead owner. Report no progress so the caller backs off and tries again,
+  // rather than either reclaiming blind or failing the append outright.
+  if (state.kind === 'contended') return false;
   if (state.kind === 'unsafe') {
     throw new PathBoundaryError(
       'state-process-guard-unsafe',
@@ -1337,6 +1356,8 @@ async function cleanupProcessGuardCandidate(candidate, marker) {
 // non-empty.
 export async function tryAcquireOwnerProcessGuard(guard, options = {}) {
   const resolved = rootAndDirectory(guard, options.root);
+  const platform = options.platform ?? process.platform;
+  const openDirectory = options.opendir ?? opendir;
   await ensureContainedDir(resolved.root, resolved.directory, {
     mode: options.directoryMode ?? 0o700,
   });
@@ -1352,11 +1373,16 @@ export async function tryAcquireOwnerProcessGuard(guard, options = {}) {
         await rename(candidate, resolved.file);
       } catch (error) {
         if (!processGuardContention(error)) throw error;
-        const existing = await lstat(resolved.file).catch((readError) => {
-          if (readError.code === 'ENOENT') return null;
+        let existing;
+        try {
+          existing = await lstat(resolved.file);
+        } catch (readError) {
+          if (readError.code === 'ENOENT') continue;
+          // Same transient sharing state as inside the guard inspection: report
+          // no acquisition so the caller backs off, rather than throwing.
+          if (guardDirectoryContention(readError, platform)) return null;
           throw readError;
-        });
-        if (existing === null) continue;
+        }
         if (existing.isSymbolicLink() || !existing.isDirectory()) {
           throw new PathBoundaryError(
             'state-process-guard-unsafe',
@@ -1364,7 +1390,7 @@ export async function tryAcquireOwnerProcessGuard(guard, options = {}) {
             error,
           );
         }
-        if (await recoverProcessGuard(resolved.file)) continue;
+        if (await recoverProcessGuard(resolved.file, platform, openDirectory)) continue;
         return null;
       }
 
@@ -1412,7 +1438,7 @@ export async function tryAcquireOwnerProcessGuard(guard, options = {}) {
 // deleted. Serialize reclaimers behind the crash-recoverable process guard and
 // repeat the staleness decision while that guard is held.
 async function reclaimStaleAppendLock(lock, root, platform) {
-  const guard = await tryAcquireOwnerProcessGuard(`${lock}.reclaim`, { root });
+  const guard = await tryAcquireOwnerProcessGuard(`${lock}.reclaim`, { root, platform });
   if (guard === null) return false;
   try {
     if (!(await staleAppendLock(lock, root, platform))) return false;

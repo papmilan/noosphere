@@ -103,6 +103,48 @@ describe('bounded MCP transport sessions', () => {
       await h.close();
     }
   });
+
+  // The owner scope is fixed at initialize and the session id then travels in a
+  // plain header. A second owner's token is valid on its own terms, so nothing
+  // upstream of this check stops it from presenting someone else's session id
+  // and driving that session — including tool calls against the first owner's
+  // projects. Authentication alone does not decide this; the binding does.
+  it('refuses a session driven by a different owner than the one that opened it', async () => {
+    const h = await startServer();
+    try {
+      const alice = await h.token({ sub: 'alice' });
+      const bob = await h.token({ sub: 'bob' });
+      const { response, sessionId } = await initialize(h, alice);
+      assert.equal(response.status, 200);
+      assert.ok(sessionId);
+
+      // Bob authenticates successfully, then presents Alice's session id.
+      const hijacked = await postMcp(h, bob, {
+        jsonrpc: '2.0', id: 2, method: 'tools/list', params: {},
+      }, sessionId);
+      assert.equal(hijacked.status, 403);
+      assert.deepEqual(await hijacked.json(), { error: 'session-owner-mismatch' });
+
+      // A tool call is the payload that matters: refusing tools/list but serving
+      // this would leave the boundary open where it counts.
+      const called = await postMcp(h, bob, {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: { name: 'list_projects', arguments: {} },
+      }, sessionId);
+      assert.equal(called.status, 403);
+      assert.deepEqual(await called.json(), { error: 'session-owner-mismatch' });
+
+      // The rejection must not have disturbed Alice's session.
+      assert.equal(h.server.sessions.size, 1);
+      assert.equal((await postMcp(h, alice, {
+        jsonrpc: '2.0', id: 4, method: 'tools/list', params: {},
+      }, sessionId)).status, 200);
+    } finally {
+      await h.close();
+    }
+  });
 });
 
 describe('cursor key lifecycle', () => {

@@ -125,15 +125,36 @@ async function writeHookLauncher(destination, source) {
   );
 }
 
+// A group carrying a matcher only runs for that matcher; a group without one
+// runs for every occurrence of the event.
+function unscopedGroup(group) {
+  return typeof group.matcher !== 'string' || group.matcher === '';
+}
+
 function upsertHookList(existing, entry, isManagedCommand) {
   if (existing !== undefined && !Array.isArray(existing)) {
     throw new Error('a Claude hook event must be an array; the existing settings file was not changed.');
   }
   const list = existing || [];
+  const managed = [];
+  for (let index = 0; index < list.length; index += 1) {
+    const group = list[index];
+    if (!group || typeof group !== 'object' || !Array.isArray(group.hooks)) continue;
+    if (group.hooks.some((hook) => isManagedCommand(typeof hook?.command === 'string' ? hook.command : ''))) {
+      managed.push(index);
+    }
+  }
+  // Collapsing duplicates must not narrow when the hook runs. Keeping whichever
+  // copy came first would let a matcher-scoped duplicate delete the copy that
+  // runs on every event, silently reducing Noosphere to that one matcher. Prefer
+  // an unscoped group; a scoped one is only kept when it is the sole placement
+  // the owner configured, which is theirs to decide rather than ours to move.
+  const keepIndex = managed.find((index) => unscopedGroup(list[index])) ?? managed[0];
   const updated = [];
   let installed = false;
 
-  for (const group of list) {
+  for (let index = 0; index < list.length; index += 1) {
+    const group = list[index];
     if (!group || typeof group !== 'object' || !Array.isArray(group.hooks)) {
       updated.push(group);
       continue;
@@ -145,7 +166,7 @@ function upsertHookList(existing, entry, isManagedCommand) {
         hooks.push(hook);
         continue;
       }
-      if (!installed) {
+      if (index === keepIndex && !installed) {
         hooks.push({ ...hook, ...entry });
         installed = true;
       }
