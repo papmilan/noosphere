@@ -26,7 +26,20 @@ const settingsPath = path.join(claudeDir, 'settings.json');
 
 const sessionCommand = `"${process.execPath}" "${sessionHookPath}"`;
 const promptCommand = `"${process.execPath}" "${promptHookPath}"`;
+// Both events shipped a bash launcher before the Node one. Reinstalling has to
+// retire each of them, or the retired script keeps running beside its
+// replacement: the legacy prompt hook captures the prompt a second time and
+// injects the pinned master prompt into context twice on every turn.
 const legacySessionCommand = `bash "${path.join(hookDir, 'post-session.sh')}"`;
+const legacyPromptCommand = `bash "${path.join(hookDir, 'capture-prompt.sh')}"`;
+
+// One matcher shape for both events. Keeping these as separate literals is what
+// let SessionEnd retire its bash launcher while UserPromptSubmit did not.
+function managedCommand(current, legacy, scriptPath) {
+  return (candidate) => candidate === current
+    || candidate === legacy
+    || candidate.includes(`"${scriptPath}"`);
+}
 
 const sessionEntry = {
   type: 'command',
@@ -81,14 +94,12 @@ async function main() {
   settings.hooks.UserPromptSubmit = upsertHookList(
     settings.hooks.UserPromptSubmit,
     promptEntry,
-    (candidate) => candidate === promptCommand || candidate.includes(`"${promptHookPath}"`),
+    managedCommand(promptCommand, legacyPromptCommand, promptHookPath),
   );
   settings.hooks.SessionEnd = upsertHookList(
     settings.hooks.SessionEnd,
     sessionEntry,
-    (candidate) => candidate === sessionCommand ||
-      candidate === legacySessionCommand ||
-      candidate.includes(`"${sessionHookPath}"`),
+    managedCommand(sessionCommand, legacySessionCommand, sessionHookPath),
   );
 
   const temporaryPath = `${settingsPath}.${randomUUID()}.tmp`;
