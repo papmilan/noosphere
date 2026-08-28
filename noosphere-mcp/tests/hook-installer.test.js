@@ -105,6 +105,52 @@ describe('Claude hook installer', () => {
     assert.deepEqual(scoped.hooks.map((hook) => hook.command), ['session-other']);
   });
 
+  // Both events shipped a bash launcher before the Node one, and a retired
+  // launcher left in settings keeps running beside its replacement — the prompt
+  // one captures the prompt twice and injects the pinned master prompt into
+  // context twice per turn. Asserted for both events together, because the
+  // defect was that SessionEnd retired its launcher and UserPromptSubmit did not.
+  it('retires the bash launcher of every event, not just SessionEnd', async () => {
+    const home = await homeWithSettings({ hooks: {} });
+    const settingsPath = path.join(home, 'settings.json');
+    const legacyOf = (script) => `bash "${path.join(home, 'hooks', 'noosphere', script)}"`;
+    const legacy = {
+      UserPromptSubmit: legacyOf('capture-prompt.sh'),
+      SessionEnd: legacyOf('post-session.sh'),
+    };
+    const unrelated = { type: 'command', command: 'keep-me', timeout: 2 };
+    await writeFile(settingsPath, `${JSON.stringify({
+      hooks: {
+        UserPromptSubmit: [{ hooks: [{ type: 'command', command: legacy.UserPromptSubmit }, unrelated] }],
+        SessionEnd: [{ hooks: [{ type: 'command', command: legacy.SessionEnd }] }],
+      },
+    }, null, 2)}\n`);
+
+    await install(home);
+    const installed = JSON.parse(await readFile(settingsPath, 'utf8'));
+
+    for (const [event, script] of [
+      ['UserPromptSubmit', 'capture-prompt.js'],
+      ['SessionEnd', 'post-session.js'],
+    ]) {
+      const commands = (installed.hooks[event] || [])
+        .flatMap((group) => group.hooks || [])
+        .map((hook) => hook.command);
+      assert.ok(
+        !commands.includes(legacy[event]),
+        `${event}: the retired bash launcher still runs beside its replacement`,
+      );
+      assert.equal(noosphereHooks(installed, event, script).length, 1, `${event}: not exactly one hook`);
+    }
+
+    // Retiring a launcher must not take an unrelated hook with it.
+    assert.equal(
+      installed.hooks.UserPromptSubmit.flatMap((group) => group.hooks || [])
+        .filter((hook) => hook.command === 'keep-me').length,
+      1,
+    );
+  });
+
   it('leaves a solely matcher-scoped hook where the owner put it', async () => {
     const home = await homeWithSettings({ hooks: {} });
     const settingsPath = path.join(home, 'settings.json');
