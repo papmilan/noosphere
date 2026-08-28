@@ -8,6 +8,7 @@ import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { encodeEnvelope } from '@noosphere/acp-protocol';
+import { testBudgetMs } from './child-process.js';
 
 const execFileAsync = promisify(execFile);
 const mcpRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -265,8 +266,9 @@ async function freePort() {
 }
 
 async function waitFor(probe, timeout = 8_000) {
+  const budgetMs = testBudgetMs(timeout);
   const started = Date.now();
-  while (Date.now() - started < timeout) {
+  while (Date.now() - started < budgetMs) {
     const value = await probe();
     if (value) return value;
     await new Promise((resolve) => setTimeout(resolve, 50));
