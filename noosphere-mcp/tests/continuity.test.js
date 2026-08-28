@@ -16,7 +16,7 @@ import { after, before, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { waitForChild } from './child-process.js';
+import { testBudgetMs, waitForChild } from './child-process.js';
 import { RECONCILIATION_POLICY_VERSION, SYNC_PROTOCOL_VERSION, digestHeadSet } from '@noosphere/acp-protocol';
 
 const execFileAsync = promisify(execFile);
@@ -25,7 +25,7 @@ const packageRoot = path.resolve(
   '..',
 );
 const cli = path.join(packageRoot, 'continuity', 'index.js');
-const CLI_TIMEOUT_MS = 8_000;
+const CLI_TIMEOUT_MS = testBudgetMs(8_000);
 
 let server;
 let serverUrl;
@@ -951,10 +951,13 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+// Scaled here rather than at each call site, so every wait — including any
+// added later — gets the platform budget without anyone remembering to ask.
 async function waitFor(predicate, timeoutMs) {
+  const budgetMs = testBudgetMs(timeoutMs);
   const started = Date.now();
   while (!predicate()) {
-    if (Date.now() - started > timeoutMs) {
+    if (Date.now() - started > budgetMs) {
       throw new Error('Timed out waiting for watcher checkpoint');
     }
     await delay(50);

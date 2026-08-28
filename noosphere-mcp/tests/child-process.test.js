@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { after, describe, it } from 'node:test';
 
-import { waitForChild } from './child-process.js';
+import { testBudgetMs, waitForChild } from './child-process.js';
 
 const children = [];
 
@@ -101,3 +101,31 @@ function waitForOutput(stream, expected) {
     });
   });
 }
+
+describe('testBudgetMs', () => {
+  it('scales the budget on the slow platform and leaves others alone', () => {
+    const env = {};
+    assert.equal(testBudgetMs(8_000, { platform: 'linux', env }), 8_000);
+    assert.equal(testBudgetMs(8_000, { platform: 'darwin', env }), 8_000);
+    assert.equal(testBudgetMs(8_000, { platform: 'win32', env }), 32_000);
+  });
+
+  it('lets an explicit scale shrink a budget so a give-up path is provable', () => {
+    // The reason for an override at all: proving a timeout fires should not
+    // require waiting out the real budget.
+    const env = { NOOSPHERE_TEST_TIMEOUT_SCALE: '0.01' };
+    assert.equal(testBudgetMs(8_000, { platform: 'linux', env }), 80);
+    // An explicit scale wins on every platform, including the slow one.
+    assert.equal(testBudgetMs(8_000, { platform: 'win32', env }), 80);
+  });
+
+  it('ignores an unusable scale rather than producing a nonsense budget', () => {
+    for (const value of ['0', '-1', 'soon', '', 'NaN', 'Infinity']) {
+      assert.equal(
+        testBudgetMs(8_000, { platform: 'linux', env: { NOOSPHERE_TEST_TIMEOUT_SCALE: value } }),
+        8_000,
+        `scale ${JSON.stringify(value)} should have fallen back`,
+      );
+    }
+  });
+});

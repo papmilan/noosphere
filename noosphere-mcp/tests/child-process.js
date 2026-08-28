@@ -1,6 +1,26 @@
 const DEFAULT_TERMINATION_GRACE_MS = 250;
 const DEFAULT_FINAL_CLEANUP_TIMEOUT_MS = 250;
 
+// A wall-clock budget is not portable, so one literal is either flaky on the
+// slowest platform or slow to report a real hang on the fastest. A `noosphere`
+// CLI spawn costs 0.5-3.4s on a Windows CI runner against a fraction of that
+// locally, and a shared runner's tail is far worse than its median: an 8s cap
+// with roughly 5x headroom still expired once on a test whose successful runs
+// finish in 1.7s end to end. Scale with the platform instead of raising the
+// number for everyone — a longer budget costs nothing while tests pass, since
+// it only bounds how quickly a genuine hang is reported.
+const SLOW_PLATFORM_SCALE = 4;
+
+export function testBudgetMs(baseMs, { platform = process.platform, env = process.env } = {}) {
+  // NOOSPHERE_TEST_TIMEOUT_SCALE also shrinks budgets, which is how a
+  // give-up path is provable locally without waiting out the real one.
+  const configured = Number(env.NOOSPHERE_TEST_TIMEOUT_SCALE);
+  const scale = Number.isFinite(configured) && configured > 0
+    ? configured
+    : (platform === 'win32' ? SLOW_PLATFORM_SCALE : 1);
+  return Math.round(baseMs * scale);
+}
+
 export function waitForChild(
   child,
   args,
