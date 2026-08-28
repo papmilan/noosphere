@@ -583,6 +583,45 @@ describe('SEC-05 Phase 4B-R5 — atomicRepositoryWrite has no window a reader ca
     await assert.rejects(fsp.access(`${lock}.reclaim`));
   });
 
+  // Windows reports a directory pending deletion as a sharing error rather than
+  // as ENOENT, and the fixed guard path is pending deletion for a window on
+  // every recovery and release — so concurrent appenders meet this routinely.
+  // Letting the code escape the guard inspection failed the whole append with a
+  // raw EPERM instead of retrying, which is how two concurrency tests broke on
+  // windows-latest while passing everywhere else.
+  //
+  // The real race is not reproducible on demand, so the sharing error is
+  // injected. POSIX must keep treating these codes as fatal, since there they
+  // mean a genuine permission fault rather than a transient one.
+  for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+    it(`treats a Windows ${code} on the guard directory as contention, not failure`, async () => {
+      const root = await fresh();
+      const guard = path.join(root, 'journal.md.append.lock.reclaim');
+      await fsp.mkdir(guard);
+      await fsp.writeFile(path.join(guard, `owner-${process.pid}-00000000-0000-4000-8000-00000000000b`), '');
+
+      const sharingViolation = () => {
+        throw Object.assign(new Error(`sharing violation: ${code}`), { code });
+      };
+
+      assert.equal(
+        await tryAcquireOwnerProcessGuard(guard, {
+          root,
+          platform: 'win32',
+          opendir: sharingViolation,
+        }),
+        null,
+        'a guard that cannot be inspected must read as unacquired',
+      );
+
+      // Same fault on POSIX stays a real error rather than being swallowed.
+      await assert.rejects(
+        tryAcquireOwnerProcessGuard(guard, { root, platform: 'linux', opendir: sharingViolation }),
+        (error) => error.code === code,
+      );
+    });
+  }
+
   it('does not reclaim a process guard owned by a live reclaimer', async () => {
     const root = await fresh();
     const file = path.join(root, 'journal.md');
