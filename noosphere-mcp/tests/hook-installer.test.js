@@ -36,6 +36,16 @@ function noosphereHooks(settings, event, script) {
     .filter((hook) => typeof hook?.command === 'string' && hook.command.includes(script));
 }
 
+// Counting survivors says nothing about when they run. A group's matcher scopes
+// it to one occurrence of the event, so the group the survivor landed in is the
+// part that decides whether the hook still fires on an ordinary session end.
+function noosphereMatchers(settings, event, script) {
+  return (settings.hooks[event] || [])
+    .filter((group) => (Array.isArray(group?.hooks) ? group.hooks : [])
+      .some((hook) => typeof hook?.command === 'string' && hook.command.includes(script)))
+    .map((group) => group.matcher ?? null);
+}
+
 describe('Claude hook installer', () => {
   it('collapses duplicate current and legacy hooks while preserving unrelated hooks', async () => {
     const unrelatedPrompt = { type: 'command', command: 'prompt-other', timeout: 3 };
@@ -84,6 +94,34 @@ describe('Claude hook installer', () => {
       installed.hooks.SessionEnd.flatMap((group) => group.hooks || []).filter((hook) => hook.command === legacySession).length,
       0,
     );
+
+    // The surviving copy must be the unscoped one. Keeping the first duplicate
+    // instead would leave Noosphere running only for `matcher: 'end'`, which
+    // looks identical to every count assertion above.
+    assert.deepEqual(noosphereMatchers(installed, 'SessionEnd', 'post-session.js'), [null]);
+    assert.deepEqual(noosphereMatchers(installed, 'UserPromptSubmit', 'capture-prompt.js'), [null]);
+    // The scoped group keeps its own unrelated hook and its matcher.
+    const scoped = installed.hooks.SessionEnd.find((group) => group.matcher === 'end');
+    assert.deepEqual(scoped.hooks.map((hook) => hook.command), ['session-other']);
+  });
+
+  it('leaves a solely matcher-scoped hook where the owner put it', async () => {
+    const home = await homeWithSettings({ hooks: {} });
+    const settingsPath = path.join(home, 'settings.json');
+    const currentSession = `"${process.execPath}" "${path.join(home, 'hooks', 'noosphere', 'post-session.js')}"`;
+    await writeFile(settingsPath, `${JSON.stringify({
+      hooks: { SessionEnd: [{ matcher: 'clear', hooks: [{ type: 'command', command: currentSession, timeout: 145 }] }] },
+    }, null, 2)}\n`);
+
+    await install(home);
+    const installed = JSON.parse(await readFile(settingsPath, 'utf8'));
+
+    // One placement, deliberately scoped: refreshing it must not silently
+    // relocate it, and must not leave a second copy behind either.
+    assert.deepEqual(noosphereMatchers(installed, 'SessionEnd', 'post-session.js'), ['clear']);
+    const hooks = noosphereHooks(installed, 'SessionEnd', 'post-session.js');
+    assert.equal(hooks.length, 1);
+    assert.equal(hooks[0].timeout, 60);
   });
 
   it('refuses an invalid hooks shape without overwriting the settings file', async () => {

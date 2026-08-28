@@ -114,3 +114,19 @@ test('CI builds the relayer through the repository-root sanitized context', asyn
     /run: docker build -t noosphere-relayer:test noosphere-relayer/,
   );
 });
+
+// deploy.yml builds this image the direct way, so its context is filtered by the
+// repository-root .dockerignore rather than by docker-build.mjs's in-code rules.
+// The Dockerfile copies whole package directories, so an owner-local environment
+// file beside one of them would be baked into a published image.
+test('every Docker context that copies whole package directories excludes environment files', async () => {
+  for (const rel of ['.dockerignore', path.join('noosphere-relayer', 'Dockerfile.dockerignore')]) {
+    const patterns = (await readFile(path.join(repositoryRoot, rel), 'utf8'))
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '' && !line.startsWith('#'));
+    for (const required of ['**/.env', '**/.env.*']) {
+      assert.ok(patterns.includes(required), `${rel}: missing "${required}"`);
+    }
+  }
+});

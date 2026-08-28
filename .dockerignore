@@ -5,6 +5,12 @@
 ._*
 **/.DS_Store
 .DS_Store
+# The server Dockerfile copies whole package directories, so an owner-local
+# environment file beside one of them would otherwise be baked into the image.
+# scripts/docker-build.mjs filters these in code; this covers the direct
+# `docker build -f noosphere-remote-mcp-server/Dockerfile .` path deploy.yml uses.
+**/.env
+**/.env.*
 **/node_modules
 **/tests
 .git
