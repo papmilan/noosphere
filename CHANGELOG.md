@@ -14,6 +14,14 @@ Dates are npm publish dates. The format follows
 
 ### Unreleased
 
+- **`doctor` reports which memory backend is actually serving.** `credentials:
+  true` only ever meant a delegate key was reachable, never that anything used
+  it, so an install with valid Walrus credentials quietly serving `local-file`
+  read as all-green while no memory left the machine. `doctor` now reports
+  `relayer_ready.memory_mode` and `credentials_in_use`, and when credentials are
+  configured but unused it names the setting to change and the restart command
+  for the current platform. Serving `local-file` deliberately stays supported,
+  so the drift is reported without failing the run.
 - **Windows lifecycle reliability.** Background services run through hidden
   WScript launchers with an explicit working directory, bounded logs, liveness
   checks, restart supervision, and coalesced manager passes. PowerShell profile

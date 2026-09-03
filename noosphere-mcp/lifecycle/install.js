@@ -308,8 +308,26 @@ async function doctor() {
     credentials: await configuredCredentials(path.join(installedRelayer, '.env')),
     relayer_ready: await relayerReadiness(path.join(installedRelayer, '.env')),
   };
+  // `credentials: true` only says a delegate key is reachable, never that
+  // anything uses it. Configuring Walrus and then serving local-file is a
+  // supported combination, so it must not fail the run — but it read as
+  // all-green while every memory stayed on one machine, which is why the
+  // backend now appears next to the credential check rather than behind a
+  // separate /ready call.
+  checks.credentials_in_use =
+    checks.credentials && checks.relayer_ready.memory_mode === 'walrus-memory';
 
   console.log(JSON.stringify(checks, null, 2));
+
+  if (checks.credentials && checks.relayer_ready.memory_mode === 'local-file') {
+    console.error(
+      'Warning: Walrus delegate credentials are configured, but the relayer is ' +
+      'serving the local-file backend, so nothing uses them and memory never ' +
+      'leaves this machine.\n' +
+      `To use Walrus: set NOOSPHERE_MEMORY_BACKEND=walrus-memory in ${path.join(installedRelayer, '.env')}, ` +
+      `then restart the relayer:\n  ${restartCommand()}`,
+    );
+  }
 
   if (
     !checks.installed_cli ||
@@ -350,6 +368,11 @@ async function relayerReadiness(envFile) {
       url,
       ok: response.ok,
       memory_ready: body?.memory?.ready ?? null,
+      // Which backend is actually serving, not just that something is. A ready
+      // relayer on local-file and a ready relayer on walrus-memory are the same
+      // `true` here, and the difference is the whole story when memory was
+      // meant to leave this machine. A relayer too old to report it leaves null.
+      memory_mode: body?.memory?.mode ?? null,
       queue_pending: body?.queue?.pending ?? null,
       // A depth alone reads the same whether the queue is draining or stuck.
       // These say which, and `queue_failing` decides the exit code below. A
@@ -367,6 +390,24 @@ async function relayerReadiness(envFile) {
     // for every caller, so the message is already the whole story. Appending
     // the cause again here would print it twice.
     return { url, ok: false, error: error.message };
+  }
+}
+
+// Config changes only take effect on restart, and the command differs per
+// platform. Printing the one for this host beats making the reader find it.
+function restartCommand() {
+  switch (effectivePlatform) {
+    case 'darwin':
+      return `launchctl kickstart -k gui/$(id -u)/${relayerLabel}`;
+    case 'linux':
+      return `systemctl --user restart ${relayerLabel}`;
+    case 'win32':
+    case 'windows':
+      // Two statements rather than one `&&`: PowerShell 5.1, still the default
+      // on Windows 10, parses `&&` as an error rather than a chain.
+      return 'schtasks /End /TN Noosphere\\Relayer\n  schtasks /Run /TN Noosphere\\Relayer';
+    default:
+      return 'restart the Noosphere relayer service';
   }
 }
 
