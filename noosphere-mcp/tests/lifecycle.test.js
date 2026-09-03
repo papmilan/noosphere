@@ -340,7 +340,7 @@ describe('Noosphere macOS lifecycle installer', () => {
     const noosphereHome = path.join(fakeHome, '.noosphere');
     const stub = await readyStub(200, {
       success: true,
-      memory: { ready: true },
+      memory: { ready: true, mode: 'walrus-memory' },
       queue: { pending: 0, failing: 0, max_attempts: 0, last_error: null },
     });
 
@@ -360,10 +360,83 @@ describe('Noosphere macOS lifecycle installer', () => {
         url: stub.url,
         ok: true,
         memory_ready: true,
+        memory_mode: 'walrus-memory',
         queue_pending: 0,
         queue_failing: 0,
         queue_last_error: null,
       });
+    } finally {
+      await stub.close();
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it('doctor says so when configured credentials are not the backend in use', async () => {
+    // Observed on a real install: Walrus credentials were present and valid,
+    // every doctor check read green, and the relayer had been serving
+    // local-file the whole time — so nothing used them and no memory ever left
+    // the machine. `credentials: true` alone cannot distinguish the two, and
+    // finding out cost a /ready call the reader had no reason to make.
+    const fakeHome = await makeFakeHome({ '.zshrc': '' });
+    const noosphereHome = path.join(fakeHome, '.noosphere');
+    const stub = await readyStub(200, {
+      success: true,
+      memory: { ready: true, mode: 'local-file' },
+      queue: { pending: 0, failing: 0, max_attempts: 0, last_error: null },
+    });
+
+    try {
+      await runInstallerOk('install', {
+        ...baseEnv(fakeHome, noosphereHome),
+        NOOSPHERE_TEST_PLATFORM: 'darwin',
+      });
+      // The .env fallback in configuredCredentials, so the check is true on
+      // every platform rather than only where a keychain happens to answer.
+      await writeFile(
+        path.join(noosphereHome, 'app', 'noosphere-relayer', '.env'),
+        `MEMWAL_PRIVATE_KEY=${'a'.repeat(64)}\nMEMWAL_ACCOUNT_ID=0x${'b'.repeat(64)}\n`,
+      );
+
+      const { stdout, stderr, code } = await runInstaller('doctor', {
+        ...baseEnv(fakeHome, noosphereHome),
+        NOOSPHERE_TEST_PLATFORM: 'darwin',
+        NOOSPHERE_RELAYER_URL: stub.url,
+      });
+
+      const checks = JSON.parse(stdout);
+      assert.equal(checks.credentials, true, 'credentials really are configured');
+      assert.equal(checks.relayer_ready.memory_mode, 'local-file');
+      assert.equal(
+        checks.credentials_in_use,
+        false,
+        'configured is not the same as used, and doctor must say which',
+      );
+      assert.match(stderr, /local-file/);
+      assert.match(stderr, /NOOSPHERE_MEMORY_BACKEND=walrus-memory/);
+      // The command that makes the change take effect, for this platform.
+      assert.match(stderr, /launchctl kickstart -k gui\/\$\(id -u\)\/xyz\.noosphere\.relayer/);
+
+      // Serving local-file with credentials on hand is a supported choice, so
+      // the drift is reported and must not change the verdict. Comparing the
+      // two runs states that directly; asserting a bare 0 would only measure
+      // whatever else this fake home fails on.
+      const control = await readyStub(200, {
+        success: true,
+        memory: { ready: true, mode: 'walrus-memory' },
+        queue: { pending: 0, failing: 0, max_attempts: 0, last_error: null },
+      });
+      try {
+        const inUse = await runInstaller('doctor', {
+          ...baseEnv(fakeHome, noosphereHome),
+          NOOSPHERE_TEST_PLATFORM: 'darwin',
+          NOOSPHERE_RELAYER_URL: control.url,
+        });
+        assert.equal(JSON.parse(inUse.stdout).credentials_in_use, true);
+        assert.doesNotMatch(inUse.stderr, /nothing uses them/);
+        assert.equal(code, inUse.code, 'the warning reports drift, it does not fail the run');
+      } finally {
+        await control.close();
+      }
     } finally {
       await stub.close();
       await rm(fakeHome, { recursive: true, force: true });
